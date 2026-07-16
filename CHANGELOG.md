@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`AetherEngine.probeDetectingAtmos(url:/source:)`: opt-in, authoritative E-AC-3 JOC (Dolby Atmos) detection.** FFmpeg only populates `AVCodecContext.profile == AV_PROFILE_EAC3_DDP_ATMOS` (30) after decoding an audio frame, so the lightweight `probe(url:)`/`probe(source:)` path (demux + `avformat_find_stream_info` only, no decoders) cannot reliably report `TrackInfo.isAtmos` for JOC. The new API opens the EAC3 decoder and decodes the minimum packets needed to read the authoritative post-decode profile, bounded by `AtmosDetectionOptions` (packet / byte / wall-clock caps, default 64 packets / 8 MiB / 2 s) with no video decode, no HLS server, and no playback session. Non-target streams are discarded for the pass, so the caps are a budget over the *audio* rather than the interleaved container — otherwise a UHD remux's multi-MB video packets exhaust the byte cap before any audio reaches the decoder and a genuinely Atmos track reports as not-Atmos. It tolerates malformed / no-audio / non-EAC3 sources by degrading to "not confirmed" rather than throwing, and only ever flips a track's `isAtmos` from `false` to `true` (never overwrites an existing `true`). `probe(url:)`/`probe(source:)` themselves are completely unmodified — this is a separate, strictly opt-in entry point for hosts (e.g. a details screen) that need an authoritative Atmos badge, not a flag on the default probe.
+
 ## [5.20.8] - 2026-07-25
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.8))
