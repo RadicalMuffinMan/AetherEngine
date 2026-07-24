@@ -253,9 +253,15 @@ public struct LoadOptions: Sendable, Equatable {
     /// resident (the two are coupled by construction, see `SegmentCache`). Larger values buffer more of
     /// the source up front (network-dropout robustness) at the cost of disk (segments are disk-backed,
     /// mmap reads) and ahead-of-time demux work: 4K HEVC runs ~ 10 MB per segment, so 150 segments can
-    /// occupy ~ 1.5 GB on disk. The engine clamps to 4...150 (below 4 AVPlayer's own ~ 5-7-segment
-    /// prefetch would starve, see `LiveWindowSizing.minSafeSegments`). nil keeps the historical default
-    /// of 10 (~ 40 s). Ignored for `nativeRemoteHLS`, where AVPlayer talks to the remote server directly.
+    /// occupy ~ 1.5 GB on disk. The engine clamps to 4...2700 (below 4 AVPlayer's own ~ 5-7-segment
+    /// prefetch would starve, see `LiveWindowSizing.minSafeSegments`; 2700 ~ 3 h is a sanity bound that
+    /// covers a whole feature film, so a host's "buffer without limit" option can pass `Int.max`).
+    /// Beyond the historical 150 the real bound is bytes, not segments: the prefetch runs until it
+    /// fills the session retention budget (a quarter of the tmp volume's free space, see
+    /// `HLSVideoEngine.vodRetentionBudgetBytes`) and then tracks the playhead, so a large window
+    /// buffers as much of the source as safely fits rather than a fixed count (#207). nil keeps the
+    /// historical default of 10 (~ 40 s). Ignored for `nativeRemoteHLS`, where AVPlayer talks to the
+    /// remote server directly.
     public var forwardBufferSegments: Int?
 
     /// Autostart at load completion. Default `true`: every load path ends in `host.play()` and a

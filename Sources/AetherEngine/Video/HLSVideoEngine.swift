@@ -517,10 +517,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// clamped to a quarter of the tmp volume's available capacity, so a nearly-full device never
     /// trades playback headroom for seek history. Live passes 0 (window-only pruning; the sliding
     /// playlist already dropped everything behind the window, so retention would serve nothing).
-    static func vodRetentionBudgetBytes(volumeAvailableBytes: Int64?) -> Int {
+    /// `capRelaxed` (#207) drops the 2 GiB default for a host that explicitly asked to pre-buffer more
+    /// than the historical window could hold; the quarter-of-free-space clamp, which is what actually
+    /// protects the volume, always applies. Unknown capacity keeps the conservative cap either way.
+    static func vodRetentionBudgetBytes(volumeAvailableBytes: Int64?, capRelaxed: Bool = false) -> Int {
         let cap = 2 << 30
         guard let available = volumeAvailableBytes else { return cap }
-        return min(cap, max(0, Int(available / 4)))
+        let quarterOfFree = max(0, Int(available / 4))
+        return capRelaxed ? quarterOfFree : min(cap, quarterOfFree)
+    }
+
+    /// Largest forward window the default 2 GiB retention budget covers by construction
+    /// (150 segments x ~10 MB for 4K HEVC ~ 1.5 GB), i.e. the old `clampedForwardWindow` ceiling.
+    static let defaultRetentionCapWindowCeiling = 150
+
+    /// #207: a window past `defaultRetentionCapWindowCeiling` is an explicit host opt-in into a
+    /// whole-source prefetch, so the budget follows it up (see `vodRetentionBudgetBytes`).
+    static func retentionCapRelaxed(forwardWindowSegments: Int) -> Bool {
+        forwardWindowSegments > defaultRetentionCapWindowCeiling
     }
 
     // MARK: - Measurement spike: sliding-window prototype (superseded)
@@ -605,12 +619,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// AVPlayer, see `SegmentCache`). From `LoadOptions.forwardBufferSegments`; nil -> historical 10.
     let forwardWindowSegments: Int
 
+    /// Session retention budget resolved in `start()`; also bounds the producer's race-ahead on disk
+    /// (#207, see `PrefetchDiskBudget`). 0 for live (window-only pruning).
+    private var retentionBudgetBytes: Int = 0
+
     /// Clamp for `forwardWindowSegments`: below 4 the window would undercut AVPlayer's own ~5-7-segment
-    /// prefetch and starve it (see `LiveWindowSizing.minSafeSegments`); above 150 (~10 min at 4 s
-    /// segments, ~1.5 GB disk for 4K HEVC) the disk and ahead-of-time demux cost stops being worth it.
-    /// nil keeps the historical default of 10.
+    /// prefetch and starve it (see `LiveWindowSizing.minSafeSegments`). The 2700 ceiling (~3 h at 4 s
+    /// segments) is a sanity bound against accidental values, not a cost bound: it covers a whole
+    /// feature film, so a host's "buffer without limit" option can pass `Int.max` (#207). The disk cost
+    /// is bounded in bytes rather than segments, by the session retention budget the producer parks on
+    /// (`PrefetchDiskBudget`, `vodRetentionBudgetBytes`). nil keeps the historical default of 10.
     static func clampedForwardWindow(_ requested: Int?) -> Int {
-        min(max(requested ?? 10, 4), 150)
+        min(max(requested ?? 10, 4), 2700)
     }
 
     /// When true, `start()` skips the VOD duration guard / cue prewarm / precomputed plan and
@@ -900,15 +920,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
             .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage
         #endif
+        let capRelaxed = Self.retentionCapRelaxed(forwardWindowSegments: forwardWindowSegments)
         let retentionBudget = isLiveSession
             ? 0
-            : Self.vodRetentionBudgetBytes(volumeAvailableBytes: availableBytes)
+            : Self.vodRetentionBudgetBytes(volumeAvailableBytes: availableBytes, capRelaxed: capRelaxed)
+        self.retentionBudgetBytes = retentionBudget
         let segmentCache = SegmentCache(forwardWindow: forwardWindowSegments,
                                         retentionBudgetBytes: retentionBudget)
         self.cache = segmentCache
         EngineLog.emit(
             "[HLSVideoEngine] segment retention budget: \(retentionBudget / (1 << 20)) MiB "
-            + "(volumeAvailable=\(availableBytes.map { "\($0 / (1 << 20)) MiB" } ?? "unknown"))",
+            + "(volumeAvailable=\(availableBytes.map { "\($0 / (1 << 20)) MiB" } ?? "unknown"), "
+            + "forwardWindow=\(forwardWindowSegments) seg"
+            + (capRelaxed ? ", opt-in prefetch: default cap relaxed" : "") + ")",
             category: .session
         )
 
@@ -1719,7 +1743,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             isLive: isLiveSession,
             packedSideAudioStartPts: packedSideAudioStartPts,
             packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
-            bufferAheadSegments: forwardWindowSegments
+            bufferAheadSegments: forwardWindowSegments,
+            prefetchDiskBudgetBytes: retentionBudgetBytes
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
