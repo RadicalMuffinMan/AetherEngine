@@ -408,6 +408,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// never writes past the cache's forward edge (a drift is exactly what stalls AVPlayer).
     private let bufferAheadSegments: Int
 
+    /// #207: byte bound for an opt-in whole-source window. The segment ceiling is only a sanity bound,
+    /// so the race-ahead parks once it has filled the session retention budget (`PrefetchDiskBudget`).
+    /// 0 disables the park (live, and any host that never opted in stays far below its budget anyway).
+    private let prefetchDiskBudgetBytes: Int
+
     /// #65 stall diag: only log a park once it exceeds ~2 segment durations of zero playback progress, so normal
     /// backpressure (releases within one segment) stays silent and a real wedge surfaces its frozen tuple.
     private static let backpressureWedgeLogThresholdSeconds = 12
@@ -416,6 +421,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Set above the log threshold so the diag tuple surfaces first. The host then re-anchors the producer on
     /// AVPlayer's real position; a slow-but-advancing consumer never trips the detector (see BackpressureWedgeDetector).
     private static let backpressureWedgeBreakThresholdSeconds = 24
+
+    /// #207: a disk park is normal steady state for an opt-in prefetch, so it stays quiet until it has
+    /// held long enough to be worth a line, then repeats every 30 s.
+    private static let prefetchDiskParkLogThresholdSeconds = 10
 
     /// #93 retest fast path: break the park once the consumer fetch target AND the rendered clock have
     /// both been frozen this long while the consumer wants to play (rrgomes: the clock is provably flat
@@ -670,9 +679,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         isLive: Bool = false,
         packedSideAudioStartPts: Int64? = nil,
         packedSideAudioFallbackDurationPts: Int64 = 0,
-        bufferAheadSegments: Int = 10
+        bufferAheadSegments: Int = 10,
+        prefetchDiskBudgetBytes: Int = 0
     ) throws {
         self.bufferAheadSegments = bufferAheadSegments
+        self.prefetchDiskBudgetBytes = prefetchDiskBudgetBytes
         self.demuxer = demuxer
         self.sideAudioDemuxer = sideAudioDemuxer
         // Packed side audio: synthesize timestamps from ID3 PRIV anchor; TS-side sessions use real timestamps.
@@ -995,6 +1006,47 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return false
     }
 
+    /// #207 disk park. The segment window is a sanity bound; the real bound on an opt-in whole-source
+    /// prefetch is the session retention budget, which `pruneOutsideWindow` cannot enforce because it
+    /// never evicts the hard window. Parks the pump while the race-ahead has filled that budget AND the
+    /// consumer still has a safe lead, so the footprint tracks the budget instead of the source length.
+    /// Deliberately has no wedge breaker: the park only ever holds with `PrefetchDiskBudget
+    /// .minAheadSegments` of produced content ahead of the consumer, and the extras eviction that
+    /// follows the advancing playhead releases it. Returns true on release, false when stop was
+    /// requested.
+    private func awaitPrefetchDiskBudgetRelease(head: Int, context: String) -> Bool {
+        guard prefetchDiskBudgetBytes > 0 else { return true }
+        var parked = 0
+        var nextLogAt = Self.prefetchDiskParkLogThresholdSeconds
+        while !checkShouldStop() {
+            if cache.awaitPrefetchDiskHeadroom(head: head,
+                                               budgetBytes: prefetchDiskBudgetBytes,
+                                               timeout: 1.0) {
+                if parked >= Self.prefetchDiskParkLogThresholdSeconds {
+                    EngineLog.emit(
+                        "[HLSSegmentProducer] #207 prefetch disk park released (\(context)) head=\(head) "
+                        + "after=\(parked)s cacheTarget=\(cache.targetIndex) "
+                        + "forward=\(cache.forwardBytes / (1 << 20)) MiB",
+                        category: .session
+                    )
+                }
+                return true
+            }
+            parked += 1
+            if parked >= nextLogAt {
+                nextLogAt += 30
+                EngineLog.emit(
+                    "[HLSSegmentProducer] #207 prefetch disk PARK (\(context)) head=\(head) "
+                    + "cacheTarget=\(cache.targetIndex) forward=\(cache.forwardBytes / (1 << 20)) MiB "
+                    + "budget=\(prefetchDiskBudgetBytes / (1 << 20)) MiB parked=\(parked)s "
+                    + "(opt-in prefetch full; resumes as playback advances)",
+                    category: .session
+                )
+            }
+        }
+        return false
+    }
+
     private func markBackpressureWedgeBroken() {
         stateLock.lock()
         _backpressureWedgeBroken = true
@@ -1177,6 +1229,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         currentMuxerSegmentIndex = newIdx
         let backpressureTarget = newIdx - bufferAheadSegments
         if !awaitBackpressureRelease(target: backpressureTarget, head: newIdx, context: "advance") { return nil }
+        if !awaitPrefetchDiskBudgetRelease(head: newIdx, context: "advance") { return nil }
         if checkShouldStop() { return nil }
 
         return muxer
