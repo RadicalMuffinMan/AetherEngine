@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.7] - 2026-07-24
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.7))
+
+### Added
+
+- **`LoadOptions.forwardBufferSegments` now reaches a whole-source pre-buffer, bounded in bytes instead of segments.** The 150-segment ceiling (~10 min at 4 s) silently capped a host's "buffer without limit" option, so a user who deliberately opted into pre-buffering a film for a flaky WAN still stalled after ~10 min of content. The ceiling is now 2700 (~3 h), a sanity bound that covers a feature film, so hosts can pass `Int.max`; the floor (4) and the nil default (10) are unchanged and 150 still passes through, leaving sessions that do not opt in untouched. Raising the constant alone would have been unsafe: the segment cache never evicts its hard window, so the retention budget bounds only the entries outside it and a whole-film window would have put ~18 GB of 4K HEVC on the volume unchecked, where a failed segment write degrades to a stall. Windows past 150 now count as an explicit opt-in, dropping the budget's 2 GiB default cap while keeping the quarter-of-free-space clamp, and the producer parks once its race-ahead has filled that budget, resuming as the playhead advances. An opt-in prefetch therefore buffers as much of the source as safely fits and then tracks playback. Reported with a ceiling-raise patch by fxndxs (#207, follow-up to #102). Covered by `PrefetchDiskBudgetTests` and the updated `ForwardBufferWindowTests`.
+
 ## [5.20.6] - 2026-07-24
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.6))
