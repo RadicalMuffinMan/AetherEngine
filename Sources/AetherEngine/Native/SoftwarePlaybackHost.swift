@@ -1591,14 +1591,18 @@ final class SoftwarePlaybackHost {
                 // buffering the rest of the file. Park on condition while paused (same shape as the video gate).
                 if backgroundAudioOnly() {
                     while !aOut.isReadyForMoreMediaData && !stopRequested() && backgroundAudioOnly() {
-                        if !isPlaying() {
-                            condition.lock()
-                            while !isPlaying() && !stopRequested() {
-                                _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                        autoreleasepool {
+                            if !isPlaying() {
+                                condition.lock()
+                                while !isPlaying() && !stopRequested() {
+                                    autoreleasepool {
+                                        _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                                    }
+                                }
+                                condition.unlock()
+                            } else {
+                                Thread.sleep(forTimeInterval: 0.005)
                             }
-                            condition.unlock()
-                        } else {
-                            Thread.sleep(forTimeInterval: 0.005)
                         }
                     }
                     if stopRequested() {
