@@ -200,6 +200,51 @@ struct RecoverySeekTargetTests {
         #expect(AetherEngine.seekLandedAtTarget(rendered: 742.40, target: 741.78, forward: false))
     }
 
+    @Test("a near backward seek does not count the abandoned playhead's buffer as progress at the target")
+    func targetIslandExcludesOldPlayheadBuffer() {
+        // Backward seek 1200 -> 1185 (15 s, inside the 30 s measurement window) into unbuffered content.
+        // AVPlayer still holds a full forward buffer at the abandoned playhead: 1200 -> 1230.
+        let oldPlayheadBuffer = [(start: 1200.0, end: 1230.0)]
+        // Without the exclusion bound the old buffer sits inside [1184, 1215] and reads as 15 s of
+        // "media served at the target" -- the producer served none of it, and the seek would be granted
+        // an extension while the recovery it needs is deferred.
+        #expect(NativeAVPlayerHost.bufferedSecondsInWindow(
+            ranges: oldPlayheadBuffer, target: 1185.0) == 15.0)
+        // Excluding at the frozen playhead reports the truth: nothing at the target.
+        #expect(NativeAVPlayerHost.bufferedSecondsInWindow(
+            ranges: oldPlayheadBuffer, target: 1185.0, excludeAtOrAbove: 1200.0) == 0.0)
+
+        // A far backward seek was already clear of it via the window alone; the bound must not change that.
+        #expect(NativeAVPlayerHost.bufferedSecondsInWindow(
+            ranges: [(start: 2643.0, end: 2673.0)], target: 741.78, excludeAtOrAbove: 2643.5) == 0.0)
+
+        // Genuine progress at a backward target still counts, up to the exclusion bound.
+        #expect(NativeAVPlayerHost.bufferedSecondsInWindow(
+            ranges: [(start: 1185.0, end: 1191.0), (start: 1200.0, end: 1230.0)],
+            target: 1185.0, excludeAtOrAbove: 1200.0) == 6.0)
+
+        // Forward seek (no bound passed): the disjoint island at the target is what gets measured, and
+        // the pre-seek playhead's own buffer is far below the window rather than inside it.
+        let forwardIsland = NativeAVPlayerHost.bufferedSecondsInWindow(
+            ranges: [(start: 440.0, end: 450.0), (start: 1288.0, end: 1294.4)], target: 1288.14)
+        #expect(abs(forwardIsland - 6.4) < 0.001)
+    }
+
+    @Test("the sink's landing predicate is looser than the loop's, so the loop must not own the finalize")
+    func sinkAndLoopLandingPredicatesDiverge() {
+        // Regression anchor for the `programmaticSeekInFlight` guard in the deadline loop. The two
+        // landing tests deliberately disagree: the $renderedTime sink accepts anything within +-5 s of
+        // the target (symmetric), the loop's poll wants +-0.75 s on the near side. A landing 3 s short
+        // of a forward target therefore finalizes through the sink while the loop still reads "pending".
+        let target = 1288.14
+        let short = target - 3.0
+        #expect(AetherEngine.pendingSeekLanded(rendered: short, target: target))
+        #expect(!AetherEngine.seekLandedAtTarget(rendered: short, target: target, forward: true))
+        // Without the guard the loop would go on to re-anchor the producer and re-seek backward onto an
+        // item the sink has already reported as landed and playing -- the yank `seekLandedAtTarget`
+        // exists to prevent, reintroduced through the back door.
+    }
+
     @Test("a published completion is the authoritative deadline catch-up signal")
     func completionPublicationDecision() {
         #expect(AetherEngine.shouldCatchUpDeadlineLanding(renderedTimePublished: true))

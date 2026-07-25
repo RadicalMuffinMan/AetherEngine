@@ -686,28 +686,61 @@ final class NativeAVPlayerHost {
     /// Seconds of media buffered *at the pending seek target*, i.e. how much the producer has actually
     /// served where the seek is trying to land.
     ///
-    /// Deliberately references no playhead. `bufferedEnd` and `avPlayerBufferAheadSeconds()` are both
+    /// Deliberately measures against no playhead. `bufferedEnd` and `avPlayerBufferAheadSeconds()` are both
     /// measured from `item.currentTime()`, while the deadline loop's frozen position is `renderedTime`;
     /// during a buffering landing those two legitimately diverge (#123 — `currentTime()` is already at the
     /// target while the rendered frame is still the old one), so any figure derived by subtracting one
     /// from the other is meaningless in exactly the case the seek-extension logic has to judge. The target
     /// is an absolute playlist time, so measuring against it needs neither.
     ///
-    /// The window is bounded above so a *backward* seek cannot count the old position's forward buffer:
-    /// only loaded media inside `[target - tolerance, target + window]` counts.
-    func bufferedSecondsAtTarget(_ target: Double, tolerance: Double = 1.0, window: Double = 30.0) -> Double {
+    /// Only loaded media inside `[target - tolerance, target + window]` counts, so a *far* backward seek
+    /// cannot count the old position's forward buffer. That window alone is not enough for a *near* one:
+    /// a backward seek of less than `window` leaves the abandoned playhead's buffer sitting inside it, and
+    /// a still-full old buffer would then read as "the producer is serving the target" and buy the seek an
+    /// extension it has not earned. `excludeAtOrAbove` (the frozen playhead, passed by the deadline loop
+    /// for a backward seek only) cuts the window off below it. Note this is an *exclusion* bound, not a
+    /// measurement origin: the reason this function ignores the playhead is that a figure measured *from*
+    /// one is meaningless while `currentTime()` and `renderedTime` diverge, and clamping a range does not
+    /// reintroduce that.
+    func bufferedSecondsAtTarget(
+        _ target: Double,
+        tolerance: Double = 1.0,
+        window: Double = 30.0,
+        excludeAtOrAbove: Double? = nil
+    ) -> Double {
         guard let item = avPlayer.currentItem else { return 0 }
+        return Self.bufferedSecondsInWindow(
+            ranges: item.loadedTimeRanges.map {
+                let r = $0.timeRangeValue
+                return (r.start.seconds, (r.start + r.duration).seconds)
+            },
+            target: target,
+            tolerance: tolerance,
+            window: window,
+            excludeAtOrAbove: excludeAtOrAbove)
+    }
+
+    /// Pure part of `bufferedSecondsAtTarget(_:tolerance:window:excludeAtOrAbove:)`: total loaded seconds
+    /// intersecting the target window, with the optional exclusion bound applied.
+    nonisolated static func bufferedSecondsInWindow(
+        ranges: [(start: Double, end: Double)],
+        target: Double,
+        tolerance: Double = 1.0,
+        window: Double = 30.0,
+        excludeAtOrAbove: Double? = nil
+    ) -> Double {
         guard target.isFinite else { return 0 }
         let lowerBound = target - tolerance
-        let upperBound = target + window
+        var upperBound = target + window
+        if let excludeAtOrAbove, excludeAtOrAbove.isFinite {
+            upperBound = Swift.min(upperBound, excludeAtOrAbove - tolerance)
+        }
+        guard upperBound > lowerBound else { return 0 }
         var total = 0.0
-        for value in item.loadedTimeRanges {
-            let r = value.timeRangeValue
-            let s = r.start.seconds
-            let e = (r.start + r.duration).seconds
-            guard s.isFinite, e.isFinite, e > s else { continue }
-            let lo = Swift.max(s, lowerBound)
-            let hi = Swift.min(e, upperBound)
+        for range in ranges {
+            guard range.start.isFinite, range.end.isFinite, range.end > range.start else { continue }
+            let lo = Swift.max(range.start, lowerBound)
+            let hi = Swift.min(range.end, upperBound)
             if hi > lo { total += hi - lo }
         }
         return total

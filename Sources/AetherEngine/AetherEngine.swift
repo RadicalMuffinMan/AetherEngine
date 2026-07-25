@@ -2826,6 +2826,41 @@ public final class AetherEngine: ObservableObject {
                     )
                     return
                 }
+                // The `$renderedTime` sink can finalize this very seek underneath the loop, and its
+                // landing predicate is deliberately looser than the loop's: `pendingSeekLanded` accepts
+                // any rendered position within ±5 s of the target (symmetric), while `seekLandedAtTarget`
+                // wants ±0.75 s on the near side. A landing 3 s short of the target therefore settles the
+                // clock and runs `finalizeLateRecoverySeekLanding` (clearing the seek gate, reconciling the
+                // transport) while this loop still reads "not landed" and would go on to re-anchor the
+                // producer and re-issue a backward seek on an item that is already playing — the exact
+                // yank the overshoot rule above exists to prevent. `programmaticSeekInFlight` is the
+                // authoritative "this seek is still ours" latch: it is set before the first host seek and
+                // cleared only by a finalize (here, in the sink, or at the give-up) or `stopInternal`.
+                guard programmaticSeekInFlight else {
+                    EngineLog.emit(
+                        "[AetherEngine] seek finalized elsewhere while the deadline loop waited "
+                        + "(late landing settled through the rendered-time sink); leaving recovery to it",
+                        category: .engine
+                    )
+                    return
+                }
+                // Cancellation of the calling task must not be spent running the recovery at full speed.
+                // `awaitPendingSeekLanding` sleeps on the caller's task, so a cancelled `Task.sleep` throws
+                // instantly and every remaining window returns `false` in microseconds: the loop would burn
+                // its whole budget in one runloop turn and still restart the producer on the way through.
+                // (`host.seek(to:deadlineSeconds:)` runs its deadline on a detached task and is unaffected,
+                // which is why this could not happen before the wait windows existed.) Terminate on the
+                // give-up contract instead: clock held at the target, gate cleared, honest phase reported.
+                guard !Task.isCancelled else {
+                    setProgrammaticSeek(inFlight: false, target: nil)
+                    reconcileNativeSeekTransport(host: host, isStarved: true)
+                    EngineLog.emit(
+                        "[AetherEngine] seek deadline recovery cancelled; holding clock at target "
+                        + "\(String(format: "%.2f", target))s without re-anchoring",
+                        category: .engine
+                    )
+                    return
+                }
                 pendingRecoverySeekDeadlineExpired = true
                 let avpReal = host.renderedTime
                 // The deadline continuation and AVPlayer completion are both MainActor jobs. If the
@@ -2896,7 +2931,12 @@ public final class AetherEngine: ObservableObject {
                 // producer re-anchor) would discard the in-flight download and park the session flapping on
                 // a slow SMB source. Measure what the producer has actually served AT the target instead,
                 // and extend only while that is above the floor AND still growing.
-                let targetIsland = host.bufferedSecondsAtTarget(clockTarget)
+                // A backward seek excludes the abandoned playhead's own buffer explicitly: the measurement
+                // window is only wide enough to keep a FAR backward target clear of it, and a near one
+                // (less than the window back) would otherwise read the old, full buffer as progress at the
+                // target and earn an extension the producer never served.
+                let targetIsland = host.bufferedSecondsAtTarget(
+                    clockTarget, excludeAtOrAbove: seekIsForward ? nil : avpReal)
                 if Self.shouldExtendSeekDeadlineForProgress(
                     targetIslandSeconds: targetIsland,
                     previousIslandSeconds: lastTargetIslandSeconds,
