@@ -10,9 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.8] - 2026-07-25
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.8))
+
 ### Fixed
 
-- **Long-running SoftwarePlaybackHost live sessions no longer leak memory into eventual Jetsam termination.** Each of the four dispatch-block loops (demux, reader, feeder, pumpAudio) now drains its autorelease pool on every iteration instead of only at session end, and inner wait/poll loops (paused condition-wait, back-pressure `isReadyForMoreMediaData` spin, live-edge wait) drain their own pools per spin so that temporaries from `Date` bridging and ObjC runtime calls do not accumulate during extended pauses or renderer back-pressure. The same drain is applied to `AudioPlaybackHost.runDemuxLoop` for parity. Reported and fixed by Nathan Piper (#205).
+- **Long-running SoftwarePlaybackHost live sessions no longer leak memory into eventual Jetsam termination.** Each of the four dispatch-block loops (demux, reader, feeder, pumpAudio) now drains its autorelease pool on every iteration instead of only at session end, and inner wait/poll loops (paused condition-wait, back-pressure `isReadyForMoreMediaData` spin, live-edge wait) drain their own pools per spin so that temporaries from `Date` bridging and ObjC runtime calls do not accumulate during extended pauses or renderer back-pressure. Each loop ran inside a single GCD work item that never returned for the lifetime of the session, so the thread's autorelease pool was never drained and per-iteration temporaries accrued unbounded while every pool the engine tracks itself (packet ring, segment cache, audio FIFO) stayed flat. On an Apple TV 4K (3rd gen) live session the physical footprint climbed from 174 MB to 451 MB over ten minutes before the fix and holds flat at ~163 MB over thirteen minutes after it. The same drain is applied to `AudioPlaybackHost.runDemuxLoop` for parity, where no leak was measurable. Reported, diagnosed and fixed by Nathan Piper (#205).
 
 ## [5.20.7] - 2026-07-24
 
