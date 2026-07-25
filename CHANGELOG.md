@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.1] - 2026-07-25
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.1))
+
 ### Fixed
 
 - **The `deactivatesAudioSessionOnStop` release no longer blocks the teardown.** `setActive(false)` is an XPC round trip to mediaserverd, and on an E-AC-3 / Atmos MAT passthrough route the sink renegotiates the HDMI link inside that call: measured at roughly half a second on an Apple TV 4K feeding an AVR, against a few milliseconds for the same call on a 5.1 route. Called inline from `stopInternal` that was half a second of frozen UI on every stop, because the host's dismiss cannot start until `stop()` returns (5.1 content dismissed instantly, Atmos content hung). The release now runs off the main actor just after the teardown, the same treatment `setCategory` got in #114, guarded by the load generation so a `load()` that follows a stop cancels a release that has not run yet rather than losing its session to it. Hosts that leave the flag at its default `false` are unaffected.
