@@ -6,6 +6,11 @@ import Testing
 /// as Main10. Once HEVC is routed through a master (so tvOS gets codec signaling) that Main10 claim is
 /// checked against the Main hvcC in the init and rejected on device. These cover the pure builder that
 /// derives the RFC 6381 string from the hvcC profile_tier_level, matching GPAC / ffmpeg output.
+///
+/// The compatibility-flags element is the reversed 32-bit general_profile_compatibility_flags, so
+/// fixtures must carry the value a real encoder STORES (Main10 stores 0x20000000 and prints "4"),
+/// never the already-reversed one. 0x60000000 is reversal-invariant and cannot catch a regression
+/// here on its own.
 @Suite("HEVC RFC 6381 codecs string")
 struct HEVCCodecStringTests {
 
@@ -38,10 +43,21 @@ struct HEVCCodecStringTests {
         #expect(HLSVideoEngine.hevcCodecsString(fromConfigRecord: hvcC) == "hvc1.1.6.L93.90")
     }
 
+    /// Dolby's official P8.1 asset (dolby-vision-contents, SolLevante 1080p24): the exact 13-byte
+    /// hvcC header a real Main10 encoder writes. MP4Box reports `hev1.2.4.L153.B0` for it and Dolby's
+    /// own reference manifest declares `hvc1.2.4.L150.b0` for the same content family, so the stored
+    /// 0x20000000 must print as compatibility flags "4".
+    @Test("Real Dolby P8.1 Main10 hvcC -> hvc1.2.4.L153.b0 (matches MP4Box)")
+    func dolbyMain10Asset() {
+        let hvcC: [UInt8] = [0x01, 0x02, 0x20, 0x00, 0x00, 0x00, 0xb0,
+                             0x00, 0x00, 0x00, 0x00, 0x00, 0x99]
+        #expect(HLSVideoEngine.hevcCodecsString(fromConfigRecord: hvcC) == "hvc1.2.4.L153.b0")
+    }
+
     @Test("10-bit Main10, no constraint flags -> hvc1.2.4.L120")
     func main10NoConstraints() {
         let hvcC = Self.hvcCHeader(
-            profileIDC: 2, compat: 0x40000000, constraints: [0, 0, 0, 0, 0, 0], level: 120)
+            profileIDC: 2, compat: 0x20000000, constraints: [0, 0, 0, 0, 0, 0], level: 120)
         #expect(HLSVideoEngine.hevcCodecsString(fromConfigRecord: hvcC) == "hvc1.2.4.L120")
     }
 
@@ -69,12 +85,14 @@ struct HEVCCodecStringTests {
         #expect(HLSVideoEngine.hevcCodecsString(fromConfigRecord: hvcC) == "hvc1.1.6.L93.90.40")
     }
 
-    @Test("Compatibility flags with no trailing zeros are printed in full")
-    func compatNoTrailingZeros() {
+    /// general_profile_compatibility_flag[31] set: after the reversal it becomes the most
+    /// significant bit, so the stored 0x60000001 prints as 0x80000006.
+    @Test("Low-order stored flag reverses into the high-order hex digit")
+    func compatReversalKeepsAllBits() {
         let hvcC = Self.hvcCHeader(
             profileIDC: 1, compat: 0x60000001,
             constraints: [0, 0, 0, 0, 0, 0], level: 93)
-        #expect(HLSVideoEngine.hevcCodecsString(fromConfigRecord: hvcC) == "hvc1.1.60000001.L93")
+        #expect(HLSVideoEngine.hevcCodecsString(fromConfigRecord: hvcC) == "hvc1.1.80000006.L93")
     }
 
     @Test("Custom sample entry (dvh1) is honored")
