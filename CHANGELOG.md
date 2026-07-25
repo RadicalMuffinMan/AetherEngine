@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.22.1] - 2026-07-25
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.22.1))
+
 ### Fixed
 
 - **`probeDetectingAtmos` now confirms JOC on sources whose audio does not sit at the head of the container.** The pass sets `AVDISCARD_ALL` on every non-target stream so its caps budget the audio rather than the interleave, but it ran straight after the base probe, and `avformat_find_stream_info` leaves its own packets queued inside libavformat. Those come back from `av_read_frame` regardless of the discard hint, so on a remux whose audio starts well past the head the foreign-packet fuse was spent on that queue before a single audio byte arrived and a genuinely Atmos track reported as not-Atmos. The queue is now discarded with a bounded seek to the start before the decode pass, so the discard takes effect from the first read. Measured on Dolby's own Online Delivery Kit JOC signal remuxed with its audio 70 s in: not confirmed before, confirmed off the first audio packet in 3 ms after. A source that cannot seek is no worse off than before. Covered by `AtmosConfirmationJOCTests`, which skips unless the local fixtures are present.
