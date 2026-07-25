@@ -74,6 +74,132 @@ struct RecoverySeekTargetTests {
         ))
     }
 
+    @Test("an extension needs a growing island at the target, budget, and producer coverage")
+    func extendSeekDeadlineDecision() {
+        let floor = 1.0
+        let maxExt = 4
+        // DV/SMB slow forward seek: 4s already served AT the target, no earlier sample to compare
+        // against (first extension) -> extend instead of running the harmful recovery.
+        #expect(AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 4.0, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // Still filling on a later extension (4.0 -> 6.4) -> keep extending.
+        #expect(AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 6.4, previousIslandSeconds: 4.0, extensionsUsed: 3,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // STATIC island: the producer served 4s and then died. Presence alone must not buy the rest of
+        // the budget -- without the growth rule this waits 16s on a dead producer.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 4.0, previousIslandSeconds: 4.0, extensionsUsed: 1,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // Growth below the epsilon is noise, not progress.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 4.1, previousIslandSeconds: 4.0, extensionsUsed: 1,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // AE#141 veto: a target the producer's march cannot reach must never be extended, however
+        // healthy the buffer at the target looks -- it rides serve timeouts into item death.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 6.4, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: true))
+        // True wedge: nothing served at the target -> do NOT extend, fall through to recovery.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 0.0, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // Sub-floor sliver is not convincing progress.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 0.5, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // Budget exhausted even with a healthy, growing island -> stop, bound the total wait.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 9.0, previousIslandSeconds: 6.4, extensionsUsed: 4,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+        // Exactly at the floor, first sample, counts as progress.
+        #expect(AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 1.0, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: maxExt, islandFloor: floor, targetBeyondProducerCoverage: false))
+    }
+
+    @Test("the device-trace forward seek extends while the target island fills, then lands not wedges")
+    @MainActor
+    func deviceTraceForwardSeekPrefersExtension() {
+        // Reconstruct the failing repro at deadline (build 2017 trace): rendered==buffered==old playhead,
+        // so the contiguous-only metric reads starved, but the producer was serving the TARGET, the island
+        // there growing 0.55 -> 4.0 -> 6.4s. The engine must EXTEND, not run the harmful recovery.
+        #expect(AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 4.0, previousIslandSeconds: 0.55, extensionsUsed: 1,
+            maxExtensions: AetherEngine.nativeSeekMaxDeadlineExtensions,
+            islandFloor: AetherEngine.nativeSeekProgressIslandFloorSeconds,
+            targetBeyondProducerCoverage: false))
+        #expect(AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 6.4, previousIslandSeconds: 4.0, extensionsUsed: 2,
+            maxExtensions: AetherEngine.nativeSeekMaxDeadlineExtensions,
+            islandFloor: AetherEngine.nativeSeekProgressIslandFloorSeconds,
+            targetBeyondProducerCoverage: false))
+
+        // Contrast: a genuinely wedged seek (producer never served the target) must NOT be kept alive by
+        // endless extensions — it falls through to recovery + re-anchor.
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 0.0, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: AetherEngine.nativeSeekMaxDeadlineExtensions,
+            islandFloor: AetherEngine.nativeSeekProgressIslandFloorSeconds,
+            targetBeyondProducerCoverage: false))
+    }
+
+    @Test("the device-trace backward-into-unbuffered seek does not extend and re-anchors, holding at target")
+    @MainActor
+    func deviceTraceBackwardSeekReanchorsAndHoldsAtTarget() {
+        // Reconstruct SEEK 3 (c5f3cd5 trace): BACK 2643.20 -> 741.78 into unbuffered content, at deadline
+        // rendered==buffered==2643.50 (AVPlayer drained to its buffer edge at the old position). Nothing is
+        // buffered at the backward target, so the island there is 0 and the engine must NOT extend; it
+        // falls through to recovery. (The old-position buffer cannot masquerade as the island: the
+        // measurement window is bounded above at target + window, far below 2643.)
+        #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
+            targetIslandSeconds: 0.0, previousIslandSeconds: nil, extensionsUsed: 0,
+            maxExtensions: AetherEngine.nativeSeekMaxDeadlineExtensions,
+            islandFloor: AetherEngine.nativeSeekProgressIslandFloorSeconds,
+            targetBeyondProducerCoverage: false))
+
+        // buffered == rendered => no forward buffer => genuinely starved (unlike the forward-island case
+        // where the metric misreads a slow-but-working seek as starved).
+        let starved = seekIsWedged(renderedTime: 2643.50, bufferedEnd: 2643.50)
+        #expect(starved)
+        // A starved deadline MUST re-anchor the producer regardless of the producer-coverage read
+        // (AE#141), so the segments the target needs get produced.
+        #expect(AetherEngine.shouldReanchorProducerAfterSeekDeadline(
+            isStarved: starved, targetBeyondProducerCoverage: false))
+
+        // The recovery re-anchor drives the producer to the TARGET (not the frozen old position), so the
+        // held clock and the producer converge on 741.78 rather than reverting to 2643.50.
+        let anchor = AetherEngine.recoveryAnchorPosition(
+            frozenPosition: 2643.50, pendingSeekTarget: 741.78, currentRendered: 2643.50)
+        #expect(anchor == 741.78)
+    }
+
+    @Test("a forward overshoot landing is accepted, never re-seeked backward")
+    func forwardOvershootLandingAccepted() {
+        // Device SEEK (83e705e trace, target=1288.14): AVPlayer landed and kept PLAYING past the
+        // zero-tolerance target, so at the deadline rendered=1289.70 (1.56s past target). The old
+        // abs(rendered-target) <= 0.75 rejected this as "not landed" and re-seeked backward to 1288.14,
+        // yanking a playing playhead back and re-stalling it. A forward overshoot must read as LANDED.
+        #expect(AetherEngine.seekLandedAtTarget(rendered: 1289.70, target: 1288.14, forward: true))
+        // A generous overshoot (a full GOP past) is still landed for a forward seek.
+        #expect(AetherEngine.seekLandedAtTarget(rendered: 1293.00, target: 1288.14, forward: true))
+        // Exact / near-exact landing is landed either direction.
+        #expect(AetherEngine.seekLandedAtTarget(rendered: 1288.14, target: 1288.14, forward: true))
+
+        // Pre-landing: a forward seek's playhead is pinned far BELOW the target (old position). Must NOT
+        // read as landed, so the extend/recovery logic still runs.
+        #expect(!AetherEngine.seekLandedAtTarget(rendered: 445.30, target: 1288.14, forward: true))
+
+        // Backward seek: the pinned pre-seek playhead sits far ABOVE the target (old position 2643.50 vs
+        // target 741.78) and must NOT be mistaken for a landing (that was the false-positive risk of a
+        // one-sided "rendered >= target" rule).
+        #expect(!AetherEngine.seekLandedAtTarget(rendered: 2643.50, target: 741.78, forward: false))
+        // A backward seek that reached the target (or a hair past it, playing forward) is landed.
+        #expect(AetherEngine.seekLandedAtTarget(rendered: 741.78, target: 741.78, forward: false))
+        #expect(AetherEngine.seekLandedAtTarget(rendered: 742.40, target: 741.78, forward: false))
+    }
+
     @Test("a published completion is the authoritative deadline catch-up signal")
     func completionPublicationDecision() {
         #expect(AetherEngine.shouldCatchUpDeadlineLanding(renderedTimePublished: true))

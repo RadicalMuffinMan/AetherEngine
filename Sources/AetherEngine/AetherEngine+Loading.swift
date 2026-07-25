@@ -778,12 +778,17 @@ extension AetherEngine {
                 // reaches its neighbourhood) or goes stale (organic progress far from it, i.e.
                 // AVPlayer abandoned the seek and playback runs elsewhere).
                 if let pending = self.pendingRecoverySeekClockTarget {
-                    if !self.settleRecoveryClockIfRenderedTargetLanded(
+                    if self.settleRecoveryClockIfRenderedTargetLanded(
                         rendered: value,
                         shift: shift,
                         completionRenderedTimePublished:
                             self.nativeHost?.latestSeekRenderedTimePublished ?? false
                     ) {
+                        // A late landing settled the clock onto the target; if the deadline loop held the
+                        // clock at the target and returned without finalizing (slow-source spinner path),
+                        // leave `.seeking` now that the frame is presented.
+                        self.finalizeLateRecoverySeekLanding()
+                    } else {
                         let prev = self.lastRenderedForPendingSeek
                         if value > prev, value - prev < 1.0 {
                             self.pendingSeekProgressAccum += (value - prev)
@@ -795,6 +800,14 @@ extension AetherEngine {
                                     category: .engine
                                 )
                                 self.setPendingRecoverySeekTarget(nil)
+                                // Deliberately does NOT finalize the programmatic seek here. This branch
+                                // only proves "organic playback moved on", which is also true while a seek
+                                // is legitimately still suspended in its initial budget or an extension
+                                // window (a slow source drains the old-position buffer for seconds while
+                                // the seek is pending). Clearing `programmaticSeekInFlight` from here would
+                                // drop `isSeeking` and the host's spinner mid-recovery, and the loop's own
+                                // idempotent clear means it would never come back. The deadline loop owns
+                                // that state on every one of its exits, including the parked give-up.
                             }
                         }
                         self.lastRenderedForPendingSeek = value
