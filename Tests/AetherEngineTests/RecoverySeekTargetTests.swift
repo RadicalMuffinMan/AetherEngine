@@ -137,7 +137,7 @@ struct RecoverySeekTargetTests {
             targetBeyondProducerCoverage: false))
 
         // Contrast: a genuinely wedged seek (producer never served the target) must NOT be kept alive by
-        // endless extensions — it falls through to recovery + re-anchor.
+        // endless extensions, it falls through to recovery + re-anchor.
         #expect(!AetherEngine.shouldExtendSeekDeadlineForProgress(
             targetIslandSeconds: 0.0, previousIslandSeconds: nil, extensionsUsed: 0,
             maxExtensions: AetherEngine.nativeSeekMaxDeadlineExtensions,

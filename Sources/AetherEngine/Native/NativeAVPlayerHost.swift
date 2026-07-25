@@ -688,7 +688,7 @@ final class NativeAVPlayerHost {
     ///
     /// Deliberately measures against no playhead. `bufferedEnd` and `avPlayerBufferAheadSeconds()` are both
     /// measured from `item.currentTime()`, while the deadline loop's frozen position is `renderedTime`;
-    /// during a buffering landing those two legitimately diverge (#123 — `currentTime()` is already at the
+    /// during a buffering landing those two legitimately diverge (#123: `currentTime()` is already at the
     /// target while the rendered frame is still the old one), so any figure derived by subtracting one
     /// from the other is meaningless in exactly the case the seek-extension logic has to judge. The target
     /// is an absolute playlist time, so measuring against it needs neither.
@@ -839,7 +839,7 @@ final class NativeAVPlayerHost {
     /// so it is still progressing toward `target` and its completion (which settles `currentTime` for the
     /// unchanged generation) can still fire; the engine gave up too early on a slow source. Re-issuing the
     /// seek would bump the generation and could make AVPlayer re-fetch the target segment it has already
-    /// partly loaded — the opposite of what a starved SMB source needs. This just re-arms the wait and
+    /// partly loaded, the opposite of what a starved SMB source needs. This just re-arms the wait and
     /// re-gates the periodic observer (which the deadline un-gated) so the optimistic clock is not walked
     /// back to the pre-seek position while the target buffers.
     ///

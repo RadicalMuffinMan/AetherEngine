@@ -697,7 +697,7 @@ public final class AetherEngine: ObservableObject {
 
     /// DV/SMB forward-seek revert fix: when the first budget expires but the producer is demonstrably
     /// serving the target region (buffer at the seek target is above the floor and still growing), the
-    /// seek is slow — not wedged — and the recovery (clock revert + producer re-anchor) would destroy
+    /// seek is slow, not wedged, and the recovery (clock revert + producer re-anchor) would destroy
     /// in-flight download progress and park the session. Grant a bounded number of shorter extension
     /// windows so a slow SMB / Dolby-Vision source can land, before falling back to recovery.
     static let nativeSeekMaxDeadlineExtensions: Int = 4
@@ -712,7 +712,7 @@ public final class AetherEngine: ObservableObject {
     /// This much media buffered AT the seek target proves the producer is serving it: extend rather than
     /// recover. `bufferedEnd`/`seekIsWedged` are blind to it (they only span the pinned pre-seek
     /// playhead); `NativeAVPlayerHost.bufferedSecondsAtTarget(_:)` measures it directly against the
-    /// target, needing no playhead reference. Presence alone is not enough — see
+    /// target, needing no playhead reference. Presence alone is not enough, see
     /// `shouldExtendSeekDeadlineForProgress`, which also requires the figure to be growing.
     static let nativeSeekProgressIslandFloorSeconds: Double = 1.0
 
@@ -2832,7 +2832,7 @@ public final class AetherEngine: ObservableObject {
                 // wants ±0.75 s on the near side. A landing 3 s short of the target therefore settles the
                 // clock and runs `finalizeLateRecoverySeekLanding` (clearing the seek gate, reconciling the
                 // transport) while this loop still reads "not landed" and would go on to re-anchor the
-                // producer and re-issue a backward seek on an item that is already playing — the exact
+                // producer and re-issue a backward seek on an item that is already playing, the exact
                 // yank the overshoot rule above exists to prevent. `programmaticSeekInFlight` is the
                 // authoritative "this seek is still ours" latch: it is set before the first host seek and
                 // cleared only by a finalize (here, in the sink, or at the give-up) or `stopInternal`.
@@ -2926,7 +2926,7 @@ public final class AetherEngine: ObservableObject {
                 }()
                 // DV/SMB forward-seek revert fix: `seekIsWedged`/`bufferedEnd` only measure the buffer
                 // contiguous with AVPlayer's pre-seek playhead, which stays pinned during a pending
-                // zero-tolerance forward seek — so a slow-but-working forward seek (the producer IS
+                // zero-tolerance forward seek, so a slow-but-working forward seek (the producer IS
                 // serving the target) reads identically to a true wedge. Reconciling here (clock revert +
                 // producer re-anchor) would discard the in-flight download and park the session flapping on
                 // a slow SMB source. Measure what the producer has actually served AT the target instead,
@@ -2951,7 +2951,7 @@ public final class AetherEngine: ObservableObject {
                     // the deadline, un-gating the periodic observer, which could otherwise stick the clock
                     // at the old playhead while the island fills. `awaitPendingSeekLanding` re-gates it and
                     // waits on the SAME in-flight seek (no new avPlayer.seek, so the loaded target island is
-                    // not flushed); the producer is deliberately NOT restarted — together that preserves the
+                    // not flushed); the producer is deliberately NOT restarted, and together that preserves the
                     // in-flight target download that the old re-anchor discarded (the ~40s device stall).
                     nativeClockSeconds = clockTarget
                     clock.currentTime = target
@@ -3158,9 +3158,9 @@ public final class AetherEngine: ObservableObject {
     /// - The island is still **growing** (`targetIslandSeconds > previousIslandSeconds + growthEpsilon`),
     ///   except for the first extension, which has no earlier sample to compare against. Presence alone is
     ///   a single observation and cannot distinguish a producer that is still filling from one that
-    ///   buffered a few seconds and then died — the latter would otherwise buy the full 16 s of extensions
+    ///   buffered a few seconds and then died, and the latter would otherwise buy the full 16 s of extensions
     ///   while nothing happens.
-    /// - `targetBeyondProducerCoverage == false`: AE#141 — a target the producer's march cannot reach
+    /// - `targetBeyondProducerCoverage == false`: AE#141: a target the producer's march cannot reach
     ///   rides serve timeouts into item death if left to "land late", so it must never be granted an
     ///   extension no matter how healthy the buffer looks.
     ///
@@ -3194,8 +3194,8 @@ public final class AetherEngine: ObservableObject {
     /// item keeps advancing in the seek direction while the deadline continuation settles, so by the time
     /// the engine samples `rendered` a forward seek can sit a GOP PAST the target and a backward seek a
     /// hair past it (downward). Accept a landing at/past the target in the seek direction; keep the
-    /// opposite bound tight (`tolerance`) so the pinned pre-seek playhead — which sits far BELOW the target
-    /// for a forward seek and far ABOVE it for a backward seek until the seek completes — is never mistaken
+    /// opposite bound tight (`tolerance`) so the pinned pre-seek playhead (which sits far BELOW the target
+    /// for a forward seek and far ABOVE it for a backward seek until the seek completes) is never mistaken
     /// for a landing. Prevents the fallthrough from issuing a backward exact re-seek to "correct" a forward
     /// overshoot (which drags a playing playhead back and re-stalls it).
     nonisolated static func seekLandedAtTarget(
