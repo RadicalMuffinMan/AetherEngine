@@ -255,6 +255,7 @@ A non-live remote `m3u8` handed to the default (loopback) path reroutes onto thi
 <!-- used-by:start -->
 - [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV.
 - [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer): native macOS media player.
+- [NowSeen](https://discord.com/invite/7AFh3Hy8p4): IPTV / Manifest app for tvOS.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed.
