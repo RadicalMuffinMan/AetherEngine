@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`LoadOptions.confirmAtmos`: the session confirms E-AC-3 JOC on its own audio tracks, so `TrackInfo.isAtmos` is an answer rather than a guess.** 5.21.0 made an authoritative check available as `probeDetectingAtmos`, but only as a static one-shot probe: a host wanting an honest Atmos badge during playback had to open the source a second time itself and patch its own copy of the track list. With the flag set, the engine runs the same bounded decode pass (`AtmosDetectionOptions` caps, one E-AC-3 track at a time, on a second handle to the source) and republishes `audioTracks` as tracks confirm, so every surface bound to the published list lights up on its own. It starts only after the session is up and runs at utility priority, so the first frame never waits on it, and it opens at most one extra handle at a time. Every E-AC-3 track is scanned rather than only the playing one, so a track picker stays consistent when the user switches. Confirmations are held in a session ledger keyed to the loaded source and re-applied after every `audioTracks` republish, because the native demuxed-audio path and a disc title switch both swap the whole list and would otherwise drop the flag on the next audio switch. Skipped for live sources, where a second connection to the origin can cost a tuner and the pass would start at the live edge rather than at the playhead, and for forward-only custom readers, which cannot hand out a second cursor. Default `false`: a session that does not opt in is unchanged. Covered by `AtmosConfirmationTests`.
+
 ## [5.21.0] - 2026-07-25
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.21.0))

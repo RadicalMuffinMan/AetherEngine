@@ -886,6 +886,15 @@ public final class AetherEngine: ObservableObject {
     var subtitleOCRCursors: [Int: SubtitleDrainCursor] = [:]
     var subtitleOCRPendingStates: [Int: SubtitleOCRPendingState] = [:]
 
+    /// #214 follow-up: `LoadOptions.confirmAtmos` state. The ledger is the session's authority on which
+    /// stream indices carry JOC, because a mid-session audio switch republishes `audioTracks` and would
+    /// otherwise drop a confirmed flag. It is keyed to the source it was gathered from, so it invalidates
+    /// itself on a new item and survives a session-preserving reload of the same one.
+    var atmosConfirmationTask: Task<Void, Never>?
+    var atmosConfirmationDemuxer: Demuxer?
+    var confirmedAtmosStreamIndices: Set<Int32> = []
+    var confirmedAtmosSource: URL?
+
     /// AE#154: publishes the remote-HLS bypass item's legible options as `subtitleTracks`.
     /// Session-scoped; cancelled on load()/stop() alongside the other subtitle tasks.
     var remoteHLSSubtitleDiscoveryTask: Task<Void, Never>? = nil
@@ -2033,6 +2042,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
         audioTracks = probedAudioTracks
+        applyConfirmedAtmos()
         subtitleTracks = probedSubtitleTracks
         // #88: load-declared external tracks join the list now, BEFORE preferred-language selection
         // and the native rendition table are built from it.
@@ -2151,6 +2161,7 @@ public final class AetherEngine: ObservableObject {
                 state = .error("Failed to load: \(error.localizedDescription)")
                 throw error
             }
+            startAtmosConfirmation()
             return sourceProbe
         }
 
@@ -2471,6 +2482,8 @@ public final class AetherEngine: ObservableObject {
         // video path (the audio-only branch returns earlier and renders no subtitles); a no-op when the
         // preference list is empty, no track matches, or the host already activated one.
         applyPreferredSubtitleSelection(startAnchor: startPosition, sourceDuration: sourceProbe?.durationSeconds)
+        // #214 follow-up: opt-in JOC confirmation runs behind the session, never in front of the first frame.
+        startAtmosConfirmation()
         return sourceProbe
     }
 
@@ -3253,6 +3266,10 @@ public final class AetherEngine: ObservableObject {
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
         audioTapController?.teardown()
         audioTapController = nil
+        // #214 follow-up: the confirmation ledger is NOT cleared here. It is keyed to loadedURL and a
+        // session-preserving reload runs through stopInternal too; clearing would re-pay the pass on
+        // every audio switch. A new item invalidates it in startAtmosConfirmation().
+        cancelAtmosConfirmation()
         // markClosed() aborts a probe blocked in avformat_open_input/find_stream_info (lock-free, idempotent).
         inFlightProbeDemuxer?.markClosed()
         liveTelemetrySampler?.stop()

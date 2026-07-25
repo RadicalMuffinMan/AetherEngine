@@ -17,8 +17,9 @@ struct AtmosDetectionProbeIntegrationTests {
     // MARK: - Fixtures (synthetic silence, non-Atmos, ffmpeg-generated)
 
     /// 0.1s stereo silence, EAC3 @ 64kbps, plain (non-JOC) -- `ffprobe` reports `profile=unknown` pre-decode,
-    /// matching the exact ambiguity this feature exists to resolve.
-    private static let eac3PlainBase64 = """
+    /// matching the exact ambiguity this feature exists to resolve. Internal rather than private because
+    /// `AtmosConfirmationTests` opens the same bytes from a file URL to exercise the session pass's open profile.
+    static let eac3PlainBase64 = """
     AAAAIGZ0eXBpc29tAAACAGlzb21kYnkxaXNvMm1wNDEAAAKwbW9vdgAAAGxtdmhkAAAAAAAAAAAA
     AAAAAAAD6AAAAF8AAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAA
     AABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAdp0cmFrAAAAXHRraGQAAAADAAAA

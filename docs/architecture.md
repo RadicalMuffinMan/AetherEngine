@@ -143,6 +143,7 @@ Sources/AetherEngine/
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)
 ├── FFmpegErrorConstants.swift               AVERROR sentinels Swift can't import from the C macros
 ├── Audio/
+│   ├── AtmosConfirmationWorker.swift        LoadOptions.confirmAtmos: runs the bounded JOC pass on a side demuxer after the session is up, one E-AC-3 track at a time, and republishes audioTracks via a source-keyed ledger (#214)
 │   ├── AtmosDetectionProbe.swift            Opt-in bounded E-AC-3 JOC decode pass behind probeDetectingAtmos: AtmosDetectionOptions caps, one decoder, no playback session (#214)
 │   ├── AudioAVPlayerHost.swift              Audio-only path: bare AVPlayer host for whitelisted codecs, owns the persistent per-player MPNowPlayingSession (tvOS / iOS)
 │   ├── AudioBridge.swift                    Native path: decode + re-encode per `AudioBridgeMode` (EAC3 5.1 default or lossless FLAC opt-in) for source codecs that can't stream-copy into fMP4
