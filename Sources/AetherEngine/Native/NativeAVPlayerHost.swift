@@ -683,6 +683,36 @@ final class NativeAVPlayerHost {
         return end
     }
 
+    /// Seconds of media buffered *at the pending seek target*, i.e. how much the producer has actually
+    /// served where the seek is trying to land.
+    ///
+    /// Deliberately references no playhead. `bufferedEnd` and `avPlayerBufferAheadSeconds()` are both
+    /// measured from `item.currentTime()`, while the deadline loop's frozen position is `renderedTime`;
+    /// during a buffering landing those two legitimately diverge (#123 — `currentTime()` is already at the
+    /// target while the rendered frame is still the old one), so any figure derived by subtracting one
+    /// from the other is meaningless in exactly the case the seek-extension logic has to judge. The target
+    /// is an absolute playlist time, so measuring against it needs neither.
+    ///
+    /// The window is bounded above so a *backward* seek cannot count the old position's forward buffer:
+    /// only loaded media inside `[target - tolerance, target + window]` counts.
+    func bufferedSecondsAtTarget(_ target: Double, tolerance: Double = 1.0, window: Double = 30.0) -> Double {
+        guard let item = avPlayer.currentItem else { return 0 }
+        guard target.isFinite else { return 0 }
+        let lowerBound = target - tolerance
+        let upperBound = target + window
+        var total = 0.0
+        for value in item.loadedTimeRanges {
+            let r = value.timeRangeValue
+            let s = r.start.seconds
+            let e = (r.start + r.duration).seconds
+            guard s.isFinite, e.isFinite, e > s else { continue }
+            let lo = Swift.max(s, lowerBound)
+            let hi = Swift.min(e, upperBound)
+            if hi > lo { total += hi - lo }
+        }
+        return total
+    }
+
     func play() {
         // Set intent before play() so readyToPlay observer can re-assert if the replaceCurrentItem swap swallowed it.
         playIntent = true
@@ -769,6 +799,84 @@ final class NativeAVPlayerHost {
                 }
             }
         }
+    }
+
+    /// DV/SMB forward-seek revert fix: wait longer for the seek already in flight WITHOUT issuing a
+    /// new `avPlayer.seek`. A deadline expiry does not cancel the underlying seek (see `seek(to:deadlineSeconds:)`),
+    /// so it is still progressing toward `target` and its completion (which settles `currentTime` for the
+    /// unchanged generation) can still fire; the engine gave up too early on a slow source. Re-issuing the
+    /// seek would bump the generation and could make AVPlayer re-fetch the target segment it has already
+    /// partly loaded — the opposite of what a starved SMB source needs. This just re-arms the wait and
+    /// re-gates the periodic observer (which the deadline un-gated) so the optimistic clock is not walked
+    /// back to the pre-seek position while the target buffers.
+    ///
+    /// - Returns: `true` once the pending seek has landed (AVPlayer's `currentTime` reached `target`),
+    ///   `false` if it is still pending after `deadlineSeconds` or a newer seek superseded it.
+    func awaitPendingSeekLanding(target seconds: Double, deadlineSeconds: Double, forward: Bool) async -> Bool {
+        // Re-gate: the prior deadline cleared seekInFlight, so the periodic observer would otherwise
+        // publish AVPlayer's still-pre-seek position and un-latch the optimistic clock. The original
+        // seek's completion clears this again when it lands.
+        let gen = seekGeneration
+        // We latch the gate ourselves below so the periodic observer keeps `currentTime` pinned while we
+        // wait. Note the gate is deliberately NOT used as a landing signal: see below.
+        if !seekInFlight { seekInFlight = true }
+        // Poll for landing rather than sleeping the whole window: on a slow extend-path seek AVPlayer can
+        // resume playing partway through the wait, and finalize (which clears the consumer's loading
+        // spinner) must not lag that edge by a full ~4s tick -- that left the spinner up over already-
+        // playing video (device: timeControlStatus=playing at 25360.989 but seek END at 25363.415).
+        // Edge-detect the landing at ~AVPlayer's own 100ms observer cadence so finalize tracks it.
+        //
+        // Poll the published `renderedTime` rather than `avPlayer.currentTime()`: the periodic observer
+        // writes it every 100ms BEFORE the seekInFlight gate, so it is both current and free, whereas
+        // currentTime() is a synchronous XPC read (#134) that this loop would perform ~360 times in a
+        // worst-case seek, on the main actor.
+        let pollInterval = 0.1
+        // Monotonic: a wall-clock step (NTP, user change) must not stretch or truncate the budget.
+        let deadline = DispatchTime.now() + .milliseconds(Int(deadlineSeconds * 1000))
+        while DispatchTime.now() < deadline {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            } catch {
+                // Cancelled. Swallowing this (try?) would turn the loop into an unthrottled MainActor spin
+                // -- Task.sleep then throws instantly every pass -- for the rest of the window.
+                releaseSeekGate()
+                return false
+            }
+            // A newer seek arrived while we waited: let it own the final state.
+            guard gen == seekGeneration else { return false }
+            // Require POSITION evidence. "The completion ran" is deliberately not accepted as a landing:
+            // `reengageStalledConsumer` calls `item.cancelPendingSeeks()` without bumping seekGeneration,
+            // which completes the in-flight seek with finished == false and clears seekInFlight for this
+            // same generation. Treating that as a landing would report the target as reached, retire
+            // `pendingRecoverySeekClockTarget`, and silently lose the seek (#93) while AVPlayer sits
+            // wherever the nudge left it. A genuine landing moves the rendered frame to the target, so
+            // nothing is lost by insisting on it.
+            //
+            // A zero-tolerance seek lands AT the target and a playing item then advances in the seek
+            // direction, so a forward seek can render PAST it. Accept an overshoot in the seek direction;
+            // the pinned pre-seek playhead sits far on the opposite side and is never mistaken for a
+            // landing. This stops a forward overshoot from reading as "still pending" and triggering a
+            // backward-yank re-seek on an already-playing item.
+            let rendered = renderedTime
+            if AetherEngine.seekLandedAtTarget(rendered: rendered, target: seconds, forward: forward) {
+                // The completion may not have run its MainActor job yet; settle so the observer stays gated
+                // until the engine finalizes and mirror what the completion would publish.
+                seekInFlight = false
+                if rendered.isFinite { currentTime = rendered }
+                return true
+            }
+        }
+        // Timed out. Restore the gate to the state the deadline left it in: leaving it latched would keep
+        // the periodic observer from publishing `currentTime`, freezing `host.$currentTime` -- the sole
+        // driver of the engine's clock tick -- for the rest of this generation. On the give-up path this
+        // caller returns immediately afterwards, so nothing else would ever clear it.
+        releaseSeekGate()
+        return false
+    }
+
+    /// Un-gate the periodic observer without asserting a landing (cancellation / give-up paths).
+    private func releaseSeekGate() {
+        seekInFlight = false
     }
 
     func setRate(_ value: Float) {
