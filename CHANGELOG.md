@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Long-running SoftwarePlaybackHost live sessions no longer leak memory into eventual Jetsam termination.** Each of the four dispatch-block loops (demux, reader, feeder, pumpAudio) now drains its autorelease pool on every iteration instead of only at session end, and inner wait/poll loops (paused condition-wait, back-pressure `isReadyForMoreMediaData` spin, live-edge wait) drain their own pools per spin so that temporaries from `Date` bridging and ObjC runtime calls do not accumulate during extended pauses or renderer back-pressure. The same drain is applied to `AudioPlaybackHost.runDemuxLoop` for parity. Reported and fixed by Nathan Piper (#205).
+
 ## [5.20.7] - 2026-07-24
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.7))
