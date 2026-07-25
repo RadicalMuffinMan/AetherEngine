@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.3] - 2026-07-25
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.3))
+
+### Fixed
+
+- **HEVC sources whose parameter sets live in-band no longer freeze at 00:00.** A source authored with in-band VPS/SPS/PPS ships an `hvcC` that is just the 23-byte header with `numOfArrays = 0`; the parameter sets travel with the packets instead. That is what `MP4Box ...:xps_inband` and the widely used Dolby Vision MP4 authoring recipes produce, and it is how Dolby's own Profile 8.1 reference asset is built. The normalizer that recovers those parameter sets and rebuilds the record scanned packets from whatever cursor the cue prewarm and the segment-plan pass had left behind, so on a real film (263 s, IRAPs every 2 s) it read 16 mid-GOP packets, found nothing, and let the muxer emit an *empty* `hvcC` box, an init segment MP4Box rejects as an invalid ISO file. AVPlayer accepts the master, fetches the media, fills the entire forward window, and never renders a frame: `CoreMediaErrorDomain -19601`, which is not one of the codes the master-to-media fallback reacts to, so nothing recovers the session. The scan now rewinds to the head first (in-band parameter sets are guaranteed at the first IRAP but only recur once per GOP after it) and counts its budget in video packets, so a film's audio and subtitle tracks cannot exhaust it before the first video packet arrives. Live, forward-only feeds keep scanning from the live cursor. The failure path now logs what it saw. Covered by `InBandParameterSetRebuildTests` against a new `hev1-inband-xps.mp4` fixture.
+- **The same sources are no longer force-routed to the software decoder.** `VTCapabilityProbe.canHardwareDecode` builds a format description from the `avcC` / `hvcC` and asks VideoToolbox for a hardware session. A record with no parameter sets still parses, so the description is created and only the session create fails, with `-4`, because there is no SPS to configure a decoder from. That says nothing about hardware support, but the probe read it as "no hardware decoder" and sent every such source to `SoftwarePlaybackHost` on all platforms, Apple Silicon included, at a real CPU cost. The probe's other unclassifiable cases (no extradata, Annex-B extradata, format-description build failure) already kept the native path; a record that is present but carries nothing to judge now does too.
+- **The derived HEVC `CODECS` string declared the wrong profile-compatibility flags.** RFC 6381 / ISO 14496-15 Annex E write `general_profile_compatibility_flags` in reverse bit order. Trimming trailing zeroes off the stored value coincides with that only for nibble-palindromic values such as `0x60000000`; a real Main10 record stores `0x20000000` and must print `hvc1.2.4...`, matching MP4Box and Dolby's own reference manifests, where the engine printed `hvc1.2.2...`. Since plain HEVC is routed through a master so tvOS gets codec signaling, and the declaration is checked against the init segment on device, every 10-bit non-DV source was shipping a master that misdescribed its own bitstream.
+
 ## [5.23.2] - 2026-07-25
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.2))
