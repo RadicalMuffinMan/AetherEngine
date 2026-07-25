@@ -164,6 +164,11 @@ public final class AetherEngine: ObservableObject {
     /// Applies to every backend, not just the native one. The software and audio renderer paths bypass
     /// AVKit and activate the session themselves (`activateRendererAudioSession`), so for those the
     /// deactivation is the engine releasing what the engine took.
+    ///
+    /// The release runs just after the teardown rather than inside it. `setActive(false)` is an XPC round
+    /// trip that takes roughly half a second on an Atmos MAT passthrough route, which inline would be half
+    /// a second of frozen UI before the host's dismiss can start. A `load()` that follows cancels a release
+    /// that has not run yet, so a stop/load pair never loses its session.
     public var deactivatesAudioSessionOnStop: Bool = false
 
     @Published public internal(set) var duration: Double = 0
@@ -1646,6 +1651,11 @@ public final class AetherEngine: ObservableObject {
     /// keeps issue #24's "declare early, never activate at init" contract; only the blocking XPC call
     /// leaves the main thread. The closure captures no engine state, so it holds no reference to `self`.
     private var audioSessionCategoryTask: Task<Void, Never>?
+
+    #if os(iOS) || os(tvOS)
+    /// Pending off-main deactivation (#215). See `scheduleAudioSessionDeactivation()`.
+    private var audioSessionDeactivationTask: Task<Void, Never>?
+    #endif
 
     #if os(iOS) || os(tvOS)
     /// Route-sharing policy the engine declares with the session category. Platform-split (#116):
@@ -3289,10 +3299,15 @@ public final class AetherEngine: ObservableObject {
     /// audio stutters on after leaving the video and persists off-screen). `.notifyOthersOnDeactivation` so
     /// whatever was interrupted resumes. Best effort: a failure here costs the ring, not the teardown.
     nonisolated static func deactivateSharedAudioSession() {
+        let started = DispatchTime.now()
+        func elapsedMs() -> Int {
+            Int((DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000)
+        }
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             EngineLog.emit(
-                "[AetherEngine] AVAudioSession deactivated on final teardown (release passthrough render ring)",
+                "[AetherEngine] AVAudioSession deactivated on final teardown in \(elapsedMs())ms "
+                + "(release passthrough render ring)",
                 category: .engine)
         } catch {
             // `.isBusy` is NOT a failure and must not be retried. Per AVAudioSession.h: since iOS 8,
@@ -3304,13 +3319,36 @@ public final class AetherEngine: ObservableObject {
             let nsError = error as NSError
             if nsError.code == AVAudioSession.ErrorCode.isBusy.rawValue {
                 EngineLog.emit(
-                    "[AetherEngine] AVAudioSession deactivated on final teardown (session released; I/O was still running)",
+                    "[AetherEngine] AVAudioSession deactivated on final teardown in \(elapsedMs())ms "
+                    + "(session released; I/O was still running)",
                     category: .engine)
             } else {
                 EngineLog.emit(
-                    "[AetherEngine] AVAudioSession deactivate on teardown failed: \(error) (passthrough ring may keep looping)",
+                    "[AetherEngine] AVAudioSession deactivate on teardown failed after \(elapsedMs())ms: "
+                    + "\(error) (passthrough ring may keep looping)",
                     category: .engine)
             }
+        }
+    }
+
+    /// Run the #215 deactivation off the main actor.
+    ///
+    /// `setActive(false)` is an XPC round trip to mediaserverd, and on an E-AC-3 / Atmos MAT passthrough
+    /// route the sink renegotiates the HDMI link inside that call: measured at roughly half a second on an
+    /// Apple TV 4K feeding an AVR, against a few milliseconds for the same call on a 5.1 route. Inline in
+    /// the teardown that is half a second of frozen UI, because the host's dismiss cannot start until
+    /// `stop()` returns. Same reasoning that moved `setCategory` off-main in #114; the difference is that
+    /// this one has to stay ordered against a following `load()`, hence the generation guard.
+    ///
+    /// `loadGeneration` was bumped by the `stopInternal` that scheduled this, so any `load()` starting in
+    /// the meantime bumps it again and the pending deactivation drops rather than releasing the session
+    /// out from under the new item. `stopInternal` also cancels a pending task before scheduling a new one.
+    private func scheduleAudioSessionDeactivation() {
+        let generation = loadGeneration
+        audioSessionDeactivationTask = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            guard !Task.isCancelled, await self.loadGeneration == generation else { return }
+            AetherEngine.deactivateSharedAudioSession()
         }
     }
     #endif
@@ -3331,6 +3369,11 @@ public final class AetherEngine: ObservableObject {
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
         resumeAfterInterruption = false
+        #if os(iOS) || os(tvOS)
+        // A deactivation still queued from a previous teardown must not land on this session (#215).
+        audioSessionDeactivationTask?.cancel()
+        audioSessionDeactivationTask = nil
+        #endif
         // tearDown() unloads the AVPlayer item before the loopback server is torn down to avoid noisy races.
         // keepNativeHost preserves NativeAVPlayerHost + currentAVPlayer across native->native reloads:
         // AVKit binds its MediaRemote registration to the AVPlayer instance once and never re-registers
@@ -3397,15 +3440,16 @@ public final class AetherEngine: ObservableObject {
         audioAVPlayerActive = false
         audioAVPlayerHost?.stop()
 
-        // #215: release the shared AVAudioSession once every render path above is quiesced. Deliberately
-        // the last thing the teardown does, so the item is unloaded, the AVPlayer released and the
-        // software/audio outputs stopped before the session goes away. Opt-in twice over: the caller must
-        // declare an actual final teardown, AND the host must have set deactivatesAudioSessionOnStop.
+        // #215: release the shared AVAudioSession once every render path above is quiesced. Scheduled
+        // last so the item is unloaded, the AVPlayer released and the software/audio outputs stopped
+        // before the session goes away, and scheduled rather than called because the release itself can
+        // block for ~0.5 s on a MAT passthrough route. Opt-in twice over: the caller must declare an
+        // actual final teardown, AND the host must have set deactivatesAudioSessionOnStop.
         #if os(iOS) || os(tvOS)
         if Self.shouldDeactivateAudioSessionOnTeardown(finalTeardown: finalTeardown,
                                                        keepNativeHost: keepNativeHost,
                                                        hostOptedIn: deactivatesAudioSessionOnStop) {
-            Self.deactivateSharedAudioSession()
+            scheduleAudioSessionDeactivation()
         }
         #endif
 
