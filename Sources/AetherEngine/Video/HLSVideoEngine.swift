@@ -881,7 +881,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if let rebuilt = rebuildHEVCExtradataWithInBandParameterSets(
             demuxer: dem,
             videoStreamIndex: videoIndex,
-            codecpar: codecpar
+            codecpar: codecpar,
+            rewindBeforeScan: !isLiveSession
         ) {
             hevcExtradataOverride = rebuilt
             EngineLog.emit(

@@ -167,9 +167,14 @@ extension HLSVideoEngine {
         case 3: spacePrefix = "C"
         default: spacePrefix = ""
         }
-        // Compatibility flags: hex, trailing zeros trimmed, never empty (0x60000000 -> "6", 0 -> "0").
-        var compatHex = String(compat, radix: 16)
-        while compatHex.count > 1 && compatHex.hasSuffix("0") { compatHex.removeLast() }
+        // Compatibility flags: RFC 6381 / ISO 14496-15 Annex E write them in REVERSE bit order
+        // (general_profile_compatibility_flag[31] as the most significant bit), then as hex with
+        // leading zeroes omitted. Trimming trailing zeroes off the stored value only coincides with
+        // that for nibble-palindromic values like 0x60000000 ("6"); a real Main10 record stores
+        // 0x20000000, which must print as "4" (MP4Box, Dolby's own P8.1 manifest), not "2".
+        var reversedCompat: UInt32 = 0
+        for i in 0..<32 where (compat >> (31 - i)) & 1 == 1 { reversedCompat |= 1 << i }
+        let compatHex = String(reversedCompat, radix: 16)
         // Constraint bytes: each as 2-hex, dot-joined, trailing all-zero bytes dropped (0x90,0,0,0,0,0 -> "90").
         var trimmedConstraints = constraintBytes
         while let last = trimmedConstraints.last, last == 0 { trimmedConstraints.removeLast() }

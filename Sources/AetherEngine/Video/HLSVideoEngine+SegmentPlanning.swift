@@ -222,10 +222,18 @@ extension HLSVideoEngine {
     }
 
     /// Scan packets for in-band VPS/SPS/PPS when hvcC `numOfArrays=0` (DV P5 MP4 encoders, e.g. Wandering Earth 2 WEB-DL, issue #19). AVPlayer symptom: `item.tracks count=2`, `fourCC=<no fdesc>`, `CoreMediaErrorDomain -4`. Caller must seek back after this consumes packets.
+    ///
+    /// `rewindBeforeScan` rewinds to the head first, because in-band parameter sets are guaranteed at
+    /// the first IRAP but only recur every GOP after it. Without the rewind the scan inherited whatever
+    /// cursor the cue prewarm and the plan pass had left behind and read 16 mid-GOP packets, so on a
+    /// real film (263 s, IRAPs ~2 s apart) it found nothing, the muxer emitted an empty hvcC, and
+    /// AVPlayer buffered the forward window without ever rendering a frame (AetherPlayer#2). Pass
+    /// `false` for a live, forward-only feed, which cannot rewind.
     func rebuildHEVCExtradataWithInBandParameterSets(
         demuxer: Demuxer,
         videoStreamIndex: Int32,
-        codecpar: UnsafePointer<AVCodecParameters>
+        codecpar: UnsafePointer<AVCodecParameters>,
+        rewindBeforeScan: Bool = true
     ) -> [UInt8]? {
         guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
         let extradataSize = Int(codecpar.pointee.extradata_size)
@@ -234,13 +242,20 @@ extension HLSVideoEngine {
         let naluLengthSize = Int(extradata[21] & 0x03) + 1  // hvcC byte 21 lower 2 bits + 1
         guard naluLengthSize == 4 else { return nil }
 
+        if rewindBeforeScan { demuxer.seek(to: 0) }
+
         var vps: [UInt8]?
         var sps: [UInt8]?
         var pps: [UInt8]?
+        // Counted in VIDEO packets: a film interleaves audio and dozens of subtitle tracks, which
+        // would otherwise exhaust the budget before the first video packet.
         let packetBudget = 16
         var packetsScanned = 0
+        // Second cap so a stream that never yields a video packet cannot walk the whole source.
+        let readBudget = 512
+        var packetsRead = 0
 
-        while packetsScanned < packetBudget {
+        while packetsScanned < packetBudget && packetsRead < readBudget {
             let readResult: UnsafeMutablePointer<AVPacket>?
             do {
                 readResult = try demuxer.readPacket()
@@ -253,8 +268,9 @@ extension HLSVideoEngine {
                 var maybePkt: UnsafeMutablePointer<AVPacket>? = pkt
                 trackedPacketFree(&maybePkt)
             }
-            packetsScanned += 1
+            packetsRead += 1
             if pkt.pointee.stream_index != videoStreamIndex { continue }
+            packetsScanned += 1
             guard let pktData = pkt.pointee.data else { continue }
             let pktSize = Int(pkt.pointee.size)
 
@@ -280,7 +296,14 @@ extension HLSVideoEngine {
             if vps != nil && sps != nil && pps != nil { break }
         }
 
-        guard let vps, let sps, let pps else { return nil }
+        guard let vps, let sps, let pps else {
+            EngineLog.emit(
+                "[HLSVideoEngine] in-band parameter-set scan found none: "
+                + "packets=\(packetsScanned) vps=\(vps != nil) sps=\(sps != nil) pps=\(pps != nil)",
+                category: .session
+            )
+            return nil
+        }
 
         // Assemble hvcC: keep source 22-byte header, set numOfArrays=3, append VPS/SPS/PPS arrays (1-byte type, 2-byte numNalus=1, 2-byte nalUnitLength, NAL bytes).
         var hvcC: [UInt8] = []
