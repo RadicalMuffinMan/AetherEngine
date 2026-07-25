@@ -129,7 +129,7 @@ SwiftUI diffing can re-run `updateUIView` as often as it likes; the guard means 
 ```
 Sources/AetherEngine/
 ├── AetherEngine.swift                       Engine core: stored state, load dispatch, transport, stop/seek, track selection
-├── AetherEngine+Probe.swift                 Static probe machinery: probe(url:/source:), swDecodeProbe, format / frame-rate / codec-label detection
+├── AetherEngine+Probe.swift                 Static probe machinery: probe(url:/source:), probeDetectingAtmos(url:/source:), swDecodeProbe, format / frame-rate / codec-label detection
 ├── AetherEngine+Loading.swift               The per-backend loaders (remote-HLS, native, software, audio, audio-native) + reload
 ├── AetherEngine+Subtitles.swift             Embedded + external subtitle pipeline (packet-store drainer, cue apply / prune, external track registry + unified selection routing, #88). Every embedded stream is tapped off the session demuxer into `SubtitlePacketStore`; a playhead-paced drainer decodes the selected stream (both channels, text and bitmap, VOD and live) into the overlay, riding producer seeks/restarts by construction, which replaced the side-demuxer reader and its recovery machinery outright (#112 rework); a VOD-only forward prefetcher extends store coverage past the producer park to the 60 s drain lead for host advance sync offsets (#151)
 ├── AetherEngine+ClosedCaptions.swift        In-band CEA-608 closed captions + A53/SEI extraction: ClosedCaptionTap (read-only producer observer) + cue mirroring (#77, #131)
@@ -143,6 +143,7 @@ Sources/AetherEngine/
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)
 ├── FFmpegErrorConstants.swift               AVERROR sentinels Swift can't import from the C macros
 ├── Audio/
+│   ├── AtmosDetectionProbe.swift            Opt-in bounded E-AC-3 JOC decode pass behind probeDetectingAtmos: AtmosDetectionOptions caps, one decoder, no playback session (#214)
 │   ├── AudioAVPlayerHost.swift              Audio-only path: bare AVPlayer host for whitelisted codecs, owns the persistent per-player MPNowPlayingSession (tvOS / iOS)
 │   ├── AudioBridge.swift                    Native path: decode + re-encode per `AudioBridgeMode` (EAC3 5.1 default or lossless FLAC opt-in) for source codecs that can't stream-copy into fMP4
 │   ├── AudioClockAnchor.swift               SW path: sample-count PTS anchor so consecutive buffers abut exactly; re-anchors on >100 ms drift (AVSampleBufferAudioRenderer crackle, #89)

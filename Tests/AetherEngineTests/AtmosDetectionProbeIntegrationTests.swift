@@ -135,6 +135,40 @@ struct AtmosDetectionProbeIntegrationTests {
         #expect(outcome.confirmedAtmos == false)
     }
 
+    @Test("the scan keeps decoding past a non-JOC first frame instead of answering off packet one")
+    func scanContinuesPastFirstDecodedFrame() throws {
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+        try demuxer.open(reader: DataIOReader(data: Self.data(Self.eac3PlainBase64)), formatHint: "mp4")
+
+        let targetIndex = AetherEngine.atmosDecodeTargetIndex(
+            options: AtmosDetectionOptions(), defaultAudioStreamIndex: demuxer.audioStreamIndex)
+        let outcome = AetherEngine.detectAtmos(demuxer: demuxer, targetIndex: targetIndex, options: AtmosDetectionOptions())
+
+        // avctx->profile is assigned per frame and reset to UNKNOWN whenever the JOC flag is absent, so a
+        // first-frame-only read would make the answer depend on packet one being representative.
+        #expect(outcome.packetsRead > 1, "the scan must not stop at the first decoded frame")
+        // Running out of source after real decodes is still a real observation, not a give-up.
+        #expect(outcome.stopReason == .frameDecoded)
+        #expect(outcome.confirmedAtmos == false)
+    }
+
+    @Test("a byte cap reached after real decodes still reports the observation, not the cap")
+    func capAfterDecodeReportsFrameDecoded() throws {
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+        try demuxer.open(reader: DataIOReader(data: Self.data(Self.eac3PlainBase64)), formatHint: "mp4")
+
+        let options = AtmosDetectionOptions(maxBytes: 1)
+        let targetIndex = AetherEngine.atmosDecodeTargetIndex(options: options, defaultAudioStreamIndex: demuxer.audioStreamIndex)
+        let outcome = AetherEngine.detectAtmos(demuxer: demuxer, targetIndex: targetIndex, options: options)
+
+        #expect(outcome.packetsRead == 1)
+        #expect(outcome.stopReason == .frameDecoded)
+        #expect(outcome.decodedProfile != nil)
+        #expect(outcome.confirmedAtmos == false)
+    }
+
     @Test("AAC audio never opens an EAC3 decoder (.notEAC3), never confirmed Atmos")
     func aacIsSkippedAsNotEAC3() throws {
         let demuxer = Demuxer()

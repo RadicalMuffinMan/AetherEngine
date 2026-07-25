@@ -114,30 +114,19 @@ extension AetherEngine {
 
     /// Flip `isAtmos` to `true` on exactly the one confirmed audio track, leaving everything else identical.
     ///
-    /// Pure and `internal` so the field-by-field rebuild below is directly testable: it hand-copies every
-    /// `TrackInfo` and `SourceProbe` field, and the compiler cannot tell us if one is dropped (silently
-    /// losing e.g. `assHeader`, `dvProfile`, or `subtitleTracks`).
+    /// Mutates copies rather than rebuilding the structs field by field: both memberwise inits carry defaulted
+    /// parameters, so a hand-copy silently drops any field added later and the compiler stays quiet about it.
     nonisolated static func enrichAtmos(base: SourceProbe, confirmedTrackID: Int) -> SourceProbe {
-        // Additive only: a track already marked isAtmos by the base probe (a container that pre-declares
-        // profile 30) is left untouched; this only ever flips false -> true for the one confirmed track.
-        let enrichedTracks = base.audioTracks.map { track -> TrackInfo in
-            guard track.id == confirmedTrackID, !track.isAtmos else { return track }
-            return TrackInfo(
-                id: track.id, name: track.name, codec: track.codec, language: track.language,
-                channels: track.channels, bitrate: track.bitrate, isDefault: track.isDefault,
-                isForced: track.isForced, isHearingImpaired: track.isHearingImpaired,
-                isCommentary: track.isCommentary, isAtmos: true, assHeader: track.assHeader,
-                isExternal: track.isExternal
-            )
+        // Additive only: a track already marked isAtmos by the base probe is left as it is; this only ever
+        // sets true, never clears a pre-decode signal.
+        var probe = base
+        probe.audioTracks = base.audioTracks.map { track in
+            guard track.id == confirmedTrackID else { return track }
+            var confirmed = track
+            confirmed.isAtmos = true
+            return confirmed
         }
-        return SourceProbe(
-            url: base.url, durationSeconds: base.durationSeconds, videoFormat: base.videoFormat,
-            videoCodecID: base.videoCodecID, videoCodecName: base.videoCodecName,
-            videoWidth: base.videoWidth, videoHeight: base.videoHeight, videoFrameRate: base.videoFrameRate,
-            isDolbyVision: base.isDolbyVision, dvProfile: base.dvProfile,
-            audioTracks: enrichedTracks, subtitleTracks: base.subtitleTracks,
-            metadata: base.metadata, isLive: base.isLive
-        )
+        return probe
     }
 
     /// Assemble a `SourceProbe` from an open demuxer. Shared by static probe entry points and `load(source:)`'s internal probe stage so all report identical metadata.

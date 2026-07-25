@@ -8,6 +8,9 @@ import Libavutil
 /// This is entirely separate from `LoadOptions` / the lightweight `probe(url:)` path: it exists so a host can
 /// opt into a strictly more expensive, decode-based Atmos check without ever touching the default probe's
 /// behavior or performance. See `AetherEngine.probeDetectingAtmos` for the full contract.
+///
+/// Scope: E-AC-3 JOC only, which is what `TrackInfo.isAtmos` has always meant in this engine. TrueHD carrying
+/// Atmos (MAT) is deliberately out of scope; that track keeps whatever the base probe reported.
 public struct AtmosDetectionOptions: Sendable, Equatable {
     /// Explicit AVStream index (== `TrackInfo.id`) to test. `nil` resolves the demuxer's own default audio
     /// pick (`Demuxer.audioStreamIndex`), the same stream `probe(url:)` already reports via its container
@@ -15,10 +18,11 @@ public struct AtmosDetectionOptions: Sendable, Equatable {
     /// `AetherEngine.selectAudioIndex`), so the decode targets the track that will actually play.
     public var targetTrackID: Int?
 
-    /// Stop after this many demuxed packets even if none decode. Bounds a malformed / truncated / silent
-    /// stream to a fixed amount of work. Default 64: generous for E-AC-3 (~1536-sample frames per packet at
-    /// typical container interleave -- a real track decodes its first frame within the first handful of
-    /// packets), while still finite on an adversarial or empty-audio source.
+    /// Stop after this many packets have been offered to the decoder. Bounds both a malformed / truncated /
+    /// silent stream and the JOC scan itself, which keeps decoding past non-JOC frames (see
+    /// `AetherEngine.detectAtmos`). Default 64: roughly two seconds of E-AC-3 at ~1536 samples per frame,
+    /// generous enough that a JOC track confirms well inside it while staying finite on an adversarial or
+    /// empty-audio source.
     public var maxPackets: Int
 
     /// Stop after this many cumulative packet bytes, independent of packet count. Guards a stream with
@@ -57,7 +61,9 @@ struct AtmosDetectionOutcome: Sendable, Equatable {
         case notEAC3
         /// `avcodec_find_decoder` / `avcodec_open2` failed (no EAC3 decoder built, or bad extradata).
         case decoderOpenFailed
-        /// A frame was successfully decoded; `decodedProfile` reflects the post-decode `AVCodecContext.profile`.
+        /// At least one frame was successfully decoded; `decodedProfile` carries the LAST post-decode
+        /// `AVCodecContext.profile` the scan observed (the JOC one as soon as it appears, otherwise whatever
+        /// the final decoded frame reported). See `detectAtmos` for why the scan does not stop at frame one.
         case frameDecoded
         /// `maxPackets` demuxed packets were read without ever decoding a frame for the target stream.
         case packetCap
@@ -77,10 +83,10 @@ struct AtmosDetectionOutcome: Sendable, Equatable {
     /// Post-decode `AVCodecContext.profile`. Only meaningful when `stopReason == .frameDecoded`.
     let decodedProfile: Int32?
 
-    /// EAC3 profile 30 (FFmpeg's `AV_PROFILE_EAC3_DDP_ATMOS`, `defs.h`) observed on the FIRST successfully
-    /// decoded frame. This is the ONLY authoritative signal the whole feature produces -- everything else on
-    /// this type is diagnostic. A plain (non-JOC) EAC3 track that decodes cleanly reports `frameDecoded` with
-    /// a `decodedProfile` other than 30, so `confirmedAtmos` is correctly `false`.
+    /// EAC3 profile 30 (FFmpeg's `AV_PROFILE_EAC3_DDP_ATMOS`, `defs.h`) observed on a successfully decoded
+    /// frame. This is the ONLY authoritative signal the whole feature produces -- everything else on this
+    /// type is diagnostic. A plain (non-JOC) EAC3 track that decodes cleanly reports `frameDecoded` with a
+    /// `decodedProfile` other than 30, so `confirmedAtmos` is correctly `false`.
     var confirmedAtmos: Bool {
         stopReason == .frameDecoded && decodedProfile == AtmosDetectionOutcome.eac3JOCProfile
     }
@@ -114,18 +120,41 @@ extension AetherEngine {
     /// Resolve which AVStream index the decode pass should target: an explicit `targetTrackID` always wins
     /// (even if it does not (yet) name a real stream -- the caller finds out via `.noAudioTrack`); otherwise
     /// the demuxer's own default audio pick. Pure so the override-vs-default precedence is unit-testable.
+    ///
+    /// An id outside `Int32` (a synthetic or garbage host value) folds to -1 rather than trapping: the
+    /// documented contract is that a non-existent track degrades to `.noAudioTrack`, not that it crashes.
     nonisolated static func atmosDecodeTargetIndex(options: AtmosDetectionOptions, defaultAudioStreamIndex: Int32) -> Int32 {
         if let explicit = options.targetTrackID {
-            return Int32(explicit)
+            return Int32(exactly: explicit) ?? -1
         }
         return defaultAudioStreamIndex
     }
 
+    /// Packet ceiling for the AVDISCARD_ALL fuse, saturating instead of trapping: `maxPackets` is a public
+    /// option and `Int.max` is a plausible "no limit" value for a host to pass (`forwardBufferSegments`
+    /// takes exactly that), which would overflow a plain multiply.
+    nonisolated static func atmosForeignPacketFuse(maxPackets: Int) -> Int {
+        let (product, overflowed) = maxPackets.multipliedReportingOverflow(by: foreignPacketFuseMultiplier)
+        return overflowed ? Int.max : product
+    }
+
     /// Bounded EAC3/JOC decode attempt. Opens ONE audio decoder for `targetIndex`, reads packets from
-    /// `demuxer` (skipping any not addressed to that stream), and stops at the first successfully decoded
-    /// frame or whichever cap in `options` is hit first. No video decode, no HLS server, no playback. The
-    /// decoder context, `AVPacket`, and `AVFrame` are all freed before returning on every path, including
-    /// early-outs and thrown-away errors -- this never leaves FFmpeg resources alive past the call.
+    /// `demuxer` (skipping any not addressed to that stream), and stops as soon as a decoded frame reports
+    /// the JOC profile, or when whichever cap in `options` is hit first. No video decode, no HLS server, no
+    /// playback. The decoder context, `AVPacket`, and `AVFrame` are all freed before returning on every path,
+    /// including early-outs and thrown-away errors -- this never leaves FFmpeg resources alive past the call.
+    ///
+    /// The scan deliberately does NOT stop at the first decoded frame. `libavcodec/ac3dec.c` assigns the
+    /// profile per frame (`avctx->profile = eac3_extension_type_a == 1 ? ATMOS : UNKNOWN`), and the flag it
+    /// keys off lives in the dependent substream's additional bitstream info, so a frame whose packet did
+    /// not carry that substream actively resets the field to unknown. Reading the field after frame one
+    /// would make the answer depend on packet one being representative of the track. Continuing costs at
+    /// most the existing packet budget (64 EAC3 frames is roughly two seconds of audio) and a confirmed
+    /// track still usually exits on the first frame.
+    ///
+    /// A cap or EOF reached AFTER at least one frame decoded still reports `.frameDecoded` with the last
+    /// observed profile: the caps only mean "stopped looking", while a decoded non-JOC frame is a real
+    /// observation. The cap reasons therefore keep their literal meaning of "no frame ever decoded".
     ///
     /// Tolerates a malformed / no-audio / non-EAC3 source: each of those degrades to a distinct
     /// non-`frameDecoded` `stopReason` rather than throwing or hanging. `Demuxer.readPacket()` failures are
@@ -167,12 +196,27 @@ extension AetherEngine {
             return AtmosDetectionOutcome(stopReason: .decoderOpenFailed, packetsRead: 0, bytesRead: 0, decodedProfile: nil)
         }
 
-        let start = Date()
+        let start = DispatchTime.now()
         var packetsRead = 0
         var bytesRead: Int64 = 0
         // Demuxed-but-discarded packets still cost wall clock and I/O, so they need their own fuse --
         // but they must NOT consume the decode budget (see below).
         var packetsSeen = 0
+        var framesDecoded = 0
+        var lastProfile: Int32?
+        let fuse = Self.atmosForeignPacketFuse(maxPackets: options.maxPackets)
+
+        // A cap or EOF after a real decode is still a real observation, so it reports .frameDecoded with
+        // what the scan saw rather than discarding it as "gave up".
+        func stopped(_ reason: AtmosDetectionOutcome.StopReason) -> AtmosDetectionOutcome {
+            guard framesDecoded == 0 else {
+                return AtmosDetectionOutcome(
+                    stopReason: .frameDecoded, packetsRead: packetsRead, bytesRead: bytesRead,
+                    decodedProfile: lastProfile)
+            }
+            return AtmosDetectionOutcome(
+                stopReason: reason, packetsRead: packetsRead, bytesRead: bytesRead, decodedProfile: nil)
+        }
 
         // Tell the demuxer to drop every other stream. Without this the caps are a budget over the whole
         // INTERLEAVED container rather than over the audio we care about: on the exact content this
@@ -182,51 +226,58 @@ extension AetherEngine {
         demuxer.discardAllStreamsExcept([targetIndex])
 
         while true {
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
             if let cap = Self.atmosDecodeCapReached(
                 packetsRead: packetsRead, bytesRead: bytesRead,
-                elapsed: Date().timeIntervalSince(start), options: options
+                elapsed: elapsed, options: options
             ) {
-                return AtmosDetectionOutcome(stopReason: cap, packetsRead: packetsRead, bytesRead: bytesRead, decodedProfile: nil)
+                return stopped(cap)
             }
 
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 packet = try demuxer.readPacket()
             } catch {
-                return AtmosDetectionOutcome(stopReason: .demuxError, packetsRead: packetsRead, bytesRead: bytesRead, decodedProfile: nil)
+                return stopped(.demuxError)
             }
             guard let pkt = packet else {
-                return AtmosDetectionOutcome(stopReason: .demuxEOF, packetsRead: packetsRead, bytesRead: bytesRead, decodedProfile: nil)
+                return stopped(.demuxEOF)
             }
 
-            var decodedThisPacket = false
+            var confirmed = false
             packetsSeen += 1
             if pkt.pointee.stream_index == targetIndex {
                 // Charge the decode budget only for packets actually offered to the decoder, so a coarse
                 // interleave or a large leading video run can never starve the probe of audio.
                 packetsRead += 1
                 bytesRead += Int64(pkt.pointee.size)
-                let sendRet = avcodec_send_packet(ctx, pkt)
-                if sendRet >= 0, avcodec_receive_frame(ctx, f) >= 0 {
-                    decodedThisPacket = true
+                if avcodec_send_packet(ctx, pkt) >= 0 {
+                    // Drain every frame this packet produced: the profile is per frame, so the JOC one can
+                    // sit behind a plain frame the same send emitted.
+                    while avcodec_receive_frame(ctx, f) >= 0 {
+                        framesDecoded += 1
+                        lastProfile = ctx.pointee.profile
+                        if lastProfile == AtmosDetectionOutcome.eac3JOCProfile {
+                            confirmed = true
+                            break
+                        }
+                    }
                 }
             }
             av_packet_unref(pkt)
             av_packet_free_safe(pkt)
 
-            // Independent fuse: AVDISCARD_ALL is honoured by most demuxers but is advisory, so a container
-            // that keeps handing back foreign packets still terminates.
-            if packetsSeen >= options.maxPackets * Self.foreignPacketFuseMultiplier {
-                return AtmosDetectionOutcome(
-                    stopReason: .packetCap, packetsRead: packetsRead, bytesRead: bytesRead,
-                    decodedProfile: nil)
-            }
-
-            if decodedThisPacket {
+            if confirmed {
                 return AtmosDetectionOutcome(
                     stopReason: .frameDecoded, packetsRead: packetsRead, bytesRead: bytesRead,
-                    decodedProfile: ctx.pointee.profile
+                    decodedProfile: lastProfile
                 )
+            }
+
+            // Independent fuse: AVDISCARD_ALL is honoured by most demuxers but is advisory, so a container
+            // that keeps handing back foreign packets still terminates.
+            if packetsSeen >= fuse {
+                return stopped(.packetCap)
             }
         }
     }

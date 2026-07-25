@@ -389,7 +389,8 @@ public struct SourceProbe: Sendable {
     public let isDolbyVision: Bool
     /// Dolby Vision profile number (5, 7, 8, 10) read from the dvcC/dvvC configuration record; nil when not DV.
     public let dvProfile: Int?
-    public let audioTracks: [TrackInfo]
+    /// Settable inside the module so `probeDetectingAtmos` can enrich one track without rebuilding the struct field by field.
+    public internal(set) var audioTracks: [TrackInfo]
     /// Includes both text and bitmap (PGS / DVB) variants.
     public let subtitleTracks: [TrackInfo]
     public let metadata: MediaMetadata
@@ -498,7 +499,8 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// Container disposition `COMMENT` (director / cast commentary tracks). Applies to audio and subtitle.
     public let isCommentary: Bool
     /// EAC3 with JOC profile (Dolby Atmos). Lets the UI surface "Atmos" instead of the bed channel count (typically 5.1).
-    public let isAtmos: Bool
+    /// Settable inside the module so `probeDetectingAtmos` can confirm it post-decode without rebuilding the struct field by field.
+    public internal(set) var isAtmos: Bool
 
     /// ASS / SSA tracks only: `[Script Info]` + `[V4+ Styles]` + `[Events]` format line from codec extradata. Hosts rendering ASS styling themselves (see `LoadOptions.preserveASSMarkup`) need it to resolve style references. nil for all other track kinds.
     public let assHeader: String?

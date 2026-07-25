@@ -53,6 +53,28 @@ struct AtmosDetectionOptionsTests {
         #expect(resolved == 0)
     }
 
+    @Test("a targetTrackID outside Int32 folds to -1 instead of trapping")
+    func outOfInt32RangeTargetFoldsToNoTrack() {
+        for id in [Int(Int32.max) + 1, Int(Int32.min) - 1, Int.max, Int.min] {
+            let resolved = AetherEngine.atmosDecodeTargetIndex(
+                options: AtmosDetectionOptions(targetTrackID: id), defaultAudioStreamIndex: 2)
+            #expect(resolved == -1, "\(id) must degrade to the no-track sentinel")
+        }
+    }
+
+    // MARK: - atmosForeignPacketFuse (AVDISCARD_ALL escape hatch, overflow-safe)
+
+    @Test("the foreign-packet fuse is a plain multiple of maxPackets in the ordinary range")
+    func foreignPacketFuseIsMultiple() {
+        #expect(AetherEngine.atmosForeignPacketFuse(maxPackets: 64) == 64 * 8)
+        #expect(AetherEngine.atmosForeignPacketFuse(maxPackets: 0) == 0)
+    }
+
+    @Test("the foreign-packet fuse saturates instead of trapping on Int.max")
+    func foreignPacketFuseSaturates() {
+        #expect(AetherEngine.atmosForeignPacketFuse(maxPackets: Int.max) == Int.max)
+    }
+
     @Test("no default audio stream (-1) surfaces unchanged when no override is given")
     func noAudioStreamPropagatesAsNegativeOne() {
         let options = AtmosDetectionOptions()
