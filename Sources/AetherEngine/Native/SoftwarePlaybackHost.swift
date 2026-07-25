@@ -973,7 +973,7 @@ final class SoftwarePlaybackHost {
             condition.unlock()
         }
 
-        while !stopRequested() {
+        func readerIteration() -> Bool {
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 packet = try demuxer.readPacket()
@@ -981,12 +981,12 @@ final class SoftwarePlaybackHost {
                 EngineLog.emit("[SWHost] live reader read failed: \(error)", category: .swPlayback)
                 onError("Playback error: \(error.localizedDescription)")
                 onSourceEnded()
-                break
+                return false
             }
             guard let packet else {
                 EngineLog.emit("[SWHost] live reader EOF (source lost)", category: .swPlayback)
                 onSourceEnded()
-                break
+                return false
             }
 
             let streamIdx = packet.pointee.stream_index
@@ -1089,6 +1089,14 @@ final class SoftwarePlaybackHost {
 
             av_packet_unref(packet)
             av_packet_free_safe(packet)
+            return true
+        }
+
+        while !stopRequested() {
+            let keepGoing: Bool = autoreleasepool {
+                readerIteration()
+            }
+            if !keepGoing { break }
         }
     }
 
@@ -1130,25 +1138,25 @@ final class SoftwarePlaybackHost {
         func pumpAudio() {
             guard let aDec = audioDecoder, let aOut = audioOutput, audioStreamIndex >= 0 else { return }
             var seq = audioLookahead.align(to: readCursor())
-            while !stopRequested() && isPlaying() {
+            func pumpIteration() -> Bool {
                 let armed = clockArmed()
                 guard AudioLookaheadPolicy.decide(
                     clockArmed: armed,
                     preArmPacketsFed: preArmPacketsFed,
                     lastFedAudioPTS: audioLookahead.lastFedAudioPTS,
                     clockSeconds: aOut.currentTimeSeconds
-                ) == .feed else { break }
-                guard seq < ring.seqBounds.end else { break }  // live edge: nothing to pump yet
+                ) == .feed else { return false }
+                guard seq < ring.seqBounds.end else { return false }  // live edge: nothing to pump yet
                 guard let pkt = ring.packet(atSeq: seq) else {
                     // Evicted/unreadable under the pump: skip, same as the combined loop.
-                    guard audioLookahead.advance(from: seq, fedPTS: nil) else { break }
+                    guard audioLookahead.advance(from: seq, fedPTS: nil) else { return false }
                     seq += 1
-                    continue
+                    return true
                 }
                 if pkt.isVideo {
-                    guard audioLookahead.advance(from: seq, fedPTS: nil) else { break }
+                    guard audioLookahead.advance(from: seq, fedPTS: nil) else { return false }
                     seq += 1
-                    continue
+                    return true
                 }
                 let producedAudio = feedRingPacket(
                     pkt,
@@ -1171,8 +1179,16 @@ final class SoftwarePlaybackHost {
                         markClockArmed()
                     }
                 }
-                guard audioLookahead.advance(from: seq, fedPTS: pkt.pts) else { break }
+                guard audioLookahead.advance(from: seq, fedPTS: pkt.pts) else { return false }
                 seq += 1
+                return true
+            }
+
+            while !stopRequested() && isPlaying() {
+                let keepGoing: Bool = autoreleasepool {
+                    pumpIteration()
+                }
+                if !keepGoing { break }
             }
             // Live-edge underrun handling (#107): a source delivering below real time would
             // otherwise leave the free-running clock permanently ahead of the stream, and
@@ -1223,14 +1239,16 @@ final class SoftwarePlaybackHost {
             }
         }
 
-        while !stopRequested() {
+        func feederIteration() -> Bool {
             if !isPlaying() {
                 condition.lock()
                 while !isPlaying() && !stopRequested() {
-                    _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                    autoreleasepool {
+                        _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                    }
                 }
                 condition.unlock()
-                continue
+                return true
             }
 
             // Keep the audio renderer topped up before (possibly expensive) video work.
@@ -1247,7 +1265,7 @@ final class SoftwarePlaybackHost {
                     category: .swPlayback
                 )
                 clampCursor(cursor, bounds.first)
-                continue
+                return true
             }
             guard let pkt = ring.packet(atSeq: cursor) else {
                 // Resident entry whose file read failed (disk hiccup,
@@ -1259,7 +1277,7 @@ final class SoftwarePlaybackHost {
                         category: .swPlayback
                     )
                     advanceCursor(cursor)
-                    continue
+                    return true
                 }
                 // At the live edge (cursor == end): wait for the reader's
                 // next append, or finish when the source is gone and the
@@ -1269,12 +1287,14 @@ final class SoftwarePlaybackHost {
                     audioDecoder?.flush()
                     renderer.drainReorderBuffer()
                     onEnd()
-                    break
+                    return false
                 }
                 condition.lock()
-                _ = condition.wait(until: Date(timeIntervalSinceNow: 0.25))
+                autoreleasepool {
+                    _ = condition.wait(until: Date(timeIntervalSinceNow: 0.25))
+                }
                 condition.unlock()
-                continue
+                return true
             }
 
             if pkt.isVideo {
@@ -1282,16 +1302,18 @@ final class SoftwarePlaybackHost {
                 // The wait can outlast the audio lead, so keep pumping audio while parked.
                 var waitTicks = 0
                 while !renderer.isReadyForMoreMediaData && !stopRequested() && isPlaying() {
-                    Thread.sleep(forTimeInterval: 0.005)
-                    waitTicks += 1
-                    if waitTicks % 20 == 0 { pumpAudio() }
+                    autoreleasepool {
+                        Thread.sleep(forTimeInterval: 0.005)
+                        waitTicks += 1
+                        if waitTicks % 20 == 0 { pumpAudio() }
+                    }
                 }
-                if stopRequested() { break }
-                if !isPlaying() { continue }
+                if stopRequested() { return false }
+                if !isPlaying() { return true }
             } else if cursor < audioLookahead.current {
                 // Audio the pump already delivered: consume the slot without re-decoding.
                 advanceCursor(cursor)
-                continue
+                return true
             }
 
             let producedAudio = feedRingPacket(
@@ -1318,6 +1340,14 @@ final class SoftwarePlaybackHost {
             }
 
             advanceCursor(cursor)
+            return true
+        }
+
+        while !stopRequested() {
+            let keepGoing: Bool = autoreleasepool {
+                feederIteration()
+            }
+            if !keepGoing { break }
         }
     }
 
@@ -1393,14 +1423,16 @@ final class SoftwarePlaybackHost {
         var audioPacketsSeen = 0
         var audioBuffersProduced = false
 
-        while !stopRequested() {
+        func demuxIteration() -> Bool {
             if !isPlaying() {
                 condition.lock()
                 while !isPlaying() && !stopRequested() {
-                    _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                    autoreleasepool {
+                        _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                    }
                 }
                 condition.unlock()
-                continue
+                return true
             }
 
             let genBeforeRead = seekGeneration()
@@ -1410,7 +1442,7 @@ final class SoftwarePlaybackHost {
             } catch {
                 EngineLog.emit("[SWHost] demux read failed: \(error)", category: .swPlayback)
                 onError("Playback error: \(error.localizedDescription)")
-                break
+                return false
             }
 
             guard let packet else {
@@ -1418,14 +1450,14 @@ final class SoftwarePlaybackHost {
                 audioDecoder?.flush()
                 renderer.drainReorderBuffer()
                 onEnd()
-                break
+                return false
             }
 
             // Stale packet from before seek flush: decoding would clear the skip threshold (visible fast-forward burst). Discard.
             if seekGeneration() != genBeforeRead {
                 av_packet_unref(packet)
                 av_packet_free_safe(packet)
-                continue
+                return true
             }
 
             let streamIdx = packet.pointee.stream_index
@@ -1505,36 +1537,40 @@ final class SoftwarePlaybackHost {
                 if backgroundAudioOnly() {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
-                    continue
+                    return true
                 }
                 // Back-pressure via SampleBufferRenderer.isReadyForMoreMediaData (not the deprecated layer property). Park on condition while paused to avoid 200 Hz CPU spin.
                 while !renderer.isReadyForMoreMediaData && !stopRequested() && !backgroundAudioOnly() {
-                    if !isPlaying() {
-                        condition.lock()
-                        while !isPlaying() && !stopRequested() {
-                            _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                    autoreleasepool {
+                        if !isPlaying() {
+                            condition.lock()
+                            while !isPlaying() && !stopRequested() {
+                                autoreleasepool {
+                                    _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                                }
+                            }
+                            condition.unlock()
+                        } else {
+                            Thread.sleep(forTimeInterval: 0.005)
                         }
-                        condition.unlock()
-                    } else {
-                        Thread.sleep(forTimeInterval: 0.005)
                     }
                 }
                 // Entered background while parked on back-pressure: drop this frame.
                 if backgroundAudioOnly() {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
-                    continue
+                    return true
                 }
                 if stopRequested() {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
-                    break
+                    return false
                 }
                 // Re-check generation after the back-pressure wait (seek can land there; pre-seek packet would clear skip thresholds).
                 if seekGeneration() != genBeforeRead {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
-                    continue
+                    return true
                 }
                 videoDecoder.decode(packet: packet)
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
@@ -1568,7 +1604,7 @@ final class SoftwarePlaybackHost {
                     if stopRequested() {
                         av_packet_unref(packet)
                         av_packet_free_safe(packet)
-                        break
+                        return false
                     }
                 }
                 audioPacketsSeen += 1
@@ -1602,6 +1638,14 @@ final class SoftwarePlaybackHost {
 
             av_packet_unref(packet)
             av_packet_free_safe(packet)
+            return true
+        }
+
+        while !stopRequested() {
+            let keepGoing: Bool = autoreleasepool {
+                demuxIteration()
+            }
+            if !keepGoing { break }
         }
     }
 
