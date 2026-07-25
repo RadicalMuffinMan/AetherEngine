@@ -160,6 +160,10 @@ public final class AetherEngine: ObservableObject {
     /// an `AVAudioEngine`, a background music player) would have its session torn out from under it. Only
     /// a genuine final teardown honours this: `stop()` (with `resetDisplayCriteria: true`), never a
     /// handoff, reload, or retune.
+    ///
+    /// Applies to every backend, not just the native one. The software and audio renderer paths bypass
+    /// AVKit and activate the session themselves (`activateRendererAudioSession`), so for those the
+    /// deactivation is the engine releasing what the engine took.
     public var deactivatesAudioSessionOnStop: Bool = false
 
     @Published public internal(set) var duration: Double = 0
@@ -3260,6 +3264,57 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Internal teardown
 
+    /// Whether a teardown may release the shared `AVAudioSession` (#215).
+    ///
+    /// Three independent conditions, all required:
+    /// - `finalTeardown`: the caller declared "leaving playback", which only `stop()` does. `!keepNativeHost`
+    ///   is NOT a usable proxy for it: it defaults to `false`, so every bare `stopInternal()` (the live-reload
+    ///   watchdog, for one, which expects the host to retune immediately) would tear a process-wide session
+    ///   down mid-cycle.
+    /// - `!keepNativeHost`: belt and braces. A preserved host means audio keeps flowing into the next load.
+    /// - `hostOptedIn`: `deactivatesAudioSessionOnStop`. The session is process-global state the engine
+    ///   mostly does not own, so releasing it is the host app's call.
+    nonisolated static func shouldDeactivateAudioSessionOnTeardown(finalTeardown: Bool,
+                                                                   keepNativeHost: Bool,
+                                                                   hostOptedIn: Bool) -> Bool {
+        finalTeardown && !keepNativeHost && hostOptedIn
+    }
+
+    #if os(iOS) || os(tvOS)
+    /// Counterpart to the activations the engine takes part in (#215). The native path never activates the
+    /// session itself (AVKit does it per playback, #24); the software and audio renderer paths do, in
+    /// `activateRendererAudioSession()`. Either way, holding an active `.playback` session after playback is
+    /// over is what strands an E-AC-3/JOC Atmos BITSTREAM PASSTHROUGH render ring on the HDMI sink: the
+    /// receiver keeps looping the last MAT frame once the player is released (reported by Brandon Moore:
+    /// audio stutters on after leaving the video and persists off-screen). `.notifyOthersOnDeactivation` so
+    /// whatever was interrupted resumes. Best effort: a failure here costs the ring, not the teardown.
+    nonisolated static func deactivateSharedAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            EngineLog.emit(
+                "[AetherEngine] AVAudioSession deactivated on final teardown (release passthrough render ring)",
+                category: .engine)
+        } catch {
+            // `.isBusy` is NOT a failure and must not be retried. Per AVAudioSession.h: since iOS 8,
+            // deactivating with running I/O still DEACTIVATES the session and returns this code purely
+            // "to indicate the misuse of the API" -- and since iOS/tvOS 26 it is not returned at all.
+            // The ring is released either way; the only actionable part is that we were asked to
+            // deactivate before the render path finished releasing its I/O. Retrying would be worse than
+            // useless: a retry landing after a subsequent load() would deactivate the NEW session.
+            let nsError = error as NSError
+            if nsError.code == AVAudioSession.ErrorCode.isBusy.rawValue {
+                EngineLog.emit(
+                    "[AetherEngine] AVAudioSession deactivated on final teardown (session released; I/O was still running)",
+                    category: .engine)
+            } else {
+                EngineLog.emit(
+                    "[AetherEngine] AVAudioSession deactivate on teardown failed: \(error) (passthrough ring may keep looping)",
+                    category: .engine)
+            }
+        }
+    }
+    #endif
+
     /// - Parameter resetDisplayCriteria: When `true` (default), release
     ///   the `AVDisplayManager.preferredDisplayCriteria` so the panel
     ///   returns to its default mode. Used by `load()` and the public
@@ -3301,17 +3356,8 @@ public final class AetherEngine: ObservableObject {
         // AE#158: keepCurrentItem defers the item detach to the next host.load(inPlaceSwap:) so a
         // system PiP window never sees a nil-item gap across a native->native load. Only meaningful
         // together with keepNativeHost; load() computes it via shouldHandOverItemInPlace.
-        //
-        // The AVAudioSession deactivation is opt-in twice over: the caller must declare an actual
-        // final teardown (`finalTeardown`), AND the host app must have opted into the policy
-        // (`deactivatesAudioSessionOnStop`, default false). `!keepNativeHost` is NOT a usable proxy for
-        // "leaving playback" -- it defaults to false, so every bare `stopInternal()` (e.g. the live-reload
-        // watchdog, which expects the host to retune immediately) would deactivate a process-wide session
-        // mid-retune. And since the native path deliberately never ACTIVATES the session (#24, AVKit does
-        // it per playback), deactivating one the host app owns is only safe when the host says so.
         if !keepCurrentItem {
-            nativeHost?.tearDown(
-                deactivateAudioSession: finalTeardown && !keepNativeHost && deactivatesAudioSessionOnStop)
+            nativeHost?.tearDown()
         }
         if !keepNativeHost {
             nativeHost = nil
@@ -3350,6 +3396,18 @@ public final class AetherEngine: ObservableObject {
         audioNativeCancellables.removeAll()
         audioAVPlayerActive = false
         audioAVPlayerHost?.stop()
+
+        // #215: release the shared AVAudioSession once every render path above is quiesced. Deliberately
+        // the last thing the teardown does, so the item is unloaded, the AVPlayer released and the
+        // software/audio outputs stopped before the session goes away. Opt-in twice over: the caller must
+        // declare an actual final teardown, AND the host must have set deactivatesAudioSessionOnStop.
+        #if os(iOS) || os(tvOS)
+        if Self.shouldDeactivateAudioSessionOnTeardown(finalTeardown: finalTeardown,
+                                                       keepNativeHost: keepNativeHost,
+                                                       hostOptedIn: deactivatesAudioSessionOnStop) {
+            Self.deactivateSharedAudioSession()
+        }
+        #endif
 
         // Close custom reader on final teardown. Internal reloads pass keepCustomReader=true to survive for reuse.
         if !keepCustomReader {
