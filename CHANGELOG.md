@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`AetherEngine.deactivatesAudioSessionOnStop` (default `false`): optionally release the shared `AVAudioSession` on final teardown.** On an E-AC-3 / Atmos BITSTREAM PASSTHROUGH route the HDMI sink keeps its own decode ring, and while the session stays active it can keep looping the last MAT frame after the player is released — audio stutters on after leaving playback, and persists even off-screen. Opting in deactivates the session (with `.notifyOthersOnDeactivation`) once playback is torn down for good, which closes that ring. It is off by default because the native path deliberately never *activates* the session (AVKit does, per playback, #24), so deactivating one the host app owns must be the host's decision — an app playing its own audio (UI sounds, TTS, `AVAudioEngine`, a background music player) would otherwise have its session torn out from under it. Only a genuine final teardown honours it: `stop(resetDisplayCriteria: true)`, never a native→native reload, a native→audio/software handoff, or a live retune. `stop(resetDisplayCriteria:finalTeardown:)` lets a host that keeps display criteria across a stop/load pair still declare a genuine final teardown. An `AVAudioSessionErrorCodeIsBusy` result is logged as the informational diagnostic it is, not retried: per `AVAudioSession.h` the session is deactivated regardless and the code only flags that I/O was still running (and iOS/tvOS 26 stopped returning it altogether).
+
 ## [5.22.1] - 2026-07-25
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.22.1))
