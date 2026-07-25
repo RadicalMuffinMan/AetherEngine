@@ -105,6 +105,13 @@ extension AetherEngine {
         defer { demuxer.close() }
 
         let base = makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
+        // Flush what `avformat_find_stream_info` left queued before the decode pass starts. Those packets
+        // were read before `detectAtmos` sets AVDISCARD_ALL, so libavformat hands them back regardless of
+        // the hint: on a source whose audio does not sit at the head, the pass burns its whole foreign-packet
+        // fuse on that queue and reports "not Atmos" for genuinely Atmos media without ever reading a byte
+        // of audio. Seeking to the start discards the queue so the discard takes effect from the first read.
+        // A source that cannot seek is no worse off than before.
+        demuxer.seekBounded(to: 0, timeout: Self.atmosProbeFlushSeekTimeout)
         let targetIndex = Self.atmosDecodeTargetIndex(
             options: atmosDetection, defaultAudioStreamIndex: demuxer.audioStreamIndex)
         let outcome = Self.detectAtmos(demuxer: demuxer, targetIndex: targetIndex, options: atmosDetection)
