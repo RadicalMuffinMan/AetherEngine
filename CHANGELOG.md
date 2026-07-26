@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.7] - 2026-07-26
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.7))
+
+### Fixed
+
+- **A seek no longer makes the reported buffer frontier claim a lead the size of the seek distance.** For a tick or two after a far seek, `clock.bufferedPosition` reported the band at the seek destination as if it sat ahead of the position the seek had left, so a host drawing a buffer bar from it saw a lead of tens of minutes over a playhead with nothing resident ahead of it, corrected only once the clock landed. The frontier walk anchors at `max(playhead, consumer fetch target)`, and that anchor is sound because everything below the fetch target has been handed to the consumer and sits in its own buffer, but only inside an uninterrupted fetch sequence: AVPlayer fetches no further ahead than its buffer reaches, which is what keeps the distance between the playhead and the target bounded during normal playback. A seek removes that bound, and because the consumer needs the data in order to seek, its fetch at the destination lands before `currentTime()` reports the new position, so the walk ran through the freshly produced band there and measured it against the old playhead. The cache now tracks the consumer's current fetch sequence, and outside it the walk anchors on the playhead, which reports the band genuinely reachable from there or nothing when the playhead's own segment is gone. A backward refetch of the Continuous-Audio handover and its return to the fetch front stay inside the sequence, so the whole-source prefetch case that the anchor was introduced for is unaffected. What remains is bounded by the backward window rather than by the seek distance: a scrub shorter than that window stays inside the sequence and can still anchor on the previous target for a tick. Playback was never affected, only the published figure. Covered by `Issue207FrontierAnchorTests`.
+
 ## [5.23.6] - 2026-07-26
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.6))
