@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.6] - 2026-07-26
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.6))
+
+### Fixed
+
+- **A FLAC source whose `STREAMINFO` declares an illegal `min_blocksize` plays instead of failing to open.** Such a source died on the first segment with `AVFoundationErrorDomain -11829 "Cannot Open"` (underlying `CoreMediaErrorDomain -12848`) while playing fine in QuickTime, so a host saw a codec it fully supports refuse to start. The field must be at least 16 per the FLAC specification, but 0 occurs in the wild: an MKV to MP4 remux copies the source `CodecPrivate` verbatim, and encoders that never rewrite `STREAMINFO` after a streaming pass leave it zeroed. libavcodec's decoder ignores the field, so such a source demuxes and probes cleanly everywhere, which is exactly why nothing upstream of the muxer noticed; CoreMedia validates it and rejects the entire audio sample description. Stream-copy hands the source extradata straight to movenc, which serialises it into `dfLa` byte for byte, so the defect reached every segment of the session rather than degrading one. An illegal `min_blocksize` is now clamped up to `max_blocksize`, the only blocksize the container actually attests to, with every other `STREAMINFO` byte left untouched, md5 and `total_samples` included. When `max_blocksize` is illegal too there is nothing honest to clamp to, so the extradata passes through unchanged rather than carrying an invented value. The clamp sits on the single path shared by the session muxer and the stream-copy pre-flight probe, so the probe cannot pass while the real muxer emits a box CoreMedia rejects. Covered by `Issue221FLACStreamInfoTests`.
+
 ## [5.23.5] - 2026-07-26
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.5))
