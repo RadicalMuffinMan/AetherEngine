@@ -454,6 +454,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// that just failed (a sticky pb error would burn the revive gate without one fresh attempt).
     var mainDemuxerSuspectDead = false
 
+    /// AE#222 (under `restartLock`): one real audio frame from this source, kept for the whole session so
+    /// every muxer built from here on writes moov (with the packet-derived dec3/dac3/dmlp built from THIS
+    /// frame) at init. Set only after a pump proved the source cuts its first segment before any audio packet
+    /// arrives, which no probe can predict: movenc rejects an immediate moov for E-AC-3 regardless of
+    /// extradata, so a pre-flight cannot tell a video-first interleave apart from a healthy source.
+    var sessionAudioMoovPrimeFrame: [UInt8]?
+
+    /// AE#222 (under `restartLock`): bounded rebuild for a pump that deferred its first cut. One attempt is
+    /// enough by construction (the prime is captured before the restart and reused for the session's whole
+    /// life); the gate exists so a source that somehow defers again cannot restart-storm.
+    var audioSampleEntryPrimeGate = MuxerFailureReviveGate(maxAttempts: 1)
+
     /// AE#169 round 3 (under `restartLock`): bounded re-anchor for a VOD pump whose restart
     /// scan-forward gate starved to EOF (no runtime keyframe at/after the targeted plan boundary,
     /// the unproducible tail segment). Same gate shape as #99.
@@ -1756,7 +1768,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             packedSideAudioStartPts: packedSideAudioStartPts,
             packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
             bufferAheadSegments: forwardWindowSegments,
-            prefetchDiskBudgetBytes: retentionBudgetBytes
+            prefetchDiskBudgetBytes: retentionBudgetBytes,
+            // AE#222: nil until a pump proved this source cuts its first segment before any audio packet
+            // arrives; from then on every producer of the session muxes moov from this frame.
+            audioMoovPrimeFrame: sessionAudioMoovPrimeFrame
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
