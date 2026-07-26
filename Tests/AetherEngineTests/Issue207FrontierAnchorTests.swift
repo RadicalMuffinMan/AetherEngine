@@ -20,7 +20,10 @@ struct Issue207FrontierAnchorTests {
         // which is exactly the #207 condition that makes the extras eviction run at all.
         let c = SegmentCache(forwardWindow: 2700, backwardWindow: 20, retentionBudgetBytes: 100)
         for i in 0...40 { c.store(index: i, data: makeData(10)) }
-        c.declareTarget(30)   // AVPlayer's fetch target runs ahead of the playhead (~120 s)
+        // The consumer fetches sequentially up to its target (~120 s ahead of the playhead). Declaring
+        // only the final index would model a jump, which is a different situation entirely: the target
+        // anchor rests on the consumer having fetched *across* the playhead, so the sequence matters.
+        for t in 0...30 { c.declareTarget(t) }
         return c
     }
 
@@ -86,6 +89,73 @@ struct Issue207FrontierAnchorTests {
         c.declareTarget(5)
         #expect(c.contiguousForwardFrontier(fromPlayhead: 5) == 8)   // stops before the hole at 9
         #expect(c.contiguousForwardFrontier(fromPlayhead: 5) == c.contiguousForwardFrontier(from: 5))
+    }
+
+    /// Field report on 5.23.4: a far seek made the frontier claim a lead the size of the seek distance
+    /// for one tick. `declareTarget` lands at the seek destination while `currentTime()` still reads the
+    /// old position, so the target anchor walked the freshly produced band and measured it against a
+    /// playhead the consumer never fetched across. The target anchor only holds inside an uninterrupted
+    /// fetch sequence: AVPlayer fetches no further ahead than its buffer reaches, which is what bounds
+    /// `target - playhead` during normal playback and what a seek removes.
+    @Test("Forward seek: the fresh target does not claim a lead over the playhead it jumped away from")
+    func forwardSeekDoesNotClaimLeadOverStalePlayhead() {
+        let c = SegmentCache(forwardWindow: 2700, backwardWindow: 20, retentionBudgetBytes: 1_000_000)
+        defer { c.close() }
+        for i in 0...40 { c.store(index: i, data: makeData(10)) }
+        for t in 0...30 { c.declareTarget(t) }
+        // Seek to segment 200; the consumer fetches there and the restarted producer writes 200/201
+        // while the clock still reads segment 20.
+        c.declareTarget(200)
+        c.store(index: 200, data: makeData(10))
+        c.store(index: 201, data: makeData(10))
+        #expect(c.peek(index: 40) != nil, "the budget has room, so the old band must still be resident")
+        #expect(c.contiguousForwardFrontier(fromPlayhead: 20) == 40)
+    }
+
+    /// Same jump under the field's actual eviction pressure: the old band is gone, so the honest answer
+    /// is that nothing is available ahead of the stale playhead. Returning below it fails the caller's
+    /// `frontier >= playheadIdx` guard, which reports a read-ahead of 0.
+    @Test("Forward seek with the old band evicted reports nothing ahead, not the band at the destination")
+    func forwardSeekWithEvictedOldBandReportsNothingAhead() {
+        let c = makeOptInPrefetchCache()
+        defer { c.close() }
+        c.declareTarget(200)
+        c.store(index: 200, data: makeData(10))
+        c.store(index: 201, data: makeData(10))
+        #expect(c.peek(index: 20) == nil, "the playhead's segment must be evicted for this to be the field case")
+        #expect(c.contiguousForwardFrontier(fromPlayhead: 20) == 19)
+    }
+
+    /// A backward seek ends the sequence too, otherwise a later forward seek that lands *below* the old
+    /// fetch front would look like a segment the consumer had already fetched and the stale band above
+    /// it would be reported as buffered.
+    @Test("Forward seek below the pre-seek fetch front is still a jump")
+    func forwardSeekBelowOldFrontIsStillAJump() {
+        let c = SegmentCache(forwardWindow: 2700, backwardWindow: 20, retentionBudgetBytes: 1_000_000)
+        defer { c.close() }
+        for i in 45...60 { c.store(index: i, data: makeData(10)) }   // band left by the first pass
+        for t in 0...50 { c.declareTarget(t) }
+        c.declareTarget(10)                                          // backward seek, producer restarts
+        for i in 10...25 { c.store(index: i, data: makeData(10)) }
+        for t in 10...20 { c.declareTarget(t) }
+        c.declareTarget(45)                                          // forward seek, below the old front
+        #expect(c.contiguousForwardFrontier(fromPlayhead: 20) == 25)
+    }
+
+    /// Guard against tightening the rule into a plain "any non-sequential index ends the sequence":
+    /// the Continuous-Audio handover refetches ~7-10 segments backward and returns to the fetch front,
+    /// which must not be read as a seek. Treating it as one would re-open #207 itself, since the playhead
+    /// under an opt-in prefetch sits below the retained low end and its segment really is evicted.
+    @Test("Handover refetch and the return to the fetch front keep the target anchor")
+    func handoverRefetchKeepsTheTargetAnchor() {
+        let c = SegmentCache(forwardWindow: 2700, backwardWindow: 20, retentionBudgetBytes: 100)
+        defer { c.close() }
+        for i in 0...60 { c.store(index: i, data: makeData(10)) }
+        for t in 0...50 { c.declareTarget(t) }
+        c.declareTarget(42)   // handover refetch, inside the backward window
+        c.declareTarget(51)   // back to the fetch front
+        #expect(c.peek(index: 21) == nil, "the playhead's own segment is an evicted extra (lo = 51 - 20)")
+        #expect(c.contiguousForwardFrontier(fromPlayhead: 21) == 60)
     }
 
     @Test("Fresh cache with no declared target walks from the playhead")

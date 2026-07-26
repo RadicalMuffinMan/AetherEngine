@@ -38,6 +38,13 @@ final class SegmentCache: @unchecked Sendable {
     /// Declared by provider at top of each mediaSegment(at:); non-monotonic (backward scrub is valid).
     private var currentTargetIndex: Int = -1
 
+    /// Lowest index of the consumer's current uninterrupted fetch sequence, and the highest index it has
+    /// reached in it. A seek flushes the consumer's buffer, so only within one sequence does everything
+    /// between the playhead and the target sit in that buffer, which is what
+    /// `contiguousForwardFrontier(fromPlayhead:)` rests on.
+    private var fetchFloor: Int = -1
+    private var fetchFront: Int = -1
+
     let sessionDir: URL
 
     private var _totalBytes: Int = 0
@@ -214,6 +221,7 @@ final class SegmentCache: @unchecked Sendable {
     func declareTarget(_ index: Int) {
         condition.lock()
         var doomed: [URL] = []
+        trackFetchSequenceLocked(index)
         if index != currentTargetIndex {
             currentTargetIndex = index
             doomed = pruneOutsideWindow()
@@ -221,6 +229,23 @@ final class SegmentCache: @unchecked Sendable {
         }
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
+    }
+
+    /// Must be called with condition held.
+    ///
+    /// A fetch that leaves a gap above the front, or that drops further back than a handover refetch
+    /// reaches, is the consumer arriving from somewhere else: it flushed its buffer and starts a new
+    /// sequence here. Anything else extends the current one, including the ~7-10 segment backward
+    /// refetch of the Continuous-Audio handover and its return to the front, which must NOT count as a
+    /// jump: under an opt-in prefetch the playhead sits below the retained low end, so falling back to
+    /// the playhead anchor there would re-open the #207 collapse the anchor exists to prevent.
+    private func trackFetchSequenceLocked(_ index: Int) {
+        if index > fetchFront + 1 || index < fetchFront - backwardWindow {
+            fetchFloor = index
+            fetchFront = index
+        } else {
+            fetchFront = max(fetchFront, index)
+        }
     }
 
     func peek(index: Int) -> Data? {
@@ -368,10 +393,20 @@ final class SegmentCache: @unchecked Sendable {
     ///
     /// Anchor and walk share one lock hold: reading `targetIndex` separately would let a target change
     /// land between the two and walk from an anchor that does not match the entries observed.
+    ///
+    /// The target anchor only holds while the playhead is inside the consumer's current fetch sequence.
+    /// AVPlayer fetches no further ahead than its own buffer reaches, which is what keeps everything
+    /// between the playhead and the target genuinely held; a seek removes that bound, and since
+    /// `declareTarget` lands at the destination before `currentTime()` reports it, the target would
+    /// otherwise measure the band at the destination against the position the seek jumped away from and
+    /// claim a lead the size of the seek distance (#207 field report on 5.23.4). Outside the sequence the
+    /// walk falls back to the playhead, which reports the band that is genuinely reachable from there,
+    /// or nothing when its own segment is gone.
     func contiguousForwardFrontier(fromPlayhead playheadIdx: Int) -> Int {
         condition.lock()
         defer { condition.unlock() }
-        return frontierLocked(from: max(playheadIdx, currentTargetIndex))
+        let anchor = playheadIdx >= fetchFloor ? max(playheadIdx, currentTargetIndex) : playheadIdx
+        return frontierLocked(from: anchor)
     }
 
     /// Must be called with condition held.
