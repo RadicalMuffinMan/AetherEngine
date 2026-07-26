@@ -1548,11 +1548,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// (#207 follow-up). A frontier below the playhead still reports 0, which keeps the #54 contract that
     /// the frontier never trails the rendered frame.
     ///
+    /// The target anchor holds only inside the consumer's current fetch sequence; a seek ends it, since
+    /// `declareTarget` lands at the destination while `currentTime()` still reports the position the seek
+    /// left, and the target would otherwise measure the band at the destination against that stale
+    /// playhead. What remains is bounded rather than seek-sized: a scrub shorter than the backward window
+    /// stays inside the sequence, so a tick or two around it can still anchor on the old target, and the
+    /// error is at most that window.
+    ///
     /// segmentIndexForPlaylistTime and the plan read each take restartLock briefly and sequentially
     /// (no nesting); a plan rebuilt between them at worst yields one transiently wrong tick, acceptable
-    /// for a visual bar. One residual of the same kind: between a backward seek and the consumer's first
-    /// fetch at the new position the target is still the old one, so a tick or two can report the stale
-    /// band before `declareTarget` lands.
+    /// for a visual bar.
     func contiguousForwardReadAheadSeconds(playlistSeconds: Double) -> Double {
         guard let cache = subsystemSnapshot().cache else { return 0 }
         let playheadIdx = segmentIndexForPlaylistTime(playlistSeconds)
