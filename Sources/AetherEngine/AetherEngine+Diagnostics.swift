@@ -4,6 +4,17 @@ import AVFoundation
 
 extension AetherEngine {
 
+    /// #220 diagnostic opt-in: appends a live large-block census (blocks >= 1 MB, bucketed by
+    /// size class) to the 30 s memprobe line. A flat `mallocBlocks` with a rising `mallocMB`
+    /// identifies "one large buffer is growing" but not which one; the census names the size
+    /// class so the search does not depend on having guessed the site.
+    ///
+    /// Off by default and intended for triage builds only: the walk holds every malloc zone
+    /// through `force_lock`, which briefly blocks allocating threads.
+    public nonisolated static func setLargeAllocationCensusEnabled(_ enabled: Bool) {
+        MallocBlockCensus.isEnabled = enabled
+    }
+
     // MARK: - Buffer probe
 
     /// Seconds of AVPlayer buffer ahead of the current playhead (sum of loadedTimeRanges beyond now). 0 on SW path / pre-start.
@@ -100,6 +111,10 @@ extension AetherEngine {
                     + "rss=\(rssMB)MB "
                     + vmStr
                     + mallocStr
+                    // #220: empty unless the host opted in. A flat mallocBlocks with a rising
+                    // mallocMB says one large buffer is growing but not which; this names the
+                    // size class.
+                    + MallocBlockCensus.probeFragment()
                     + "avioFetchedMB=\(avioMB) "
                     + "cacheCount=\(cacheCount) cacheMB=\(cacheMB) "
                     + "packetsWritten=\(packetsWritten) "
