@@ -816,13 +816,15 @@ extension AetherEngine {
                 // #65: mirror AVPlayer's rendered (playlist-axis) position for off-main wedge re-anchoring.
                 self.renderedPositionMirror.set(value)
                 self.clock.sourceTime = value + shift
-                // bufferedPosition = the disk SegmentCache read-ahead frontier (origin -> disk), which is
-                // what the Network Buffer setting controls, expressed on the display axis as the playhead
-                // plus the seconds of contiguously cached-ahead content. Replaces AVPlayer's shallow ~4 s
+                // bufferedPosition = the end of the contiguous safe range (origin -> disk), expressed on
+                // the display axis as the playhead plus contiguously available seconds ahead of it: the
+                // segments AVPlayer already fetched, plus the disk SegmentCache band above them, which is
+                // what the Network Buffer setting controls. Replaces AVPlayer's shallow ~4 s
                 // loadedTimeRanges end (pinned by preferredForwardBufferDuration), which did not move with
                 // the setting. readAhead >= 0 keeps the #54 contract that bufferedPosition never trails the
                 // rendered frame. Drawn against the 0-based duration, so map onto the display axis to keep
-                // the buffer bar aligned with currentTime (0 off disc). AE#105. See docs issue #33 follow-up.
+                // the buffer bar aligned with currentTime (0 off disc). AE#105, #207 follow-up.
+                // See docs issue #33 follow-up.
                 let renderedDisplay = PresentationAxis.display(
                     sourcePTS: value + shift, origin: self.sourcePresentationOrigin)
                 let readAhead = self.nativeVideoSession?

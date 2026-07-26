@@ -1524,17 +1524,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// On-disk segment bytes (freshly stat-ed). Used by `aetherctl live --report-cache-bytes`.
     var segmentCacheDiskBytes: Int64 { subsystemSnapshot().cache?.diskBytes() ?? 0 }
 
-    /// Seconds of contiguously cached content ahead of the playhead on the media-playlist axis.
-    /// Reflects the disk SegmentCache read-ahead (what the Network Buffer setting controls), NOT
-    /// AVPlayer's shallow forward buffer. Returns 0 when nothing is cached ahead or the plan is empty.
+    /// Seconds of contiguous *safe* content ahead of the playhead on the media-playlist axis: what the
+    /// consumer already holds, plus what sits contiguously above it in the disk SegmentCache (which is
+    /// what the Network Buffer setting controls). Returns 0 when nothing is cached ahead or the plan is
+    /// empty.
+    ///
+    /// The frontier walk is anchored at `max(playhead, consumer fetch target)`, see
+    /// `SegmentCache.contiguousForwardFrontier(fromPlayhead:)`: the cache retains from
+    /// `fetchTarget - backwardWindow` upward, so under an opt-in whole-source prefetch the playhead's own
+    /// segment is evicted and a playhead-anchored walk collapsed to 0 while the whole band was resident
+    /// (#207 follow-up). A frontier below the playhead still reports 0, which keeps the #54 contract that
+    /// the frontier never trails the rendered frame.
+    ///
     /// segmentIndexForPlaylistTime and the plan read each take restartLock briefly and sequentially
     /// (no nesting); a plan rebuilt between them at worst yields one transiently wrong tick, acceptable
-    /// for a visual bar.
+    /// for a visual bar. One residual of the same kind: between a backward seek and the consumer's first
+    /// fetch at the new position the target is still the old one, so a tick or two can report the stale
+    /// band before `declareTarget` lands.
     func contiguousForwardReadAheadSeconds(playlistSeconds: Double) -> Double {
         guard let cache = subsystemSnapshot().cache else { return 0 }
-        let targetIdx = segmentIndexForPlaylistTime(playlistSeconds)
-        let frontier = cache.contiguousForwardFrontier(from: targetIdx)
-        guard frontier >= targetIdx else { return 0 }
+        let playheadIdx = segmentIndexForPlaylistTime(playlistSeconds)
+        let frontier = cache.contiguousForwardFrontier(fromPlayhead: playheadIdx)
+        guard frontier >= playheadIdx else { return 0 }
         restartLock.lock()
         defer { restartLock.unlock() }
         guard frontier >= 0, frontier < segmentPlan.count else { return 0 }
