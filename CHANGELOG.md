@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.4] - 2026-07-26
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.4))
+
+### Fixed
+
+- **The reported buffer frontier no longer collapses to the playhead under an opt-in whole-source prefetch.** `clock.bufferedPosition` fell back to exactly the playhead a few minutes into a session and stayed there for the rest of it, so a host drawing a buffer bar from it watched the bar shrink to nothing while a quarter-hour of content sat resident on disk. The cause was an anchor mismatch, not byte accounting: the frontier walk started at the playhead's segment, while the cache's eviction window is anchored on the consumer's fetch target (`lo = target - backwardWindow`). AVPlayer's fetch target runs around 120 s ahead of the playhead, so the playhead's own segment falls below the retained low end and is an evictable extra. Only an opt-in prefetch ever reaches the retention budget, so only there does the eviction of those extras actually run, which is why a whole-source window surfaced a bug the historical 10-segment window never could: the walk began on a hole and reported nothing cached ahead on every tick. The walk now anchors at `max(playhead, fetch target)`, which is sound rather than merely optimistic, because a segment is only ever declared as the target from the segment-serve path, so everything below it has been handed to the consumer and sits in its own buffer. Simply skipping the leading hole would have failed in the opposite and more dangerous direction: after a backward seek the band above the new position survives, and a walk that skipped the hole would report it as buffered when almost nothing is available where playback actually is. Playback was never affected, nothing was missing, and the union of the consumer's buffer and the cache stayed contiguous throughout; only the published figure was wrong.
+
+### Changed
+
+- **`clock.bufferedPosition`'s contract is stated the same way everywhere.** It is the end of the contiguous *safe* range ahead of the playhead: on the native path what AVPlayer already holds plus the contiguous disk cache band above it, which is what grows with the network buffer setting. The documentation had drifted, describing the frontier as AVPlayer's `loadedTimeRanges` span in one place (superseded in 5.0.0, when the frontier moved to the disk cache read-ahead) and as the disk read-ahead alone in another. No behaviour change beyond the fix above, which also removes an under-report during the first seconds of a session before the cache has built.
+
 ## [5.23.3] - 2026-07-25
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.3))
