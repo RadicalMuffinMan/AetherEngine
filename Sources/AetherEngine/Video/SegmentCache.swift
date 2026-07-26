@@ -340,13 +340,43 @@ final class SegmentCache: @unchecked Sendable {
         return _highestStoredIndex
     }
 
-    /// Largest K such that every index in [targetIdx ... K] is resident, walking forward from the
-    /// playhead until the first gap. Returns targetIdx - 1 when targetIdx itself is absent (nothing
-    /// cached ahead). Used to express the disk read-ahead frontier as a segment index. Thread-safe.
-    func contiguousForwardFrontier(from targetIdx: Int) -> Int {
+    /// Largest K such that every index in [startIdx ... K] is resident, walking forward until the first
+    /// gap. Returns startIdx - 1 when startIdx itself is absent (nothing cached from there). Used to
+    /// express the disk read-ahead frontier as a segment index. Thread-safe.
+    func contiguousForwardFrontier(from startIdx: Int) -> Int {
         condition.lock()
         defer { condition.unlock() }
-        var k = targetIdx
+        return frontierLocked(from: startIdx)
+    }
+
+    /// Frontier of the contiguous *safe* range for a playhead at `playheadIdx`, anchored at
+    /// `max(playheadIdx, currentTargetIndex)` (#207 follow-up).
+    ///
+    /// Walking from the playhead alone under-reports whenever the consumer's fetch target runs ahead of
+    /// it: `pruneOutsideWindow` retains from `currentTargetIndex - backwardWindow` upward, so the
+    /// playhead's own segment is an evictable extra, and an opt-in whole-source prefetch (which is the
+    /// only case that reaches the retention budget) really does evict it. The walk then starts on a hole
+    /// and reports nothing ahead while the whole band is resident.
+    ///
+    /// Anchoring on the fetch target is safe rather than merely optimistic: `declareTarget` is only ever
+    /// called from the segment-serve path, so everything below `currentTargetIndex` has been handed to
+    /// the consumer and sits in its own buffer. Skipping the leading hole *without* that bound would
+    /// instead land on a stale band above a backward seek (nothing forces its eviction while the budget
+    /// has room) and report it as buffered, which fails in the dangerous direction; anchoring at the new
+    /// target stops the walk at the hole above the freshly produced segments. `max` keeps a backward
+    /// refetch behind the playhead (Continuous-Audio handover) from dragging the anchor back.
+    ///
+    /// Anchor and walk share one lock hold: reading `targetIndex` separately would let a target change
+    /// land between the two and walk from an anchor that does not match the entries observed.
+    func contiguousForwardFrontier(fromPlayhead playheadIdx: Int) -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return frontierLocked(from: max(playheadIdx, currentTargetIndex))
+    }
+
+    /// Must be called with condition held.
+    private func frontierLocked(from startIdx: Int) -> Int {
+        var k = startIdx
         while entries[k] != nil { k += 1 }
         return k - 1
     }
