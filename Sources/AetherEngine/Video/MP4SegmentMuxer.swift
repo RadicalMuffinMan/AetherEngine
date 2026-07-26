@@ -410,6 +410,10 @@ final class MP4SegmentMuxer {
                 throw MuxerError.copyParametersFailed(code: aCopy)
             }
             audioStream.pointee.time_base = audio.timeBase
+            // AE#221: repair a degenerate FLAC STREAMINFO before movenc serialises it into dfLa.
+            if let streamInfo = Self.sanitizedFLACExtradata(UnsafePointer(audioStream.pointee.codecpar)) {
+                Self.replaceExtradata(audioStream.pointee.codecpar, with: streamInfo)
+            }
         }
 
         var opts: OpaquePointer? = nil
@@ -857,6 +861,47 @@ final class MP4SegmentMuxer {
             AV_PKT_DATA_DOVI_CONF
         )
     }
+
+    /// AE#221: FLAC `STREAMINFO` with an illegal `min_blocksize`, clamped up to `max_blocksize`.
+    /// Returns nil when there is nothing to repair, or nothing to repair it with.
+    ///
+    /// The spec floor is 16; 0 shows up in the wild because an MKV -> MP4 remux copies the source
+    /// `CodecPrivate` verbatim and encoders that never rewrite `STREAMINFO` after a streaming pass leave the
+    /// field zeroed. libavcodec's decoder ignores it, so the source demuxes and plays everywhere else, but
+    /// CoreMedia validates it and rejects the whole audio sample description: the HLS asset fails to open
+    /// with `-12848` (surfacing as AVFoundation `-11829 "Cannot Open"`) on the first segment. Stream-copy
+    /// hands the source extradata straight to movenc, which writes it into `dfLa` byte for byte, so without
+    /// this the defect reaches every segment of the session.
+    ///
+    /// `max_blocksize` is the only blocksize the container attests to, so it is the sole honest clamp
+    /// target; when it is illegal too there is nothing to copy from and inventing a value would be a guess.
+    /// Bisected on the reporter's asset: `min_blocksize` alone decides whether the session opens, and
+    /// `total_samples` (equally wrong there, describing the pre-cut source) does not, so nothing else moves.
+    static func sanitizedFLACExtradata(
+        _ codecpar: UnsafePointer<AVCodecParameters>
+    ) -> [UInt8]? {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_FLAC,
+              let extradata = codecpar.pointee.extradata,
+              codecpar.pointee.extradata_size >= Int32(flacStreamInfoSize) else { return nil }
+
+        var bytes = [UInt8](UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
+        let minBlockSize = UInt16(bytes[0]) << 8 | UInt16(bytes[1])
+        let maxBlockSize = UInt16(bytes[2]) << 8 | UInt16(bytes[3])
+        guard minBlockSize < flacMinimumBlockSize, maxBlockSize >= flacMinimumBlockSize else { return nil }
+
+        bytes[0] = UInt8(maxBlockSize >> 8)
+        bytes[1] = UInt8(maxBlockSize & 0xFF)
+        EngineLog.emit(
+            "[MP4SegmentMuxer] FLAC STREAMINFO min_blocksize=\(minBlockSize) is illegal, "
+            + "clamped to max_blocksize=\(maxBlockSize) so dfLa passes CoreMedia validation",
+            category: .session
+        )
+        return bytes
+    }
+
+    /// FLAC `STREAMINFO` payload length, and the spec's floor for both blocksize fields.
+    private static let flacStreamInfoSize = 34
+    private static let flacMinimumBlockSize: UInt16 = 16
 
     /// Replace codecpar.extradata using av_malloc + AV_INPUT_BUFFER_PADDING_SIZE pad.
     private static func replaceExtradata(
