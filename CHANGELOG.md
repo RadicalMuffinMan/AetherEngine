@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.5] - 2026-07-26
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.5))
+
+### Fixed
+
+- **An E-AC-3 source whose first segment carries no audio packet plays instead of wedging the muxer.** Such a source (audio blocks sitting behind seconds of video in file order, common in WEB-DL remuxes) never produced a frame: the first segment cut failed with -22 "Cannot write moov atom before EAC3 packets parsed", the pump ended, the VOD revive rebuilt the identical configuration twice more, and the session was abandoned as "not muxable", so a host fell back to a server transcode of a file it should have played untouched. movenc builds the `ec-3` sample entry's `dec3` box in `handle_eac3`, that is only from a PARSED bitstream frame, never from codecpar or extradata, so `+delay_moov` alone cannot cover a first fragment that holds video only. `flushPendingFragment` already refused such a flush; the cut did not, and its only "not now" signal was a nil return, which the producer correctly reads as a fatal wedge. A cut now has a third outcome, distinct from success and failure: nothing is written, the muxer stays intact, and the pump scans forward (bounded) for one real audio frame and exits with it. The session keeps that frame and rebuilds, and every muxer from then on muxes it at init, which writes moov with a genuine `dec3`, and then discards the primed fragment's bytes. The delivered segment is therefore exactly what was planned, with no out-of-place audio sample and no disjoint track ranges, and the E-AC-3 stream-copy is preserved, Atmos included, rather than being downgraded to the FLAC bridge. Bridging would not have been a fix in any case: the E-AC-3 bridge wedges identically, because its encoder output is also E-AC-3. A source whose audio never arrives inside the scan bounds falls through to the existing recovery.
+- **A teardown on a muxer that never received an audio packet stops logging failed moov writes.** `finalize()` gained the same precondition as the cut, so a muxer that cannot write moov closes quietly instead of emitting two more -22s for a moov it was never able to produce.
+
 ## [5.23.4] - 2026-07-26
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.4))
