@@ -233,16 +233,22 @@ extension AetherEngine {
     /// `ahead` the undrained forward extent that `appendPersistentData` gates the suspend on.
     /// `ahead` far above winHighWater (16 MB) while `susp=0` means the backpressure never
     /// engaged, which is a different defect from a transport overshoot past a suspend that did.
+    /// `postMB` is what the transport delivered after the suspend was issued. #174 priced that
+    /// as a bounded in-flight overshoot; a value tracking the whole window says `suspend()` is
+    /// not stopping delivery, so the high water bounds nothing at all.
     nonisolated static func readerWindowFragment(
-        pump: (windowBytes: Int, aheadBytes: Int, suspended: Bool)?,
-        prefetch: (windowBytes: Int, aheadBytes: Int, suspended: Bool)?
+        pump: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?,
+        prefetch: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?
     ) -> String {
-        func fragment(_ prefix: String,
-                      _ w: (windowBytes: Int, aheadBytes: Int, suspended: Bool)?) -> String {
+        func fragment(
+            _ prefix: String,
+            _ w: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?
+        ) -> String {
             guard let w else { return "" }
             return "\(prefix)WinMB=\(w.windowBytes / 1024 / 1024) "
                 + "\(prefix)AheadMB=\(w.aheadBytes / 1024 / 1024) "
                 + "\(prefix)Susp=\(w.suspended ? 1 : 0) "
+                + "\(prefix)PostMB=\(w.postSuspendBytes / 1024 / 1024) "
         }
         return fragment("pump", pump) + fragment("pref", prefetch)
     }

@@ -32,7 +32,7 @@ final class SoftwarePlaybackHost {
 
     /// #220: the pump demuxer's network sliding window, for the periodic memprobe. Paired with
     /// the subtitle side reader's own window, the two connections are separately attributable.
-    var ioWindowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool)? {
+    var ioWindowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)? {
         demuxer?.ioWindowDiagnostics
     }
 

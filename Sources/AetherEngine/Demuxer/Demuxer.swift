@@ -175,7 +175,7 @@ public final class Demuxer: @unchecked Sendable {
     /// #220: sliding-window snapshot of this demuxer's network reader, nil for disc / custom /
     /// file providers that have no window. Surfaced per demuxer (pump and subtitle side reader
     /// are separate readers against the same origin) in the periodic memprobe.
-    var ioWindowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool)? {
+    var ioWindowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)? {
         (avioProvider as? AVIOReader)?.windowDiagnostics
     }
 

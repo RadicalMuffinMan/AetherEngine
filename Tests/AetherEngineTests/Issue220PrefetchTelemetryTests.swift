@@ -89,8 +89,10 @@ struct Issue220PrefetchTelemetryTests {
     @Test("both readers report window, ahead and suspend state")
     func bothReadersReported() {
         let fragment = AetherEngine.readerWindowFragment(
-            pump: (windowBytes: 12 * 1024 * 1024, aheadBytes: 8 * 1024 * 1024, suspended: false),
-            prefetch: (windowBytes: 1024 * 1024 * 1024, aheadBytes: 1020 * 1024 * 1024, suspended: false))
+            pump: (windowBytes: 12 * 1024 * 1024, aheadBytes: 8 * 1024 * 1024,
+                   suspended: false, postSuspendBytes: 0),
+            prefetch: (windowBytes: 1024 * 1024 * 1024, aheadBytes: 1020 * 1024 * 1024,
+                       suspended: false, postSuspendBytes: 0))
         #expect(fragment.contains("pumpWinMB=12 "))
         #expect(fragment.contains("pumpAheadMB=8 "))
         #expect(fragment.contains("pumpSusp=0 "))
@@ -103,8 +105,23 @@ struct Issue220PrefetchTelemetryTests {
     func suspendedReaderFlagged() {
         let fragment = AetherEngine.readerWindowFragment(
             pump: nil,
-            prefetch: (windowBytes: 17 * 1024 * 1024, aheadBytes: 17 * 1024 * 1024, suspended: true))
+            prefetch: (windowBytes: 17 * 1024 * 1024, aheadBytes: 17 * 1024 * 1024,
+                       suspended: true, postSuspendBytes: 1024 * 1024))
         #expect(!fragment.contains("pump"))
         #expect(fragment.contains("prefSusp=1 "))
+    }
+
+    /// #220: the quantity that decided the issue. A suspend that works leaves `PostMB` at the
+    /// transport's in-flight amount; one that does not leaves it tracking the whole window, and
+    /// the two are only distinguishable because this is reported separately from `AheadMB`.
+    @Test("post-suspend delivery is reported per reader")
+    func postSuspendDeliveryReported() {
+        let fragment = AetherEngine.readerWindowFragment(
+            pump: (windowBytes: 16 * 1024 * 1024, aheadBytes: 16 * 1024 * 1024,
+                   suspended: true, postSuspendBytes: 2 * 1024 * 1024),
+            prefetch: (windowBytes: 612 * 1024 * 1024, aheadBytes: 609 * 1024 * 1024,
+                       suspended: true, postSuspendBytes: 911 * 1024 * 1024))
+        #expect(fragment.contains("pumpPostMB=2 "))
+        #expect(fragment.contains("prefPostMB=911 "))
     }
 }
