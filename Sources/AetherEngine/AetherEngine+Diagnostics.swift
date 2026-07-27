@@ -124,9 +124,17 @@ extension AetherEngine {
 
                 // #220: the two readers of a subtitled VOD session, separately attributable.
                 // `ahead` above winHighWater (16 MB) with `susp=0` is backpressure that never
-                // engaged; the pump's own window is the control. Software path only: the native
-                // path reads through AVPlayer and has no AVIOReader window of its own.
+                // engaged; the pump's own window is the control.
+                //
+                // Both paths, not just software. On a direct-play source the native path runs
+                // the HLS loopback, so `HLSVideoEngine` demuxes from the origin through an
+                // AVIOReader of its own and only the remuxed segments reach AVPlayer. Its
+                // producer parks whenever the forward buffer is full, which is exactly the
+                // shape that lets a connection ignoring the suspend keep filling the window,
+                // and the #174 field crash it was built against (HTTPS origin, boringssl in
+                // the stack) was on this path. Reporting software-only hid that.
                 let pumpWin = self.softwareHost?.ioWindowDiagnostics
+                    ?? self.nativeVideoSession?.demuxer?.ioWindowDiagnostics
                 let prefetchWin = self.subtitleForwardPrefetchDemuxer?.ioWindowDiagnostics
                 let readerStr = Self.readerWindowFragment(pump: pumpWin, prefetch: prefetchWin)
 
