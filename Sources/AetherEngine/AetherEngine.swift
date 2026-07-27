@@ -3361,7 +3361,7 @@ public final class AetherEngine: ObservableObject {
     /// Arm the progress watchdog for a load that handed the receiver a playlist with subtitle renditions.
     /// No-op otherwise: the media playlist is the fallback itself, and a local session cannot be refused.
     @MainActor
-    func armAirPlayProgressWatchdog(gen: UInt64, position: Double, attempt: Int = 1) {
+    func armAirPlayProgressWatchdog(gen: UInt64, position: Double) {
         airPlayProgressWatchdog?.cancel()
         airPlayProgressWatchdog = nil
         guard airPlayActive, airPlayServedMasterToReceiver else { return }
@@ -3370,22 +3370,23 @@ public final class AetherEngine: ObservableObject {
             let seconds = AetherEngine.airPlayProgressWatchdogSeconds
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard let self, !Task.isCancelled, self.loadGeneration == gen else { return }
-            self.handleRefusedAirPlayMaster(baseline: baseline, position: position,
-                                            attempt: attempt, gen: gen)
+            self.handleRefusedAirPlayMaster(baseline: baseline, position: position)
         }
     }
 
-    /// The receiver never started on the playlist it was handed (#227). An HDR master gets one more attempt
-    /// before the media fallback, because the first attempt is what makes a Match-Dynamic-Range receiver
-    /// switch its output to HDR: it switches during the refused attempt, too late for that attempt but in
-    /// time for the next one. Same shape as the #35 cold-DV gate, where a failed attempt warms the link and
-    /// the retry succeeds. The media playlist is no place to wait for that switch, the receiver drops back
-    /// to SDR while it plays that (Vincent, on device).
+    /// The receiver never started on the playlist it was handed (#227): reload the LAN media playlist, which
+    /// every receiver takes, and remember an HDR refusal so the same receiver is not made to wait again.
+    ///
+    /// A second master attempt was tried and dropped. The idea was that the first, refused attempt is what
+    /// makes a Match-Dynamic-Range receiver switch its output to HDR, the way the #35 cold-DV gate's failed
+    /// attempt warms the link; the receiver does switch during that window. On device it changed nothing and
+    /// only doubled the wait before the picture appeared, so the honest answer for such a receiver is the
+    /// media playlist plus a host telling the user to set the format to HDR or Dolby Vision.
     @MainActor
-    private func handleRefusedAirPlayMaster(baseline: Double, position: Double,
-                                            attempt: Int, gen: UInt64) {
+    private func handleRefusedAirPlayMaster(baseline: Double, position: Double) {
         guard airPlayActive, airPlayServedMasterToReceiver else { return }
-        guard let host = nativeHost, let session = nativeVideoSession else { return }
+        guard let host = nativeHost, let session = nativeVideoSession,
+              let mediaURL = session.mediaPlaylistURL else { return }
         // Deliberately NOT gated on `state`: a refused session parks at paused, which is exactly the case
         // this exists for, and an earlier version guarded on `state == .playing` and therefore never fired
         // (device log 2026-07-27, where the #65 wedge recovery then nudged six times and gave up). The
@@ -3394,28 +3395,15 @@ public final class AetherEngine: ObservableObject {
         let advanced = currentTime - baseline
         guard advanced < 0.5, !session.hasServedMediaSegment else { return }
 
-        if attempt < Self.airPlayMasterAttempts, session.servedSourceIsHDR,
-           let masterURL = session.masterPlaylistURL {
-            EngineLog.emit(
-                "[AirPlay] receiver did not start in "
-                + "\(String(format: "%.0f", Self.airPlayProgressWatchdogSeconds))s; offering the master once "
-                + "more (attempt \(attempt + 1)/\(Self.airPlayMasterAttempts)); the refused attempt should "
-                + "have switched the receiver's output to HDR by now",
-                category: .session)
-            host.load(url: airPlayHostSwapped(masterURL), startPosition: position, inPlaceSwap: true)
-            host.play()
-            armAirPlayProgressWatchdog(gen: gen, position: position, attempt: attempt + 1)
-            return
-        }
-
-        guard let mediaURL = session.mediaPlaylistURL else { return }
         let receiverUID = Self.currentAirPlayReceiverUID()
         if let receiverUID, session.servedSourceIsHDR {
             airPlayReceiversRefusingHDRMaster.insert(receiverUID)
         }
         EngineLog.emit(
-            "[AirPlay] receiver did not start after \(attempt) master attempt(s); falling back to the LAN "
-            + "media playlist (subtitle renditions dropped"
+            "[AirPlay] receiver did not start in "
+            + "\(String(format: "%.0f", Self.airPlayProgressWatchdogSeconds))s (clock advanced "
+            + "\(String(format: "%.2f", advanced))s, no segment fetched); the playlist it was handed is "
+            + "refused, falling back to the LAN media playlist (subtitle renditions dropped"
             + (receiverUID != nil && session.servedSourceIsHDR
                ? ", and this receiver is remembered as refusing HDR masters" : "") + ")",
             category: .session)

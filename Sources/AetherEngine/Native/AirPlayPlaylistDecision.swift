@@ -33,8 +33,9 @@ import Foundation
 /// The master is therefore always offered. A receiver that will not take it fails silently, with no
 /// `-11868`, no failed item, and the rate flickering to `playing` for one tick so even `hasEverPlayed`
 /// latches, which is why `AetherEngine`'s progress watchdog is the thing that catches it: five seconds
-/// without the clock advancing reloads the LAN media playlist, and that receiver is remembered for the
-/// rest of the process so it is never made to wait again.
+/// without a segment fetched reloads the LAN media playlist, and that receiver is remembered for the rest
+/// of the process so it is never made to wait again. Offering the master a second time to exploit the
+/// output switch the first attempt triggers was tried on device and changed nothing but the wait.
 enum AirPlayPlaylistDecision {
 
     /// Which of the loopback server's playlists is handed to a wireless AirPlay receiver.
