@@ -158,7 +158,7 @@ struct Issue230PrefetchReadPositionParkTests {
         demuxer.discardAllStreamsExcept([subtitleIndex], pacing: pacingIndex)
 
         let store = SubtitlePacketStore()
-        let harvested = await SubtitleForwardPrefetcher.run(
+        let outcome = await SubtitleForwardPrefetcher.run(
             demuxer: demuxer, store: store,
             streamIndices: [subtitleIndex], assemblyIndices: [],
             pacingIndex: pacingIndex,
@@ -166,7 +166,7 @@ struct Issue230PrefetchReadPositionParkTests {
             parkPollNanoseconds: 1_000_000,
             playhead: { 0.0 })
 
-        #expect(harvested == deliverableSubtitles,
+        #expect(outcome.harvested == deliverableSubtitles,
                 "only subtitle packets count as harvested, and all of them do")
         #expect(store.entries(streamIndex: pacingIndex, from: 0, through: 1000).isEmpty,
                 "the pacing stream must leave nothing in the store")

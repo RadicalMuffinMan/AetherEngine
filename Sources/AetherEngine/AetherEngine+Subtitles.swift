@@ -364,28 +364,63 @@ extension AetherEngine {
             hasSource: loadedURL != nil),
             let store = activeSubtitlePacketStore,
             let url = loadedURL else { return }
-        var customClone: IOReader? = nil
-        if isCustomSource {
-            guard let clone = customReader?.makeIndependentReader() else { return }
-            customClone = clone
-        }
+        let isCustom = isCustomSource
+        if isCustom, customReader == nil { return }
         let headers = loadedOptions.httpHeaders
         let formatHint = customFormatHint
         let probesize = loadedOptions.probesize
         let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
         let titleID = activeDiscTitleID
         let anchor = max(0, startAt ?? sourceTime)
-        let reader = customClone
         // Phase D: while the OCR worker is armed the prefetcher must out-run the worker's
         // 240 s window, or the packet store never holds what the worker wants to decode.
         let lead = subtitleOCRArmedOrdinal != nil
             ? Self.subtitleOCRPrefetchLeadSeconds : Self.subtitleDrainLeadSeconds
         subtitleForwardPrefetchTask = Task.detached(priority: .utility) { [weak self] in
-            await self?.runSubtitleForwardPrefetchSession(
-                url: url, reader: reader, formatHint: formatHint, headers: headers,
-                startAt: anchor, callerProbesize: probesize,
-                callerMaxAnalyzeDuration: maxAnalyzeDuration,
-                selectTitleID: titleID, store: store, leadSeconds: lead)
+            // #231: the loop used to end on the first failed read and only a seek or producer
+            // re-anchor could bring it back, so a viewer who does not seek lost every cue beyond
+            // the pump's own park for the rest of the session, silently. Restart on a read error,
+            // bounded, re-anchored at the playhead the failure left behind.
+            var budget = SubtitleForwardPrefetcher.RestartBudget(
+                maxConsecutiveFailures: AetherEngine.subtitleForwardPrefetchMaxConsecutiveFailures,
+                maxRestarts: AetherEngine.subtitleForwardPrefetchMaxRestarts,
+                backoffNanoseconds: AetherEngine.subtitleForwardPrefetchRestartBackoffNanoseconds)
+            var resumeAt = anchor
+            while !Task.isCancelled {
+                // A custom source needs its own independent reader per attempt: the previous one
+                // is closed by the session that failed.
+                var attemptReader: IOReader? = nil
+                if isCustom {
+                    guard let clone = await MainActor.run(body: { [weak self] in
+                        self?.customReader?.makeIndependentReader()
+                    }) else { return }
+                    attemptReader = clone
+                }
+                guard let self else { return }
+                let outcome = await self.runSubtitleForwardPrefetchSession(
+                    url: url, reader: attemptReader, formatHint: formatHint, headers: headers,
+                    startAt: resumeAt, callerProbesize: probesize,
+                    callerMaxAnalyzeDuration: maxAnalyzeDuration,
+                    selectTitleID: titleID, store: store, leadSeconds: lead)
+                guard outcome.exit.isRestartable, !Task.isCancelled else { return }
+
+                guard let backoff = budget.chargeFailure(harvested: outcome.harvested) else {
+                    EngineLog.emit(
+                        "[AetherEngine] #151 forward prefetch giving up after \(budget.restarts) "
+                        + "restarts (\(budget.consecutiveFailures) consecutive): cues beyond the "
+                        + "pump's forward park will not be filled for the rest of this session",
+                        category: .engine)
+                    return
+                }
+                do { try await Task.sleep(nanoseconds: backoff) } catch { return }
+                guard let fresh = await MainActor.run(body: { [weak self] in self?.sourceTime })
+                else { return }
+                resumeAt = max(0, fresh)
+                EngineLog.emit(
+                    "[AetherEngine] #151 forward prefetch restarting after a read failure "
+                    + "(restart \(budget.restarts)) at \(String(format: "%.2f", resumeAt))s",
+                    category: .engine)
+            }
         }
     }
 
@@ -406,7 +441,7 @@ extension AetherEngine {
         url: URL, reader: IOReader?, formatHint: String?, headers: [String: String],
         startAt: Double, callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?,
         selectTitleID: Int?, store: SubtitlePacketStore, leadSeconds: Double
-    ) async {
+    ) async -> SubtitleForwardPrefetcher.Outcome {
         let demuxer = Demuxer()
         let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
             callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration)
@@ -417,7 +452,7 @@ extension AetherEngine {
         }
         guard registered else {
             reader?.close()
-            return
+            return SubtitleForwardPrefetcher.Outcome(exit: .cancelled, harvested: 0)
         }
         defer {
             Task { @MainActor [weak self, weak demuxer] in
@@ -439,7 +474,7 @@ extension AetherEngine {
         }
         guard !Task.isCancelled else {
             reader?.close()
-            return
+            return SubtitleForwardPrefetcher.Outcome(exit: .cancelled, harvested: 0)
         }
         do {
             if let reader {
@@ -452,7 +487,7 @@ extension AetherEngine {
         } catch {
             EngineLog.emit("[AetherEngine] #151 forward prefetch open failed: \(error)", category: .engine)
             reader?.close()
-            return
+            return SubtitleForwardPrefetcher.Outcome(exit: .openFailed, harvested: 0)
         }
         defer {
             demuxer.close()
@@ -460,7 +495,9 @@ extension AetherEngine {
         }
 
         let streams = demuxer.subtitleStreamIndices()
-        guard !streams.isEmpty else { return }
+        guard !streams.isEmpty else {
+            return SubtitleForwardPrefetcher.Outcome(exit: .openFailed, harvested: 0)
+        }
         let assembly = demuxer.splitDisplaySetSubtitleStreamIndices()
         // #230: one non-subtitle stream stays deliverable at AVDISCARD_NONKEY so the loop has a
         // read-position control point between cues. AVDISCARD_ALL is applied inside av_read_frame,
@@ -492,7 +529,7 @@ extension AetherEngine {
             "[AetherEngine] #151 forward prefetch started: streams=\(streams.sorted()) "
             + "pacing=\(pacing) startAt=\(String(format: "%.2f", startAt))s lead=\(leadSeconds)s",
             category: .engine)
-        let harvested = await SubtitleForwardPrefetcher.run(
+        let outcome = await SubtitleForwardPrefetcher.run(
             demuxer: demuxer, store: store,
             streamIndices: streams, assemblyIndices: assembly,
             pacingIndex: pacing,
@@ -502,8 +539,10 @@ extension AetherEngine {
                 await MainActor.run(body: { [weak self] in self?.sourceTime })
             })
         EngineLog.emit(
-            "[AetherEngine] #151 forward prefetch exited (cancelled=\(Task.isCancelled)) harvested=\(harvested)",
+            "[AetherEngine] #151 forward prefetch exited (reason=\(outcome.exit) "
+            + "cancelled=\(Task.isCancelled)) harvested=\(outcome.harvested)",
             category: .engine)
+        return outcome
     }
 
     /// Rebuild an AVPacket from a stored entry and decode it. PTS/duration ride a 1/1000
