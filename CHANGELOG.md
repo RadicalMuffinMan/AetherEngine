@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.9] - 2026-07-27
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.9))
+
 ### Fixed
 
 - **Wireless AirPlay works again, and it now carries subtitles as far as the receiver allows.** Three defects sat on top of each other on that hop. First, the reload that the external-playback observer starts tears down the very AVPlayer item the observer watches, so a transient "external playback ended" arrived mid-reload and cleared the AirPlay flag before the load path read it. The rebuilt session therefore served the loopback again, the receiver re-engaged external playback, and that edge started the next reload: one full session rebuild per turn, forever, with the LAN rewrite never once applied. An edge that lands during a session-preserving reload is now held and reconciled against the live audio route afterwards, the route being the one signal that survives an item teardown. Second, the 5.23.8 rule that keeps a master for its subtitle renditions asked `videoRange != .sdr || effectiveDvMode`, and `effectiveDvMode` is a device capability, so on any DV-capable iPhone or iPad SDR content took the HDR branch and lost its renditions anyway, which made that release a no-op on exactly the hardware it was written for. The decision reads the real `VIDEO-RANGE` now. Third, the reactive master-rejection fallback reloaded the `127.0.0.1` media playlist, which a receiver cannot reach, as did the startup-readiness gate's three reloads; all of them are rewritten onto the LAN address.
