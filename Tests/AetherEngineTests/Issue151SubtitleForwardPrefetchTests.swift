@@ -85,6 +85,7 @@ struct Issue151SubtitleForwardPrefetchTests {
             await SubtitleForwardPrefetcher.run(
                 demuxer: demuxer, store: store,
                 streamIndices: [0], assemblyIndices: [],
+                pacingIndex: -1,   // #230: subtitle-only fixture, nothing to pace with
                 leadSeconds: 60, parkPollNanoseconds: 10_000_000,
                 playhead: { playhead.current })
         }
@@ -123,6 +124,7 @@ struct Issue151SubtitleForwardPrefetchTests {
         let harvested = await SubtitleForwardPrefetcher.run(
             demuxer: demuxer, store: store,
             streamIndices: [0], assemblyIndices: [],
+            pacingIndex: -1,
             leadSeconds: 60, parkPollNanoseconds: 1_000_000,
             playhead: { provider.next() })
         #expect(harvested == 2)
