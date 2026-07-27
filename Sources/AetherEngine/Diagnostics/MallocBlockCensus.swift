@@ -140,8 +140,18 @@ private func aeCensusRecord(
           let ranges, let context
     else { return }
     let slots = context.assumingMemoryBound(to: Int.self)
-    for i in 0..<Int(count) {
+    // Hand-rolled counter, not `for i in 0..<Int(count)`. Unspecialized, a Range iterates
+    // through IndexingIterator's protocol witness, which allocates; doing that under the zone
+    // lock recursively locks it and libplatform aborts the process ("Trying to recursively
+    // lock an os_unfair_lock"). Optimized builds specialize the range away and never hit it,
+    // so the old form killed a debug build on the first census and left release builds fine,
+    // which is the worst possible failure mode for an instrument that is supposed to be
+    // watchable. A while loop has no iterator to specialize.
+    var i = 0
+    let n = Int(count)
+    while i < n {
         let size = Int(ranges[i].size)
+        i += 1
         if size < MallocBlockCensus.minimumTrackedBytes { continue }
         // Bucket by floor(log2(size)), clamped into the scratch buffer.
         var bucket = 0
