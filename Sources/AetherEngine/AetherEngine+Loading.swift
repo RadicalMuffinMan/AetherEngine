@@ -686,23 +686,19 @@ extension AetherEngine {
         var playbackURL = try await Task.detached(priority: .userInitiated) { [session] in
             try session.start()
         }.value
-        #if os(iOS)
-        // AirPlay (#86): while external playback is active, serve the loopback over the device's LAN IP and
-        // force the media playlist, so the receiver reaches the engine-processed stream (DV/Atmos/subtitles
-        // preserved) and isn't handed a DV/HDR master it rejects on an SDR panel (DrHurt). Reverts on the
-        // reload when AirPlay ends.
-        if airPlayActive, let lanURL = airPlayPlaybackURL(base: playbackURL) {
-            EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString)", category: .engine)
-            playbackURL = lanURL
-        }
-        #endif
+        // AirPlay (#86): while external playback is active, serve the loopback over the device's LAN IP so
+        // the receiver reaches the engine-processed stream (DV/Atmos/subtitles preserved). An HDR/DV master
+        // is downgraded to the media playlist there (an SDR receiver rejects it, DrHurt); an SDR master is
+        // kept so its subtitle renditions survive the trip (#227). Reverts on the reload when AirPlay ends.
+        let served = airPlayAdjustedPlayback(url: playbackURL, session: session)
+        playbackURL = served.url
         // Superseded while starting: stop and unwind before touching shared state.
         if loadGeneration != generation {
             session.stop()
             try checkLoadCurrent(generation)
         }
         self.nativeVideoSession = session
-        nativeSubtitleRenditionsServed = session.servingMasterPlaylist
+        nativeSubtitleRenditionsServed = served.subtitleRenditionsServed
         extractorYieldState.activate(session: session)
 
         // #15: the stores were created before start() (above) so the VideoSegmentProvider got the references at
