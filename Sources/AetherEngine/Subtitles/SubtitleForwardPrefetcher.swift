@@ -16,6 +16,58 @@ import Libavutil
 /// mirroring the native subtitle readers (memory rule: all side readers share positioning fixes).
 enum SubtitleForwardPrefetcher {
 
+    /// Why a prefetch session ended (#231).
+    ///
+    /// The loop used to leave on the first failed read with no way to tell why, and its exit line
+    /// reported `cancelled=false` for every one of those reasons. Only `.readFailed` is worth
+    /// restarting: EOF is the expected end of a session, cancellation is deliberate, and a source
+    /// that will not open is the documented best-effort case.
+    enum Exit: Equatable {
+        case endOfFile
+        case cancelled
+        case openFailed
+        case readFailed
+
+        var isRestartable: Bool { self == .readFailed }
+    }
+
+    struct Outcome {
+        let exit: Exit
+        let harvested: Int
+    }
+
+    /// #231: how many times a failing prefetch session may be restarted, and how long to wait first.
+    ///
+    /// Two ceilings, because two things look different on the wire. A run of failures with nothing
+    /// harvested between them is a dead link, and giving up quickly is right. A session that
+    /// produced cues and only then broke is a fresh transport failure, so its budget resets; the
+    /// total ceiling is what stops a source that fails in a loop after one packet each time from
+    /// reconnecting forever.
+    struct RestartBudget {
+        let maxConsecutiveFailures: Int
+        let maxRestarts: Int
+        let backoffNanoseconds: UInt64
+        private(set) var consecutiveFailures = 0
+        private(set) var restarts = 0
+
+        init(maxConsecutiveFailures: Int, maxRestarts: Int, backoffNanoseconds: UInt64) {
+            self.maxConsecutiveFailures = maxConsecutiveFailures
+            self.maxRestarts = maxRestarts
+            self.backoffNanoseconds = backoffNanoseconds
+        }
+
+        /// Charge one failed session to the budget. Returns how long to wait before the next
+        /// attempt, or nil when the budget is spent and the prefetcher should stay down.
+        mutating func chargeFailure(harvested: Int) -> UInt64? {
+            consecutiveFailures = harvested > 0 ? 1 : consecutiveFailures + 1
+            restarts += 1
+            guard consecutiveFailures <= maxConsecutiveFailures, restarts <= maxRestarts else {
+                return nil
+            }
+            return backoffNanoseconds << min(consecutiveFailures - 1, 3)
+        }
+    }
+
     /// Resolve a stream's packet time base, memoizing only usable results (#220).
     ///
     /// The lookup used to memoize its own failure: a nil `stream(at:)` fell back to `0/1`, that
@@ -53,8 +105,10 @@ enum SubtitleForwardPrefetcher {
         return Double(raw) * Double(timeBase.num) / Double(timeBase.den)
     }
 
-    /// Read/harvest until EOF, error, cancellation, or a nil playhead (engine gone). Returns the
-    /// number of routed subtitle packets harvested. The demuxer must be positioned by the caller.
+    /// Read/harvest until EOF, error, cancellation, or a nil playhead (engine gone). Returns why it
+    /// stopped and how many routed subtitle packets it harvested (#231: a read error is not an EOF
+    /// and the caller has to be able to tell them apart). The demuxer must be positioned by the
+    /// caller.
     /// Harvest-then-park: the packet whose PTS crosses `playhead + leadSeconds` is stored before
     /// the loop parks, so the store may hold one packet past the lead edge (harmless; the drainer
     /// window decides what decodes). The playhead is snapshot at start and refreshed only inside
@@ -75,13 +129,32 @@ enum SubtitleForwardPrefetcher {
         leadSeconds: Double,
         parkPollNanoseconds: UInt64,
         playhead: @Sendable () async -> Double?
-    ) async -> Int {
-        guard var playheadSnapshot = await playhead() else { return 0 }
+    ) async -> Outcome {
+        guard var playheadSnapshot = await playhead() else {
+            return Outcome(exit: .cancelled, harvested: 0)
+        }
         var harvested = 0
         var timeBaseCache: [Int32: AVRational] = [:]
         var timeBaseFailures = 0
+        var exit = Exit.cancelled
         readLoop: while !Task.isCancelled {
-            guard let pkt = try? demuxer.readPacket() else { break }
+            let next: UnsafeMutablePointer<AVPacket>?
+            do {
+                next = try demuxer.readPacket()
+            } catch {
+                // #231: a transport failure on the side reader, a stall that exhausts the read
+                // deadline, a reconnect that gives up. Distinct from EOF, and restartable.
+                EngineLog.emit(
+                    "[AetherEngine] #151 forward prefetch read failed after \(harvested) packets: "
+                    + "\(error)",
+                    category: .engine)
+                exit = .readFailed
+                break
+            }
+            guard let pkt = next else {
+                exit = .endOfFile
+                break
+            }
             let streamIdx = pkt.pointee.stream_index
             let isTarget = streamIndices.contains(streamIdx)
             guard isTarget || streamIdx == pacingIndex else {
@@ -127,6 +200,6 @@ enum SubtitleForwardPrefetcher {
                 do { try await Task.sleep(nanoseconds: parkPollNanoseconds) } catch { break readLoop }
             }
         }
-        return harvested
+        return Outcome(exit: exit, harvested: harvested)
     }
 }

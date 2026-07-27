@@ -496,6 +496,13 @@ public final class AetherEngine: ObservableObject {
     /// instead of one long MainActor pass.
     nonisolated static let subtitleOCRMaxPacketsPerTick: Int = 48
     nonisolated static let subtitleForwardPrefetchParkPollNanoseconds: UInt64 = 500_000_000
+    /// #231: a prefetch session that dies on a read error is restarted, bounded. Consecutive
+    /// failures are what a dead link looks like; the total ceiling covers a source that fails in a
+    /// loop after harvesting a packet each time.
+    nonisolated static let subtitleForwardPrefetchMaxConsecutiveFailures: Int = 3
+    nonisolated static let subtitleForwardPrefetchMaxRestarts: Int = 8
+    /// Doubles per consecutive failure (1s, 2s, 4s), capped by the consecutive-failure ceiling.
+    nonisolated static let subtitleForwardPrefetchRestartBackoffNanoseconds: UInt64 = 1_000_000_000
 
     @Published public internal(set) var isLoadingSubtitles: Bool = false
     @Published public internal(set) var isSubtitleActive: Bool = false
