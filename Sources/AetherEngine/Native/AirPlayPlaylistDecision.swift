@@ -10,38 +10,31 @@ import Foundation
 /// master-only `EXT-X-MEDIA:TYPE=SUBTITLES` renditions, so `setNativeSubtitleSelected(track:)` had no
 /// legible group to select against and native subtitles never reached any receiver (#227, thatcube).
 ///
-/// **What an Apple TV 4K receiver accepts, measured 2026-07-27** (iPhone 17 Pro, receiver in HDR mode;
-/// the receiver fetches for itself, its own address shows up in the server log):
+/// **What an Apple TV 4K receiver accepts, measured 2026-07-27** (iPhone 17 Pro, DV P8.1 4K source; the
+/// receiver fetches for itself, its own address shows up in the server log):
 ///
-/// | Master handed over | Result |
-/// | --- | --- |
-/// | SDR 1080p H.264, BANDWIDTH 7.5 Mbps | plays, subtitles travel |
-/// | SDR 720p HEVC, BANDWIDTH 5.0 Mbps | plays |
-/// | 4K PQ + DV `SUPPLEMENTAL-CODECS`, 33.8 Mbps | refused |
-/// | 4K PQ, DV dropped (`master_hdr`), 33.8 Mbps | refused |
-/// | 4K PQ, DV dropped, BANDWIDTH clamped to 8 Mbps | refused |
-/// | 4K PQ, DV dropped, RESOLUTION omitted entirely | refused |
-/// | 4K PQ, DV dropped, `HDCP-LEVEL=TYPE-1` declared | refused |
+/// | Receiver output format | Master handed over | Result |
+/// | --- | --- | --- |
+/// | 4K SDR, Match Dynamic Range on | SDR 1080p H.264 | plays, subtitles travel |
+/// | 4K SDR, Match Dynamic Range on | SDR 720p HEVC | plays |
+/// | 4K SDR, Match Dynamic Range on | 4K PQ, every variation tried | refused |
+/// | fixed 4K Dolby Vision | 4K PQ + DV `SUPPLEMENTAL-CODECS` | plays, subtitles travel |
 ///
-/// The trigger is `VIDEO-RANGE=PQ`. Not the DV tag, not the declared peak, not the missing HDCP level,
-/// and not 4K: with RESOLUTION
-/// omitted the receiver cannot know the dimensions before the first segment and refuses anyway, while it
-/// decodes those same 4K PQ segments happily off the media playlist. Two different Apple TV 4K units
-/// behaved identically. The one remaining manifest edit, declaring the range as SDR, was disproven on
-/// hardware in #98 Stage 1.5: the compatibility gate reads the real `colr` and codec, not the string.
+/// The receiver's own output mode decides it, exactly as DrHurt wrote in #86 ("TV MUST be in HDR or DV
+/// mode to accept any non-SDR content via AirPlay"). Match Dynamic Range does not count: it switches only
+/// when tvOS decides the content warrants it and evidently never does for AirPlay content, so a receiver
+/// configured that way sits in SDR and refuses an HDR master. That is the same rule the engine already
+/// applies locally, where `resolveUseMasterPlaylist` serves media for an HDR source on a panel that is not
+/// in HDR mode. Against the parked receiver, dropping the DV `SUPPLEMENTAL-CODECS`, clamping the declared
+/// `BANDWIDTH`, omitting `RESOLUTION` and declaring `HDCP-LEVEL=TYPE-1` each changed nothing, and
+/// declaring the range as SDR was disproven in #98 Stage 1.5, so there is nothing to gain by dressing the
+/// manifest up: what the variant filter wants is a receiver that can present the range.
 ///
-/// **Scope of that finding:** the receiver in those runs was parked in SDR. Its output format was 4K SDR
-/// with Match Dynamic Range on, which switches only when tvOS decides the content warrants it and
-/// evidently never does for AirPlay content. That is the same rule the engine already applies locally
-/// (`resolveUseMasterPlaylist` serves media for an HDR source on a panel that is not in HDR mode), so the
-/// refusal is consistent rather than an AirPlay prohibition, and DrHurt's #86 advice was exactly this:
-/// users should set their Apple TV to HDR or DV. An HDR master is therefore still offered, and a receiver
-/// that will not take it is caught by the progress watchdog and remembered, so the cost of a parked
-/// receiver is one delayed start per process rather than a permanent loss.
-///
-/// The refusal is silent, which is why the downgrade is a decision and not a fallback: no `-11868`, no
-/// `.failed` item, the rate flickers to `playing` for one tick so even `hasEverPlayed` latches, and the
-/// picture simply never starts. `AetherEngine`'s progress watchdog is the only thing that can see it.
+/// The master is therefore always offered. A receiver that will not take it fails silently, with no
+/// `-11868`, no failed item, and the rate flickering to `playing` for one tick so even `hasEverPlayed`
+/// latches, which is why `AetherEngine`'s progress watchdog is the thing that catches it: five seconds
+/// without the clock advancing reloads the LAN media playlist, and that receiver is remembered for the
+/// rest of the process so it is never made to wait again.
 enum AirPlayPlaylistDecision {
 
     /// Which of the loopback server's playlists is handed to a wireless AirPlay receiver.
