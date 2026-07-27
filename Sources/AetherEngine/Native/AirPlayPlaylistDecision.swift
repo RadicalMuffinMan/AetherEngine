@@ -16,32 +16,26 @@ import Foundation
 /// string), so there is no manifest that both survives an SDR receiver and carries renditions.
 enum AirPlayPlaylistDecision {
 
-    /// Whether an HDR/DV master is offered to the receiver instead of being downgraded up front (#227
-    /// follow-up). DrHurt's caveat is conditional on the receiver's mode ("TV MUST be in HDR or DV mode
-    /// to accept any non-SDR content via AirPlay"), and an Apple TV defaults to HDR, so the common case
-    /// accepts the master and its subtitle renditions. A receiver in SDR mode rejects it, and the sender
-    /// cannot read the receiver's mode, so the startup-readiness gate (#35) is armed on this hop to catch
-    /// both failure shapes, the `-11868`/`-11848` rejection and the silent zero-track park, and to land on
-    /// the LAN media playlist within a bounded window.
-    ///
-    /// Flip to `false` to restore the 5.23.8 behaviour (HDR/DV always media on the AirPlay hop).
-    static let attemptHDRMaster = true
-
     /// Whether the master playlist (with its subtitle renditions) can be served to a wireless AirPlay
     /// receiver. False downgrades the rewritten URL to `media.m3u8`, which carries no renditions.
+    ///
+    /// Offering the HDR/DV master anyway was tried on device and does not work (2026-07-27, iPhone 17 Pro to
+    /// an Apple TV 4K **in HDR mode**, DV P8.1 source): the receiver takes the manifest, the subtitle
+    /// rendition is even fetched, and then AVPlayer never hands the stream over. The picture stays at the
+    /// start position and AVKit shows its "not playable on this display" sign. It is not a rejection either,
+    /// there is no `-11868`/`-11848` and no `.failed` item, so the readiness gate cannot see it: the rate
+    /// flickers to `playing` for one tick, `hasEverPlayed` latches, and the gate reads that as ready. DrHurt's
+    /// caveat ("TV MUST be in HDR or DV mode") therefore describes a necessary condition, not a sufficient
+    /// one. An SDR master over the same route plays with subtitles, verified in the same session.
     ///
     /// - Parameters:
     ///   - servingMasterPlaylist: what `HLSVideoEngine.start()` resolved for local playback. When it is
     ///     already the media playlist there is no master to keep.
-    ///   - sourceIsHDR: the served variant carries HDR/DV signaling (`HLSVideoEngine.servedSourceIsHDR`).
-    ///   - attemptHDRMaster: offer an HDR/DV master too, backstopped by the readiness gate.
-    static func servesMasterToReceiver(
-        servingMasterPlaylist: Bool,
-        sourceIsHDR: Bool,
-        attemptHDRMaster: Bool = attemptHDRMaster
-    ) -> Bool {
-        guard servingMasterPlaylist else { return false }
-        return !sourceIsHDR || attemptHDRMaster
+    ///   - sourceIsHDR: the served variant advertises HDR (`HLSVideoEngine.servedSourceIsHDR`). Must be the
+    ///     real `VIDEO-RANGE`, not the DV-capability-inflated `sourceIsHDR`, or SDR content on a DV-capable
+    ///     device takes the HDR branch and the renditions are dropped for no reason.
+    static func servesMasterToReceiver(servingMasterPlaylist: Bool, sourceIsHDR: Bool) -> Bool {
+        servingMasterPlaylist && !sourceIsHDR
     }
 
     /// The loopback URL rewritten for the receiver: same port and query, the device's LAN IP for the host

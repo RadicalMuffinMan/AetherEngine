@@ -1392,7 +1392,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
         self.servingMasterPlaylist = useMasterPlaylist
-        self.servedSourceIsHDR = videoRange != .sdr || effectiveDvMode
+        self.servedSourceIsHDR = videoRange != .sdr
         EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(videoRange != .sdr || effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
@@ -1467,8 +1467,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `true` when `start()` chose the master playlist (HDR/DV signaling). Read after `start()`.
     public private(set) var servingMasterPlaylist: Bool = false
 
-    /// `true` when the served variant carries HDR/DV signaling (`VIDEO-RANGE` other than SDR, or a DV
-    /// codec tag), i.e. the master an external receiver in SDR mode rejects (#227). Read after `start()`.
+    /// `true` when the served variant advertises HDR (`VIDEO-RANGE` other than SDR), i.e. the master an
+    /// external receiver rejects (#227). Read after `start()`.
+    ///
+    /// Deliberately NOT `sourceIsHDR` (`videoRange != .sdr || effectiveDvMode`): `effectiveDvMode` is a
+    /// DEVICE capability, so that expression reads true for SDR content on any DV-capable iPhone or iPad and
+    /// sent every such source down the HDR branch (device log 2026-07-27: `sourceIsHDR=true videoRange=sdr
+    /// dvVariant=none`), which made the 5.23.8 AirPlay fix a no-op on exactly the devices it was written for.
+    /// `resolveUseMasterPlaylist` carries the same warning for the same reason (#15).
     /// Internal on purpose: it feeds the engine's own AirPlay routing, and hosts read the consequence
     /// (`AetherEngine.nativeSubtitleRenditionsServed`) rather than the input.
     private(set) var servedSourceIsHDR: Bool = false

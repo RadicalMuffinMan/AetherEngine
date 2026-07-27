@@ -1211,10 +1211,10 @@ public final class AetherEngine: ObservableObject {
     /// master with a fresh asset (bounded) before falling back to the media playlist (HDR10 base, no
     /// DV upgrade). Bounded at every stage, so a cold resume can never hang forever on 0 tracks.
     ///
-    /// #227 follow-up: the same escalation is what a wireless AirPlay hop needs. The sender cannot read the
-    /// receiver's HDR mode, so an offered HDR/DV master either plays (receiver in HDR or DV mode, the common
-    /// case, and its subtitle renditions travel), fails `-11868`/`-11848`, or parks silently. The gate covers
-    /// all three, and its reloads are rewritten onto the LAN IP so the receiver can reach them at all.
+    /// #227: the same escalation is what a wireless AirPlay hop needs. The master kept for an SDR source
+    /// carries the subtitle renditions but assumes the receiver can take that variant, which the sender
+    /// cannot check (a receiver without 4K HEVC would reject it). The gate covers the rejection and the
+    /// silent park, and its reloads are rewritten onto the LAN IP so the receiver can reach them at all.
     @MainActor
     private func runStartupReadinessGate(
         session: HLSVideoEngine, position: Double, gen: UInt64
