@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Native subtitles now reach a wireless AirPlay receiver instead of being dropped on the way there.** A `SUBTITLES` rendition can only be declared in a master playlist, but the AirPlay rewrite that moves the loopback onto the device's LAN IP also forced the media playlist for every source, so the receiver was handed a manifest with no `EXT-X-MEDIA` tags: `setNativeSubtitleSelected(track:)` had no legible group to select against, succeeded, and changed nothing. The blanket downgrade came from a real constraint that is narrower than the rule built on it, namely that AVPlayer rejects an HDR or Dolby Vision master on a receiver that is not in HDR or DV mode and will not switch by itself. An SDR variant is routing-safe on any receiver, so it now keeps its master and its renditions travel; the master's rendition URIs are relative and resolve against the LAN base with no further work. HDR and DV sources keep the media downgrade, because an SDR-signalled master over HDR content does not fool the compatibility gate either (it reads the real `colr` and codec, not the manifest string), and `nativeSubtitleRenditionsServed` now reports that honestly on the AirPlay hop rather than describing the local session, so a host can tell the user their subtitles will not travel to this route. The reactive master-rejection fallback also rewrites onto the LAN IP now: it previously reloaded the `127.0.0.1` media playlist, which a receiver cannot reach. Reported by thatcube. Covered by `AirPlayPlaylistDecisionTests`.
+
 ## [5.23.7] - 2026-07-26
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.7))

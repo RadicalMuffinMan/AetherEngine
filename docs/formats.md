@@ -126,6 +126,8 @@ Host-rendered subtitle overlays are invisible in Picture-in-Picture, AirPlay, an
 
 **Routing scope.** A `SUBTITLES` rendition can only live in a master playlist, so native subtitles ride the master-routing rules: SDR sources on any panel, HDR / DV sources on HDR-ready panels. HDR-on-SDR-panel and DV Profile 5 on non-DV panels stay media-direct (no master, hence no native subtitles there); the host overlay still covers fullscreen. Bitmap subtitles (PGS / DVB / DVD) join as OCR-fed renditions: while a bitmap track is selected, a worker decodes its harvested packets ahead of the playhead (composition ends resolved at the next composition/clear event, the 5.14.1 sidecar semantics) and recognizes them on-device (Vision, track-language hinted) into plain-text cues for the track's rendition. Recognition is lossy by design; a failed or empty read drops that line from the rendition while fullscreen keeps the pixel-accurate bitmap overlay. External .sup sidecars fill their store from the selection-time sidecar decode's own image cues (no second fetch). Live sources are out of scope.
 
+**Wireless AirPlay (#86, #227).** While an iOS session plays to a wireless AirPlay receiver, the engine reloads its loopback over the device's LAN IP (the receiver cannot reach `127.0.0.1`). An SDR source keeps the master there, so its `SUBTITLES` renditions travel to the receiver and `setNativeSubtitleSelected(track:)` has a legible group to select against; the `EXT-X-MEDIA` URIs are relative, so the renditions resolve against the LAN base. An HDR / DV source is downgraded to the media playlist on that hop, because AVPlayer rejects an HDR / DV master on a receiver that is not in HDR or DV mode and will not switch by itself, and an SDR-signalled master over HDR content does not fool the compatibility gate either (see the fallback below). Native subtitles therefore do not reach the receiver for HDR / DV sources; `$nativeSubtitleRenditionsServed` reports that honestly (false on that hop), so a host can tell the user instead of silently dropping them. A wired HDMI external display is a different route and keeps the loopback plus its master.
+
 **Master-rejection fallback (#98, #130).** When AVPlayer rejects the served master (`-11868` AVErrorNoCompatibleAlternatesForExternalDisplay, `-11848` for an SDR-parked panel, or `-1002` when every variant was filtered at master parse time), the engine reloads the bare media playlist in place; a live session rejoins at the edge instead of replaying its stale start position. HDR / DV on an SDR external display is therefore media-playlist-driven (an AVKit limitation: forcing `VIDEO-RANGE=SDR` does not fool the external-display compatibility gate, which checks the real `colr` / codec rather than the manifest string), so the `SUBTITLES` renditions do not travel there. The separate `#35` cold-DV-start readiness gate, whose scenario is an HDR TV, first tries an HDR-preserving reduced master (`SUPPLEMENTAL-CODECS` dropped so it is plain HDR10, source range and `SUBTITLES` group kept) before the bare media playlist, so a cold DV start keeps HDR10 plus subtitles instead of dropping straight to subtitle-less media.
 
 **Rich ASS styling.** With `LoadOptions.preserveASSMarkup` the tap keeps raw ASS event lines so the host overlay renders full styling (positions, colours); the WebVTT renditions strip the markup at serve time, so PiP shows plain text in the system caption style.
@@ -141,8 +143,10 @@ Host-rendered subtitle overlays are invisible in Picture-in-Picture, AirPlay, an
 engine.$nativeSubtitleRenditionAvailable   // @Published var Bool
 
 // true while the loopback session serves a master carrying the SUBTITLES group;
-// goes false on a media-playlist fallback. Hosts use it to decide whether to draw
-// their own subtitle window on a wired external display instead (#98)
+// goes false on a media-playlist fallback and on the wireless-AirPlay hop for an
+// HDR / DV source (#227). Hosts use it to decide whether to draw their own subtitle
+// window on a wired external display instead (#98), or to tell the user that
+// subtitles will not travel to this route
 engine.$nativeSubtitleRenditionsServed     // @Published var Bool
 
 // ordered list of all native subtitle renditions (ordinal, language tag, display name)

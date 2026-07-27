@@ -1392,6 +1392,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
         self.servingMasterPlaylist = useMasterPlaylist
+        self.servedSourceIsHDR = videoRange != .sdr || effectiveDvMode
         EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(videoRange != .sdr || effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
@@ -1465,6 +1466,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// `true` when `start()` chose the master playlist (HDR/DV signaling). Read after `start()`.
     public private(set) var servingMasterPlaylist: Bool = false
+
+    /// `true` when the served variant carries HDR/DV signaling (`VIDEO-RANGE` other than SDR, or a DV
+    /// codec tag), i.e. the master an external receiver in SDR mode rejects (#227). Read after `start()`.
+    public private(set) var servedSourceIsHDR: Bool = false
 
     /// The loopback server's media (single-variant) playlist URL, for the reactive master->media
     /// fallback (#98). Nil before the server starts.

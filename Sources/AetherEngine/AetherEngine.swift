@@ -1160,6 +1160,10 @@ public final class AetherEngine: ObservableObject {
         masterFallbackUsed = true
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
+        // #227: while AirPlaying, the item under the rejection is the LAN-IP URL; `mediaPlaylistURL` is the
+        // 127.0.0.1 loopback the receiver cannot reach, so the fallback has to be rewritten too or the
+        // recovery loads nothing. Media playlist already, so there is no master to keep.
+        let fallbackURL = airPlayActive ? (airPlayPlaybackURL(base: mediaURL) ?? mediaURL) : mediaURL
         // #130: a live fallback is a REJOIN of the running ingest (the window may have slid since
         // the failed master attempt); a stale explicit position can wedge AVPlayer against the
         // backlog, so skip the initial seek and let it pick edge-minus-holdback (LiveReloadPolicy).
@@ -1170,7 +1174,7 @@ public final class AetherEngine: ObservableObject {
             + "media playlist (no CC/subtitle renditions) at "
             + (isLive ? "the live edge" : "\(String(format: "%.2f", position))s"),
             category: .session)
-        host.load(url: mediaURL,
+        host.load(url: fallbackURL,
                   startPosition: isLive ? nil : position,
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true),
                   inPlaceSwap: true)
@@ -3277,8 +3281,9 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// AirPlay (#86, DrHurt): true while the native AVPlayer reports external playback. loadNative reads it to
-    /// serve the loopback over the device's LAN IP (the receiver can't reach 127.0.0.1) AND to force the MEDIA
-    /// playlist (AVPlayer rejects a DV/HDR MASTER playlist on an SDR receiver and won't auto-switch, DrHurt).
+    /// serve the loopback over the device's LAN IP (the receiver can't reach 127.0.0.1), and for an HDR/DV
+    /// source also to force the MEDIA playlist (AVPlayer rejects a DV/HDR MASTER playlist on an SDR receiver
+    /// and won't auto-switch, DrHurt). An SDR master is kept so its subtitle renditions travel (#227).
     /// Loopback native path only; a remote-HLS source is already receiver-reachable, so it's left untouched.
     private(set) var airPlayActive = false
     private var externalPlaybackObservation: NSKeyValueObservation?
@@ -3326,15 +3331,39 @@ public final class AetherEngine: ObservableObject {
         #endif
     }
 
-    /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP and force the MEDIA
-    /// playlist, so the receiver reaches the engine-processed stream and isn't handed a DV/HDR master it rejects
-    /// on an SDR panel (DrHurt). nil if no LAN IP (caller keeps the original 127.0.0.1 URL).
-    func airPlayPlaybackURL(base: URL) -> URL? {
+    /// Playback URL and subtitle-rendition reality for a freshly started loopback session, after the AirPlay
+    /// rewrite (#86, #227). Identity outside iOS and whenever external playback is off; when the LAN IP scan
+    /// comes up empty the loopback URL stays as resolved (the receiver then simply cannot reach it, unchanged
+    /// from #86). `subtitleRenditionsServed` is what the served playlist actually carries, which is what
+    /// `nativeSubtitleRenditionsServed` promises hosts.
+    func airPlayAdjustedPlayback(url: URL, session: HLSVideoEngine) -> (url: URL, subtitleRenditionsServed: Bool) {
+        #if os(iOS)
+        guard airPlayActive else { return (url, session.servingMasterPlaylist) }
+        let keepMaster = AirPlayPlaylistDecision.servesMasterToReceiver(
+            servingMasterPlaylist: session.servingMasterPlaylist,
+            sourceIsHDR: session.servedSourceIsHDR)
+        guard let lanURL = airPlayPlaybackURL(base: url, keepMaster: keepMaster) else {
+            EngineLog.emit("[AirPlay] no LAN IP; keeping \(url.absoluteString)", category: .engine)
+            return (url, session.servingMasterPlaylist)
+        }
+        EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString) (keepMaster=\(keepMaster) "
+                       + "sourceIsHDR=\(session.servedSourceIsHDR) subtitle renditions "
+                       + "\(keepMaster ? "carried" : "dropped"))", category: .engine)
+        return (lanURL, keepMaster)
+        #else
+        return (url, session.servingMasterPlaylist)
+        #endif
+    }
+
+    /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP so the receiver
+    /// reaches the engine-processed stream. nil if no LAN IP (caller keeps the original 127.0.0.1 URL).
+    ///
+    /// `keepMaster` false also downgrades the path to the MEDIA playlist, for the HDR/DV master an SDR
+    /// receiver rejects (DrHurt). An SDR master is routing-safe on any receiver and is kept, because the
+    /// subtitle renditions live only there (#227); see `AirPlayPlaylistDecision`.
+    func airPlayPlaybackURL(base: URL, keepMaster: Bool = false) -> URL? {
         guard let lanIP = HLSLocalServer.localActiveIPAddress() else { return nil }
-        var c = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        c?.host = lanIP
-        c?.path = "/media.m3u8"
-        return c?.url
+        return AirPlayPlaylistDecision.receiverURL(base: base, lanIP: lanIP, keepMaster: keepMaster)
     }
 
     #if os(tvOS) || os(iOS)
