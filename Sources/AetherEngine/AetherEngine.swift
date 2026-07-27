@@ -2555,6 +2555,9 @@ public final class AetherEngine: ObservableObject {
                         nativeHost?.play()
                     }
                     state = .playing
+                    // #227: a receiver that refuses the playlist it was handed neither fails the item nor
+                    // reports a rejection, so the gate above cannot see it. Watch the clock instead.
+                    armAirPlayProgressWatchdog(gen: gen, position: startPosition ?? 0)
                 }
                 startMemoryProbe()
                 startLiveTelemetrySampler()
@@ -3325,6 +3328,51 @@ public final class AetherEngine: ObservableObject {
     /// the real route state has to be re-read once the rebuilt item exists.
     private var externalPlaybackEdgeHeld = false
 
+    /// #227: how long a master handed to a wireless AirPlay receiver gets to actually move the clock before
+    /// it counts as refused. A receiver that will not play the offered variant does NOT fail the item and
+    /// does not report `-11868`: it simply never starts, while the rate flickers to `playing` for a tick
+    /// (device log 2026-07-27, DV master). That is invisible to the readiness gate, so progress is the only
+    /// signal left. Generous enough that a slow first fetch across the LAN is not mistaken for a refusal.
+    static let airPlayProgressWatchdogSeconds: Double = 8.0
+    private var airPlayProgressWatchdog: Task<Void, Never>?
+
+    /// Arm the progress watchdog for a load that handed the receiver a playlist with subtitle renditions.
+    /// No-op otherwise: the media playlist is the fallback itself, and a local session cannot be refused.
+    @MainActor
+    func armAirPlayProgressWatchdog(gen: UInt64, position: Double) {
+        airPlayProgressWatchdog?.cancel()
+        airPlayProgressWatchdog = nil
+        guard airPlayActive, airPlayServedMasterToReceiver else { return }
+        let baseline = currentTime
+        airPlayProgressWatchdog = Task { @MainActor [weak self] in
+            let seconds = AetherEngine.airPlayProgressWatchdogSeconds
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.loadGeneration == gen else { return }
+            self.fallBackFromRefusedAirPlayMaster(baseline: baseline, position: position)
+        }
+    }
+
+    /// The receiver never started on the playlist it was handed: reload the LAN media playlist, which every
+    /// receiver takes, and report the renditions as gone. Silent about a healthy session (#227).
+    @MainActor
+    private func fallBackFromRefusedAirPlayMaster(baseline: Double, position: Double) {
+        guard airPlayActive, airPlayServedMasterToReceiver, state == .playing else { return }
+        let advanced = currentTime - baseline
+        guard advanced < 0.5 else { return }
+        guard let host = nativeHost, let session = nativeVideoSession,
+              let mediaURL = session.mediaPlaylistURL else { return }
+        EngineLog.emit(
+            "[AirPlay] receiver did not start in \(String(format: "%.0f", Self.airPlayProgressWatchdogSeconds))s "
+            + "(clock advanced \(String(format: "%.2f", advanced))s); the playlist it was handed is refused, "
+            + "falling back to the LAN media playlist (subtitle renditions dropped)",
+            category: .session)
+        session.markServingMediaAfterFallback()
+        nativeSubtitleRenditionsServed = false
+        airPlayServedMasterToReceiver = false
+        host.load(url: airPlayHostSwapped(mediaURL), startPosition: position, inPlaceSwap: true)
+        host.play()
+    }
+
     private func handleExternalPlaybackChange(active: Bool) {
         // #227 (device log 2026-07-27): the reload started below tears down the very item the KVO watches, so
         // AVPlayer reports a transient `false` in the middle of it. Acting on that edge cleared `airPlayActive`
@@ -3404,18 +3452,19 @@ public final class AetherEngine: ObservableObject {
         airPlayServedMasterToReceiver = false
         #if os(iOS)
         guard airPlayActive else { return (url, session.servingMasterPlaylist) }
-        let keepMaster = AirPlayPlaylistDecision.servesMasterToReceiver(
+        let playlist = AirPlayPlaylistDecision.playlistForReceiver(
             servingMasterPlaylist: session.servingMasterPlaylist,
             sourceIsHDR: session.servedSourceIsHDR)
-        guard let lanURL = airPlayPlaybackURL(base: url, keepMaster: keepMaster) else {
+        let carriesRenditions = AirPlayPlaylistDecision.carriesSubtitleRenditions(playlist)
+        guard let lanURL = airPlayPlaybackURL(base: url, playlist: playlist) else {
             EngineLog.emit("[AirPlay] no LAN IP; keeping \(url.absoluteString)", category: .engine)
             return (url, session.servingMasterPlaylist)
         }
-        airPlayServedMasterToReceiver = keepMaster
-        EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString) (keepMaster=\(keepMaster) "
+        airPlayServedMasterToReceiver = carriesRenditions
+        EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString) (playlist=\(playlist) "
                        + "sourceIsHDR=\(session.servedSourceIsHDR) subtitle renditions "
-                       + "\(keepMaster ? "carried" : "dropped"))", category: .engine)
-        return (lanURL, keepMaster)
+                       + "\(carriesRenditions ? "carried" : "dropped"))", category: .engine)
+        return (lanURL, carriesRenditions)
         #else
         return (url, session.servingMasterPlaylist)
         #endif
@@ -3430,18 +3479,18 @@ public final class AetherEngine: ObservableObject {
     /// readiness gate's reloads while AirPlaying, which otherwise hand the receiver a 127.0.0.1 URL it cannot
     /// reach. Identity when no LAN IP resolves.
     func airPlayHostSwapped(_ url: URL) -> URL {
-        airPlayPlaybackURL(base: url, keepMaster: true) ?? url
+        airPlayPlaybackURL(base: url, playlist: .master) ?? url
     }
 
     /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP so the receiver
     /// reaches the engine-processed stream. nil if no LAN IP (caller keeps the original 127.0.0.1 URL).
     ///
-    /// `keepMaster` false also downgrades the path to the MEDIA playlist, for the HDR/DV master an SDR
-    /// receiver rejects (DrHurt). An SDR master is routing-safe on any receiver and is kept, because the
-    /// subtitle renditions live only there (#227); see `AirPlayPlaylistDecision`.
-    func airPlayPlaybackURL(base: URL, keepMaster: Bool = false) -> URL? {
+    /// `playlist` also picks the path: the resolved master for SDR (the renditions live only there, #227),
+    /// the reduced HDR master or plain media for HDR. See `AirPlayPlaylistDecision`.
+    func airPlayPlaybackURL(base: URL,
+                            playlist: AirPlayPlaylistDecision.ReceiverPlaylist = .media) -> URL? {
         guard let lanIP = HLSLocalServer.localActiveIPAddress() else { return nil }
-        return AirPlayPlaylistDecision.receiverURL(base: base, lanIP: lanIP, keepMaster: keepMaster)
+        return AirPlayPlaylistDecision.receiverURL(base: base, lanIP: lanIP, playlist: playlist)
     }
 
     #if os(tvOS) || os(iOS)
@@ -3789,6 +3838,9 @@ public final class AetherEngine: ObservableObject {
         nativeVideoSession?.stop()
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false
+        airPlayProgressWatchdog?.cancel()
+        airPlayProgressWatchdog = nil
+        airPlayServedMasterToReceiver = false
         extractorYieldState.deactivate()
         setPendingRecoverySeekTarget(nil)
         // #127: readiness + deferred host seeks are session-scoped; the host-side sink can't clear them
