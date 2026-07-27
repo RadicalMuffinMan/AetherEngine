@@ -46,15 +46,32 @@ struct Issue220PrefetchTelemetryTests {
 
     /// Defect 4: the loop exits on any read error and nothing restarts it until a seek. A
     /// session that harvested and then stopped must not read the same as one never started.
-    @Test("a session that exited mid-playback reads as dead")
-    func exitedReadsDead() {
+    @Test("a session that failed mid-playback is distinguishable from one never started")
+    func failedSessionReported() {
         var snapshot = SubtitlePrefetchTelemetry.Snapshot()
         snapshot.running = false
         snapshot.harvested = 22
         snapshot.lastPacketSeconds = 800
+        snapshot.exit = .readFailed
         let fragment = SubtitlePrefetchTelemetry.format(snapshot, playhead: 700)
-        #expect(fragment.contains("prefetch=dead "))
+        #expect(fragment.contains("prefetch=failed "))
         #expect(fragment.contains("prefetchHarvested=22 "))
+    }
+
+    /// The reader works `leadSeconds` ahead, so it reaches EOF a full lead before the playhead
+    /// does and EVERY completed playback ends with the loop gone. Reporting that the same way as
+    /// a mid-stream failure made the signal fire over the closing minute of every film, which is
+    /// exactly when it is least useful.
+    @Test("reaching end of file is not reported as a failure")
+    func endOfFileNotAFailure() {
+        var snapshot = SubtitlePrefetchTelemetry.Snapshot()
+        snapshot.running = false
+        snapshot.harvested = 416
+        snapshot.lastPacketSeconds = 1400
+        snapshot.exit = .endOfFile
+        let fragment = SubtitlePrefetchTelemetry.format(snapshot, playhead: 1362.5)
+        #expect(fragment.contains("prefetch=eof "))
+        #expect(!fragment.contains("failed"))
     }
 
     @Test("no packet seen yet reports no lead rather than a garbage one")

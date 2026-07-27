@@ -27,6 +27,12 @@ enum SubtitlePrefetchTelemetry {
         /// the park guard was skipped at least once; historically that fallback was cached and
         /// disarmed the park permanently.
         var timeBaseFallbacks = 0
+        /// Why the loop stopped, nil while it runs. Reported instead of a bare `dead`, which
+        /// could not tell the defect apart from the expected end of a session: the reader works
+        /// `leadSeconds` ahead, so it reaches EOF a full lead before the playhead does and every
+        /// completed playback ends with the loop gone. Flagging that as `dead` cries wolf over
+        /// the last minute of every film.
+        var exit: SubtitleForwardPrefetcher.Exit? = nil
     }
 
     private static let state = OSAllocatedUnfairLock(initialState: Snapshot())
@@ -40,11 +46,12 @@ enum SubtitlePrefetchTelemetry {
         }
     }
 
-    static func sessionEnded(generation: Int) {
+    static func sessionEnded(generation: Int, exit: SubtitleForwardPrefetcher.Exit) {
         state.withLock { s in
             guard s.generation == generation else { return }
             s.running = false
             s.parked = false
+            s.exit = exit
         }
     }
 
@@ -69,15 +76,25 @@ enum SubtitlePrefetchTelemetry {
         format(snapshot, playhead: playhead)
     }
 
-    /// One memprobe fragment. `dead` is a real finding on a VOD session with a subtitle track
-    /// selected: the loop exits on any read error and nothing restarts it until the next seek,
-    /// so a session that harvested and then stopped is distinguishable from one that never ran.
+    /// One memprobe fragment. A stopped loop reports WHY it stopped rather than a bare `dead`.
+    /// `eof` is the expected end of every completed playback and carries no finding; `failed` is
+    /// the #231 case worth acting on, a read error that ends the session mid-stream; `cancelled`
+    /// and `openfail` are the remaining documented exits. Reporting them as one state made the
+    /// signal fire over the closing minute of every film and hid the case it exists for.
     static func format(_ s: Snapshot, playhead: Double) -> String {
         guard s.running || s.harvested > 0 else { return "prefetch=off " }
         let lead = s.lastPacketSeconds.isFinite && playhead.isFinite
             ? String(format: "%.1f", s.lastPacketSeconds - playhead)
             : "n/a"
-        return "prefetch=\(s.running ? (s.parked ? "park" : "read") : "dead") "
+        let stopped: String = {
+            switch s.exit {
+            case .endOfFile: return "eof"
+            case .readFailed: return "failed"
+            case .openFailed: return "openfail"
+            case .cancelled, nil: return "cancelled"
+            }
+        }()
+        return "prefetch=\(s.running ? (s.parked ? "park" : "read") : stopped) "
             + "prefetchLead=\(lead)s "
             + "prefetchHarvested=\(s.harvested) "
             + "prefetchTbFallback=\(s.timeBaseFallbacks) "

@@ -16,6 +16,58 @@ import Libavutil
 /// mirroring the native subtitle readers (memory rule: all side readers share positioning fixes).
 enum SubtitleForwardPrefetcher {
 
+    /// Why a prefetch session ended (#231).
+    ///
+    /// The loop used to leave on the first failed read with no way to tell why, and its exit line
+    /// reported `cancelled=false` for every one of those reasons. Only `.readFailed` is worth
+    /// restarting: EOF is the expected end of a session, cancellation is deliberate, and a source
+    /// that will not open is the documented best-effort case.
+    enum Exit: Equatable {
+        case endOfFile
+        case cancelled
+        case openFailed
+        case readFailed
+
+        var isRestartable: Bool { self == .readFailed }
+    }
+
+    struct Outcome {
+        let exit: Exit
+        let harvested: Int
+    }
+
+    /// #231: how many times a failing prefetch session may be restarted, and how long to wait first.
+    ///
+    /// Two ceilings, because two things look different on the wire. A run of failures with nothing
+    /// harvested between them is a dead link, and giving up quickly is right. A session that
+    /// produced cues and only then broke is a fresh transport failure, so its budget resets; the
+    /// total ceiling is what stops a source that fails in a loop after one packet each time from
+    /// reconnecting forever.
+    struct RestartBudget {
+        let maxConsecutiveFailures: Int
+        let maxRestarts: Int
+        let backoffNanoseconds: UInt64
+        private(set) var consecutiveFailures = 0
+        private(set) var restarts = 0
+
+        init(maxConsecutiveFailures: Int, maxRestarts: Int, backoffNanoseconds: UInt64) {
+            self.maxConsecutiveFailures = maxConsecutiveFailures
+            self.maxRestarts = maxRestarts
+            self.backoffNanoseconds = backoffNanoseconds
+        }
+
+        /// Charge one failed session to the budget. Returns how long to wait before the next
+        /// attempt, or nil when the budget is spent and the prefetcher should stay down.
+        mutating func chargeFailure(harvested: Int) -> UInt64? {
+            consecutiveFailures = harvested > 0 ? 1 : consecutiveFailures + 1
+            restarts += 1
+            guard consecutiveFailures <= maxConsecutiveFailures, restarts <= maxRestarts else {
+                return nil
+            }
+            return backoffNanoseconds << min(consecutiveFailures - 1, 3)
+        }
+    }
+
     /// Resolve a stream's packet time base, memoizing only usable results (#220).
     ///
     /// The lookup used to memoize its own failure: a nil `stream(at:)` fell back to `0/1`, that
@@ -37,32 +89,79 @@ enum SubtitleForwardPrefetcher {
         return resolved
     }
 
-    /// Read/harvest until EOF, error, cancellation, or a nil playhead (engine gone). Returns the
-    /// number of routed subtitle packets harvested. The demuxer must be positioned by the caller.
+    /// Where a packet sits on the source timeline for park purposes, or nil when it carries no
+    /// usable timestamp (#230).
+    ///
+    /// A harvested subtitle packet is placed by PTS, its own cue time. A pacing packet is placed by
+    /// DTS, the monotone read position: with B-frames a video PTS runs ahead of the bytes actually
+    /// read, and it is the bytes the park exists to bound.
+    static func packetSeconds(
+        pts: Int64, dts: Int64, timeBase: AVRational, preferDecodeOrder: Bool
+    ) -> Double? {
+        let raw = preferDecodeOrder
+            ? (dts != Int64.min ? dts : pts)
+            : (pts != Int64.min ? pts : dts)
+        guard raw != Int64.min, timeBase.num > 0, timeBase.den > 0 else { return nil }
+        return Double(raw) * Double(timeBase.num) / Double(timeBase.den)
+    }
+
+    /// Read/harvest until EOF, error, cancellation, or a nil playhead (engine gone). Returns why it
+    /// stopped and how many routed subtitle packets it harvested (#231: a read error is not an EOF
+    /// and the caller has to be able to tell them apart). The demuxer must be positioned by the
+    /// caller.
     /// Harvest-then-park: the packet whose PTS crosses `playhead + leadSeconds` is stored before
     /// the loop parks, so the store may hold one packet past the lead edge (harmless; the drainer
     /// window decides what decodes). The playhead is snapshot at start and refreshed only inside
     /// the park loop, matching the native readers: no MainActor hop per packet during a backfill
     /// burst.
+    ///
+    /// #230: `pacingIndex` (-1 when the source has no usable one) names a non-subtitle stream the
+    /// caller left at `AVDISCARD_NONKEY`. Its packets are freed unharvested and exist only to park
+    /// the loop on the read position. Without one the park is edge-triggered on subtitle packets
+    /// alone, so a stretch of the file with no cues is read at full speed however far past the lead
+    /// edge it runs: bounded on a dense PGS track, unbounded on a sparse or forced one.
     static func run(
         demuxer: Demuxer,
         store: SubtitlePacketStore,
         streamIndices: Set<Int32>,
         assemblyIndices: Set<Int32>,
+        pacingIndex: Int32,
         leadSeconds: Double,
         parkPollNanoseconds: UInt64,
         playhead: @Sendable () async -> Double?
-    ) async -> Int {
-        guard var playheadSnapshot = await playhead() else { return 0 }
+    ) async -> Outcome {
+        guard var playheadSnapshot = await playhead() else {
+            return Outcome(exit: .cancelled, harvested: 0)
+        }
         var harvested = 0
         var timeBaseCache: [Int32: AVRational] = [:]
         var timeBaseFailures = 0
+        var exit = Exit.cancelled
         let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted()
-        defer { SubtitlePrefetchTelemetry.sessionEnded(generation: telemetryGeneration) }
+        // #220: the exit reason reaches the gauge, not just the fact that the loop stopped.
+        // `defer` reads `exit` at unwind, so every break path reports the reason it set.
+        defer { SubtitlePrefetchTelemetry.sessionEnded(generation: telemetryGeneration, exit: exit) }
         readLoop: while !Task.isCancelled {
-            guard let pkt = try? demuxer.readPacket() else { break }
+            let next: UnsafeMutablePointer<AVPacket>?
+            do {
+                next = try demuxer.readPacket()
+            } catch {
+                // #231: a transport failure on the side reader, a stall that exhausts the read
+                // deadline, a reconnect that gives up. Distinct from EOF, and restartable.
+                EngineLog.emit(
+                    "[AetherEngine] #151 forward prefetch read failed after \(harvested) packets: "
+                    + "\(error)",
+                    category: .engine)
+                exit = .readFailed
+                break
+            }
+            guard let pkt = next else {
+                exit = .endOfFile
+                break
+            }
             let streamIdx = pkt.pointee.stream_index
-            guard streamIndices.contains(streamIdx) else {
+            let isTarget = streamIndices.contains(streamIdx)
+            guard isTarget || streamIdx == pacingIndex else {
                 var p: UnsafeMutablePointer<AVPacket>? = pkt
                 trackedPacketFree(&p)
                 continue
@@ -85,31 +184,39 @@ enum SubtitleForwardPrefetcher {
                 }
                 continue
             }
-            store.harvest(streamIndex: streamIdx, packet: pkt, timeBase: tb,
-                          assembleSplitDisplaySets: assemblyIndices.contains(streamIdx),
-                          writer: .prefetch)
-            harvested += 1
-            let rawTS = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            if isTarget {
+                store.harvest(streamIndex: streamIdx, packet: pkt, timeBase: tb,
+                              assembleSplitDisplaySets: assemblyIndices.contains(streamIdx),
+                              writer: .prefetch)
+                harvested += 1
+            }
+            let position = packetSeconds(pts: pkt.pointee.pts, dts: pkt.pointee.dts,
+                                         timeBase: tb, preferDecodeOrder: !isTarget)
             var p: UnsafeMutablePointer<AVPacket>? = pkt
             trackedPacketFree(&p)
-            // Park once the read passes the lead edge; a packet without a usable PTS (split-set
-            // continuation chunks) never parks, its set's PCS anchor already did the pacing.
-            guard rawTS != Int64.min else { continue }
-            let pktSeconds = Double(rawTS) * Double(tb.num) / Double(tb.den)
-            SubtitlePrefetchTelemetry.recordPacket(seconds: pktSeconds, harvested: harvested)
+            // Park once the read passes the lead edge; a packet without a usable timestamp
+            // (split-set continuation chunks) never parks, its set's PCS anchor already did the
+            // pacing.
+            guard let position else { continue }
+            // #220 gauge: `position` is the read position on the source axis for both packet
+            // kinds, a cue PTS for a harvested one and the monotone read DTS for a pacing one,
+            // which is the same quantity the park decides on. Since #230 that means
+            // `prefetchLead` tracks the reader rather than the last cue, so on a sparse track it
+            // now moves between cues instead of standing still.
+            SubtitlePrefetchTelemetry.recordPacket(seconds: position, harvested: harvested)
             var didPark = false
-            while !Task.isCancelled, pktSeconds > playheadSnapshot + leadSeconds {
+            while !Task.isCancelled, position > playheadSnapshot + leadSeconds {
                 if !didPark {
                     didPark = true
                     SubtitlePrefetchTelemetry.recordPark(true)
                 }
                 guard let fresh = await playhead() else { break readLoop }
                 playheadSnapshot = fresh
-                if pktSeconds <= playheadSnapshot + leadSeconds { break }
+                if position <= playheadSnapshot + leadSeconds { break }
                 do { try await Task.sleep(nanoseconds: parkPollNanoseconds) } catch { break readLoop }
             }
             if didPark { SubtitlePrefetchTelemetry.recordPark(false) }
         }
-        return harvested
+        return Outcome(exit: exit, harvested: harvested)
     }
 }

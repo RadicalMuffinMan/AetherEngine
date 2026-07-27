@@ -496,6 +496,13 @@ public final class AetherEngine: ObservableObject {
     /// instead of one long MainActor pass.
     nonisolated static let subtitleOCRMaxPacketsPerTick: Int = 48
     nonisolated static let subtitleForwardPrefetchParkPollNanoseconds: UInt64 = 500_000_000
+    /// #231: a prefetch session that dies on a read error is restarted, bounded. Consecutive
+    /// failures are what a dead link looks like; the total ceiling covers a source that fails in a
+    /// loop after harvesting a packet each time.
+    nonisolated static let subtitleForwardPrefetchMaxConsecutiveFailures: Int = 3
+    nonisolated static let subtitleForwardPrefetchMaxRestarts: Int = 8
+    /// Doubles per consecutive failure (1s, 2s, 4s), capped by the consecutive-failure ceiling.
+    nonisolated static let subtitleForwardPrefetchRestartBackoffNanoseconds: UInt64 = 1_000_000_000
 
     @Published public internal(set) var isLoadingSubtitles: Bool = false
     @Published public internal(set) var isSubtitleActive: Bool = false
@@ -2488,6 +2495,8 @@ public final class AetherEngine: ObservableObject {
                 }
                 startMemoryProbe()
                 startLiveTelemetrySampler()
+                armDisplayModeDiagnostic(gen: gen, backend: "software",
+                                         contentRate: detectedRate, requestedRate: snappedRate)
             } else {
                 // Native path: pass the probe Demuxer to loadNative so HLSVideoEngine.start() skips
                 // avformat_open_input + find_stream_info (~1-3 s saved on slow CDN). The cue prewarm
@@ -2561,6 +2570,8 @@ public final class AetherEngine: ObservableObject {
                 }
                 startMemoryProbe()
                 startLiveTelemetrySampler()
+                armDisplayModeDiagnostic(gen: gen, backend: "native",
+                                         contentRate: detectedRate, requestedRate: snappedRate)
             }
         } catch is CancellationError {
             // Superseded.
@@ -3342,6 +3353,40 @@ public final class AetherEngine: ObservableObject {
     static let airPlayMasterAttempts = 2
     private var airPlayProgressWatchdog: Task<Void, Never>?
 
+    private var displayModeDiagnostic: Task<Void, Never>?
+
+    /// Sodalite #49: read back what the Match-Frame-Rate switch actually landed on. `preferredDisplayCriteria`
+    /// is a hint with no read-back, so a display-link sample once playback is running is the only way to tell
+    /// three cases apart for a judder report: the panel ignored the criteria and kept the system rate (50.000
+    /// under a 29.970 source), it took a rate that does not divide the content rate (60.000 vs 59.940, one
+    /// repeated frame every ~16 s), or it is correct and the cadence problem is downstream of the panel.
+    /// Logs both backends so the software path serves as the control for a native-path report.
+    @MainActor
+    func armDisplayModeDiagnostic(gen: UInt64, backend: String, contentRate: Double?, requestedRate: Double?) {
+        #if os(tvOS)
+        displayModeDiagnostic?.cancel()
+        displayModeDiagnostic = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard let self, !Task.isCancelled, self.loadGeneration == gen else { return }
+            let sample = await self.displayCriteria.measureRefreshRate()
+            guard !Task.isCancelled, self.loadGeneration == gen else { return }
+            // currentVideoFrameRate is 0 on audio tracks and while paused, so the first non-zero entry is
+            // the video track's own measure of how many frames the player is actually putting on screen.
+            let playerRate = self.currentAVPlayer?.currentItem?.tracks
+                .lazy.map(\.currentVideoFrameRate).first { $0 > 0 }
+            func fmt(_ value: Double?) -> String {
+                value.map { String(format: "%.3f", $0) } ?? "n/a"
+            }
+            EngineLog.emit(
+                "[DisplayCriteria] mode check (\(backend)): content=\(fmt(contentRate)) "
+                + "requested=\(fmt(requestedRate)) panel=\(fmt(sample?.measured))Hz "
+                + "(nominal \(fmt(sample?.nominal))) player=\(fmt(playerRate.map(Double.init)))fps",
+                category: .engine
+            )
+        }
+        #endif
+    }
+
     /// Receivers that failed to start on an HDR master this process, by route UID (#227). An Apple TV
     /// parked in SDR refuses one, and nothing in the public API reports the receiver's dynamic range, so
     /// the offer has to be made once and remembered. Per process on purpose: a user who switches the
@@ -3884,6 +3929,8 @@ public final class AetherEngine: ObservableObject {
         nativeSubtitleRenditionsServed = false
         airPlayProgressWatchdog?.cancel()
         airPlayProgressWatchdog = nil
+        displayModeDiagnostic?.cancel()
+        displayModeDiagnostic = nil
         airPlayServedMasterToReceiver = false
         extractorYieldState.deactivate()
         setPendingRecoverySeekTarget(nil)
