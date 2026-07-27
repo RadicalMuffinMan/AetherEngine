@@ -147,12 +147,6 @@ enum HLSVideoRange: String {
 enum MasterPlaylistVariant: Equatable {
     case primary
     case reducedHDR
-    /// #227 experiment: `.reducedHDR` plus `HDCP-LEVEL=TYPE-1`, for a wireless AirPlay receiver. Apple's
-    /// authoring spec asks for TYPE-1 above HD, our master declares no level at all, and a receiver that
-    /// cannot tell whether it may render protected 4K HDR has a reason to filter the variant out. Kept off
-    /// every other path on purpose: emitting TYPE-1 generally broke wired HDMI with -11868 / tracks count=0
-    /// when the link's HDCP 2.2 state did not match (Vincent, 2026-05-26), which is why it is nil upstream.
-    case reducedHDRWithHDCP
 }
 
 // MARK: - Local HLS Server
@@ -298,7 +292,6 @@ final class HLSLocalServer: @unchecked Sendable {
 
     private var loggedMasterPlaylist = false
     private var loggedReducedMasterPlaylist = false
-    private var loggedAirPlayMasterPlaylist = false
     private var loggedMediaPlaylist = false
     private var loggedRequestHeaders = false
     /// #227 diag: every distinct client address seen this session, logged once each. AirPlay is supposed to
@@ -654,23 +647,6 @@ final class HLSLocalServer: @unchecked Sendable {
                 if firstTime {
                     EngineLog.emit("[HLSLocalServer] \(normalizedPath) body:\n\(body)",
                                    category: .hlsServer)
-                }
-                return send200(fd: fd, path: normalizedPath,
-                               data: Data(body.utf8),
-                               contentType: "application/vnd.apple.mpegurl")
-            }
-            return send404(fd: fd, path: normalizedPath, reason: "no masterCodecs")
-
-        case "/master_hdr_ap.m3u8":
-            // #227 experiment: reduced HDR master carrying HDCP-LEVEL=TYPE-1, for a wireless AirPlay receiver.
-            if provider?.masterCodecs != nil {
-                let body = buildReducedMasterPlaylist(.reducedHDRWithHDCP)
-                stateLock.lock()
-                let firstTime = !loggedAirPlayMasterPlaylist
-                if firstTime { loggedAirPlayMasterPlaylist = true }
-                stateLock.unlock()
-                if firstTime {
-                    EngineLog.emit("[HLSLocalServer] \(normalizedPath) body:\n\(body)", category: .hlsServer)
                 }
                 return send200(fd: fd, path: normalizedPath,
                                data: Data(body.utf8),
@@ -1125,7 +1101,7 @@ final class HLSLocalServer: @unchecked Sendable {
         if let range = provider.masterVideoRange {
             streamInfAttrs.append("VIDEO-RANGE=\(range.rawValue)")
         }
-        if let hdcp = provider.masterHDCPLevel ?? (variant == .reducedHDRWithHDCP ? "TYPE-1" : nil) {
+        if let hdcp = provider.masterHDCPLevel {
             streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")
         }
         if let cc = provider.masterClosedCaptions {

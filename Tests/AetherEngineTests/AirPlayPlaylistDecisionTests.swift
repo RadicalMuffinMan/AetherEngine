@@ -7,35 +7,26 @@ struct AirPlayPlaylistDecisionTests {
     @Test("#227: an SDR source keeps its master, so its subtitle renditions travel")
     func sdrKeepsMaster() {
         #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: false, attemptHDRWithHDCP: false) == .master)
+            servingMasterPlaylist: true, sourceIsHDR: false) == .master)
     }
 
     @Test("#227: an HDR source goes to media; no master over HDR content is accepted")
     func hdrGoesToMedia() {
         #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRWithHDCP: false) == .media)
-    }
-
-    @Test("#227 experiment: an HDR source is offered the HDCP-declaring master while it is armed")
-    func hdrGetsHDCPMaster() {
-        #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRWithHDCP: true) == .receiverHDRMaster)
+            servingMasterPlaylist: true, sourceIsHDR: true) == .media)
     }
 
     @Test("A session already on the media playlist has no master to hand over")
     func mediaSessionStaysMedia() {
-        for attempt in [false, true] {
-            #expect(AirPlayPlaylistDecision.playlistForReceiver(
-                servingMasterPlaylist: false, sourceIsHDR: false, attemptHDRWithHDCP: attempt) == .media)
-            #expect(AirPlayPlaylistDecision.playlistForReceiver(
-                servingMasterPlaylist: false, sourceIsHDR: true, attemptHDRWithHDCP: attempt) == .media)
-        }
+        #expect(AirPlayPlaylistDecision.playlistForReceiver(
+            servingMasterPlaylist: false, sourceIsHDR: false) == .media)
+        #expect(AirPlayPlaylistDecision.playlistForReceiver(
+            servingMasterPlaylist: false, sourceIsHDR: true) == .media)
     }
 
     @Test("Only the media playlist is without subtitle renditions")
     func renditionCarriers() {
         #expect(AirPlayPlaylistDecision.carriesSubtitleRenditions(.master))
-        #expect(AirPlayPlaylistDecision.carriesSubtitleRenditions(.receiverHDRMaster))
         #expect(!AirPlayPlaylistDecision.carriesSubtitleRenditions(.media))
     }
 

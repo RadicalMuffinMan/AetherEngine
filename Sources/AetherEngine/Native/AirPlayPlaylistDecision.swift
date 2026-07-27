@@ -21,8 +21,10 @@ import Foundation
 /// | 4K PQ, DV dropped (`master_hdr`), 33.8 Mbps | refused |
 /// | 4K PQ, DV dropped, BANDWIDTH clamped to 8 Mbps | refused |
 /// | 4K PQ, DV dropped, RESOLUTION omitted entirely | refused |
+/// | 4K PQ, DV dropped, `HDCP-LEVEL=TYPE-1` declared | refused |
 ///
-/// The trigger is `VIDEO-RANGE=PQ`. Not the DV tag, not the declared peak, and not 4K: with RESOLUTION
+/// The trigger is `VIDEO-RANGE=PQ`. Not the DV tag, not the declared peak, not the missing HDCP level,
+/// and not 4K: with RESOLUTION
 /// omitted the receiver cannot know the dimensions before the first segment and refuses anyway, while it
 /// decodes those same 4K PQ segments happily off the media playlist. Two different Apple TV 4K units
 /// behaved identically. The one remaining manifest edit, declaring the range as SDR, was disproven on
@@ -42,9 +44,6 @@ enum AirPlayPlaylistDecision {
     enum ReceiverPlaylist: Equatable {
         /// The playlist the session resolved locally, subtitle renditions included.
         case master
-        /// `master_hdr_ap.m3u8` (#227 experiment): reduced HDR master with `HDCP-LEVEL=TYPE-1`, the last
-        /// manifest attribute never tried. Carries the renditions.
-        case receiverHDRMaster
         /// `media.m3u8`: no renditions, the manifest every receiver takes.
         case media
     }
@@ -55,23 +54,13 @@ enum AirPlayPlaylistDecision {
     ///   - sourceIsHDR: the served variant advertises HDR (`HLSVideoEngine.servedSourceIsHDR`). Must be the
     ///     real `VIDEO-RANGE`, not the DV-capability-inflated `sourceIsHDR`, or SDR content on a DV-capable
     ///     device takes the HDR branch and the renditions are dropped for no reason.
-    static func playlistForReceiver(
-        servingMasterPlaylist: Bool,
-        sourceIsHDR: Bool,
-        attemptHDRWithHDCP: Bool = attemptHDRWithHDCP
-    ) -> ReceiverPlaylist {
-        guard servingMasterPlaylist else { return .media }
-        guard sourceIsHDR else { return .master }
-        return attemptHDRWithHDCP ? .receiverHDRMaster : .media
+    static func playlistForReceiver(servingMasterPlaylist: Bool, sourceIsHDR: Bool) -> ReceiverPlaylist {
+        (servingMasterPlaylist && !sourceIsHDR) ? .master : .media
     }
-
-    /// #227 experiment switch: offer HDR sources a master declaring HDCP-LEVEL=TYPE-1 instead of dropping
-    /// to media. The watchdog covers a refusal, so a wrong guess costs eight seconds, not the session.
-    static let attemptHDRWithHDCP = true
 
     /// Whether the playlist handed to the receiver carries the `EXT-X-MEDIA:TYPE=SUBTITLES` renditions.
     static func carriesSubtitleRenditions(_ playlist: ReceiverPlaylist) -> Bool {
-        playlist != .media
+        playlist == .master
     }
 
     /// The loopback URL rewritten for the receiver: same port and query, the device's LAN IP for the host
@@ -81,11 +70,7 @@ enum AirPlayPlaylistDecision {
     static func receiverURL(base: URL, lanIP: String, playlist: ReceiverPlaylist) -> URL? {
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
         components?.host = lanIP
-        switch playlist {
-        case .master: break
-        case .receiverHDRMaster: components?.path = "/master_hdr_ap.m3u8"
-        case .media: components?.path = "/media.m3u8"
-        }
+        if playlist == .media { components?.path = "/media.m3u8" }
         return components?.url
     }
 }
