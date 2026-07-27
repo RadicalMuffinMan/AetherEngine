@@ -11,8 +11,23 @@ extension AetherEngine {
     ///
     /// Off by default and intended for triage builds only: the walk holds every malloc zone
     /// through `force_lock`, which briefly blocks allocating threads.
-    public nonisolated static func setLargeAllocationCensusEnabled(_ enabled: Bool) {
+    ///
+    /// Enabling also arms a jump trigger on its own queue (see `MallocBlockCensusTrigger`). The 30 s
+    /// memprobe cannot catch a failure that completes inside one sample, which is what every kill on
+    /// #220 turned out to be, so the counter is polled at `triggerPollHz` and the zone walk runs once
+    /// it climbs `triggerThresholdMB` above its running high-water. Pass `triggerPollHz: 0` for the
+    /// plain 30 s census with no watcher.
+    public nonisolated static func setLargeAllocationCensusEnabled(
+        _ enabled: Bool,
+        triggerThresholdMB: Int = 64,
+        triggerPollHz: Double = 8
+    ) {
         MallocBlockCensus.isEnabled = enabled
+        if enabled {
+            MallocBlockCensus.startTriggerWatch(thresholdMB: triggerThresholdMB, pollHz: triggerPollHz)
+        } else {
+            MallocBlockCensus.stopTriggerWatch()
+        }
     }
 
     // MARK: - Buffer probe
@@ -113,8 +128,10 @@ extension AetherEngine {
                     + mallocStr
                     // #220: empty unless the host opted in. A flat mallocBlocks with a rising
                     // mallocMB says one large buffer is growing but not which; this names the
-                    // size class.
+                    // size class. `peak` is the watcher's high-water, which survives a step the
+                    // 30 s cadence never sampled.
                     + MallocBlockCensus.probeFragment()
+                    + (MallocBlockCensus.isEnabled ? "peakMB=\(MallocBlockCensus.peakSizeInUseMB) " : "")
                     + "avioFetchedMB=\(avioMB) "
                     + "cacheCount=\(cacheCount) cacheMB=\(cacheMB) "
                     + "packetsWritten=\(packetsWritten) "

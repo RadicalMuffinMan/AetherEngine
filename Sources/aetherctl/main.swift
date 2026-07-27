@@ -455,6 +455,9 @@ if first == "play" {
     let audioStats = takeFlag("--audio-stats", from: &rest)
     let seekEvery = takeDoubleFlag("--seek-every", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
+    let playForceSW = takeFlag("--sw", from: &rest)
+    let censusThresholdMB = takeIntFlag("--census-threshold-mb", from: &rest)
+    let censusHz = takeDoubleFlag("--census-hz", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
     guard let urlArg = rest.first else {
         print("ERROR: play requires a <url> argument")
@@ -462,7 +465,8 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, mallocCensus: mallocCensus))
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, mallocCensus: mallocCensus, forceSoftware: playForceSW,
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
