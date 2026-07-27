@@ -3335,6 +3335,11 @@ public final class AetherEngine: ObservableObject {
     /// signal left. A receiver that does take the master fetches its init segment within about a second of
     /// the playlist, so this is generous without making a parked receiver wait for nothing.
     static let airPlayProgressWatchdogSeconds: Double = 5.0
+
+    /// How long the receiver plays the media playlist before the master is offered once more (#227). Long
+    /// enough for a Match-Dynamic-Range receiver to notice it is rendering HDR and switch its output,
+    /// short enough that the single interruption it costs lands near the start of a title.
+    static let airPlayHDRUpgradeDelaySeconds: Double = 12.0
     private var airPlayProgressWatchdog: Task<Void, Never>?
 
     /// Receivers that failed to start on an HDR master this process, by route UID (#227). An Apple TV
@@ -3373,11 +3378,16 @@ public final class AetherEngine: ObservableObject {
     /// receiver takes, and report the renditions as gone. Silent about a healthy session (#227).
     @MainActor
     private func fallBackFromRefusedAirPlayMaster(baseline: Double, position: Double) {
-        guard airPlayActive, airPlayServedMasterToReceiver, state == .playing else { return }
-        let advanced = currentTime - baseline
-        guard advanced < 0.5 else { return }
+        guard airPlayActive, airPlayServedMasterToReceiver else { return }
         guard let host = nativeHost, let session = nativeVideoSession,
               let mediaURL = session.mediaPlaylistURL else { return }
+        // Deliberately NOT gated on `state`: a refused session parks at paused, which is exactly the case
+        // this exists for, and an earlier version guarded on `state == .playing` and therefore never fired
+        // (device log 2026-07-27, where the #65 wedge recovery then nudged six times and gave up). The
+        // honest discriminator is the server's: a receiver that refuses the manifest fetches playlists and
+        // never a single segment, while a merely paused session has long since fetched its init segment.
+        let advanced = currentTime - baseline
+        guard advanced < 0.5, !session.hasServedMediaSegment else { return }
         let receiverUID = Self.currentAirPlayReceiverUID()
         if let receiverUID, nativeVideoSession?.servedSourceIsHDR == true {
             airPlayReceiversRefusingHDRMaster.insert(receiverUID)
@@ -3394,6 +3404,47 @@ public final class AetherEngine: ObservableObject {
         airPlayServedMasterToReceiver = false
         host.load(url: airPlayHostSwapped(mediaURL), startPosition: position, inPlaceSwap: true)
         host.play()
+        armAirPlayHDRUpgrade(position: position)
+    }
+
+    /// One retry of the master after a refused HDR hop (#227). A receiver set to Match Dynamic Range sits in
+    /// SDR and refuses an HDR master, but it does switch its output to HDR once it is actually playing HDR
+    /// content, which the media playlist gives it (measured on device: the TV changes mode during that
+    /// fallback playback). That breaks the deadlock the refusal creates, the receiver cannot reach HDR
+    /// because it will not start HDR: let it play the media playlist, then offer the master once more to the
+    /// receiver that is now in HDR. Once per receiver per process, and only for an HDR source, so a receiver
+    /// that stays in SDR costs one interruption rather than a loop.
+    @MainActor
+    private func armAirPlayHDRUpgrade(position: Double) {
+        guard let session = nativeVideoSession, session.servedSourceIsHDR else { return }
+        guard let receiverUID = Self.currentAirPlayReceiverUID(),
+              !airPlayReceiversRefusingHDRMaster.contains(receiverUID) else { return }
+        let gen = loadGeneration
+        airPlayProgressWatchdog?.cancel()
+        airPlayProgressWatchdog = Task { @MainActor [weak self] in
+            let seconds = AetherEngine.airPlayHDRUpgradeDelaySeconds
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.loadGeneration == gen else { return }
+            self.upgradeAirPlayToHDRMaster(position: position, gen: gen)
+        }
+    }
+
+    @MainActor
+    private func upgradeAirPlayToHDRMaster(position: Double, gen: UInt64) {
+        guard airPlayActive, !airPlayServedMasterToReceiver else { return }
+        guard let host = nativeHost, let session = nativeVideoSession,
+              session.servedSourceIsHDR, let masterURL = session.masterPlaylistURL else { return }
+        let currentPosition = currentTime > 0 ? currentTime : position
+        EngineLog.emit(
+            "[AirPlay] the receiver has been playing HDR content for "
+            + "\(String(format: "%.0f", Self.airPlayHDRUpgradeDelaySeconds))s and should have switched its "
+            + "output by now; offering the master once more at \(String(format: "%.2f", currentPosition))s",
+            category: .session)
+        airPlayServedMasterToReceiver = true
+        nativeSubtitleRenditionsServed = true
+        host.load(url: airPlayHostSwapped(masterURL), startPosition: currentPosition, inPlaceSwap: true)
+        host.play()
+        armAirPlayProgressWatchdog(gen: gen, position: currentPosition)
     }
 
     private func handleExternalPlaybackChange(active: Bool) {

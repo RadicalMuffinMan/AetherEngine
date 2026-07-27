@@ -1490,6 +1490,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// HDR-preserving reduced master URL (#98), subtitle-preserving fallback for the #35 cold-DV gate.
     public var reducedHDRMasterPlaylistURL: URL? { server?.reducedHDRMasterPlaylistURL }
 
+    /// True once the loopback server has handed out an init or media segment this session (#227). The
+    /// AirPlay watchdog reads it: a receiver that refuses the manifest asks for playlists and never for a
+    /// segment, which separates a refusal from a clock that is merely paused.
+    public var hasServedMediaSegment: Bool { server?.hasServedMediaSegment ?? false }
+
     /// Flip the serving flag after the engine has reloaded the media playlist on a display rejection.
     func markServingMediaAfterFallback() { servingMasterPlaylist = false }
 

@@ -291,6 +291,17 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     private var loggedMasterPlaylist = false
+    /// #227: set the first time any media byte is served this session (init segment or a media segment).
+    /// The AirPlay progress watchdog needs to tell "the receiver refused the manifest" from "the clock is
+    /// not moving for some other reason", and a receiver that refuses never asks for a segment at all.
+    private var servedMediaBytes = false
+    /// True once the session has served an init or media segment to anyone (#227).
+    var hasServedMediaSegment: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return servedMediaBytes
+    }
+
     private var loggedReducedMasterPlaylist = false
     private var loggedMediaPlaylist = false
     private var loggedRequestHeaders = false
@@ -717,6 +728,7 @@ final class HLSLocalServer: @unchecked Sendable {
                            contentType: "text/vtt")
 
         case "/init.mp4":
+            stateLock.lock(); servedMediaBytes = true; stateLock.unlock()
             let data = provider?.initSegment() ?? Data()
             if data.isEmpty {
                 return send404(fd: fd, path: normalizedPath,
@@ -742,6 +754,7 @@ final class HLSLocalServer: @unchecked Sendable {
             }
             if normalizedPath.hasPrefix("/seg"),
                normalizedPath.hasSuffix(".mp4") {
+                stateLock.lock(); servedMediaBytes = true; stateLock.unlock()
                 let indexStr = normalizedPath.dropFirst(4).dropLast(4)
                 if let index = Int(indexStr), index >= 0 {
                     // File-backed fast path: stream page cache -> socket without Data materialization.
