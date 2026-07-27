@@ -1188,6 +1188,10 @@ public final class AetherEngine: ObservableObject {
     static let startupGateReloadSeconds: Double = 3.0
     static let startupGateMediaSeconds: Double = 2.5
 
+    /// First settle window on a wireless AirPlay hop (#227 follow-up). The receiver fetches across the LAN
+    /// and runs its own decode handshake before anything is playable, which the local 3 s window can miss.
+    static let airPlayGateInitialSeconds: Double = 6.0
+
     /// #124: whether a completed load runs its terminal autostart, the single decision every load
     /// path routes through: the native/software/audio `host.play()` + `state = .playing`, and the
     /// native VOD cold-start readiness gate (which plays to poll readiness). `false` is an honest
@@ -1206,6 +1210,11 @@ public final class AetherEngine: ObservableObject {
     /// replays that recovery in-session: play, poll readiness, and on a cold failure reload the SAME
     /// master with a fresh asset (bounded) before falling back to the media playlist (HDR10 base, no
     /// DV upgrade). Bounded at every stage, so a cold resume can never hang forever on 0 tracks.
+    ///
+    /// #227 follow-up: the same escalation is what a wireless AirPlay hop needs. The sender cannot read the
+    /// receiver's HDR mode, so an offered HDR/DV master either plays (receiver in HDR or DV mode, the common
+    /// case, and its subtitle renditions travel), fails `-11868`/`-11848`, or parks silently. The gate covers
+    /// all three, and its reloads are rewritten onto the LAN IP so the receiver can reach them at all.
     @MainActor
     private func runStartupReadinessGate(
         session: HLSVideoEngine, position: Double, gen: UInt64
@@ -1214,13 +1223,18 @@ public final class AetherEngine: ObservableObject {
         host.startupReadinessGateActive = true
         defer { host.startupReadinessGateActive = false }
 
+        // A receiver's first fetch crosses the LAN and its own decode handshake, so the local 3 s settle
+        // window would judge a healthy AirPlay start too early and reload a master that was on its way.
+        let initialSettle = airPlayActive
+            ? Self.airPlayGateInitialSeconds
+            : Self.startupGateInitialSeconds
         var attempt = 1
         var dataWaitRounds = 0
         while true {
             // Attempt 1 plays the item the load path already created; later attempts replay it fresh.
             host.play()
             let timeout = attempt == 1
-                ? Self.startupGateInitialSeconds
+                ? initialSettle
                 : Self.startupGateReloadSeconds
             let outcome = await host.awaitStartupReadiness(timeoutSeconds: timeout)
             try checkLoadCurrent(gen)
@@ -1275,7 +1289,7 @@ public final class AetherEngine: ObservableObject {
                     + "\(StartupReadinessGate.masterAttempts), link may still be warming) at "
                     + "\(String(format: "%.2f", position))s",
                     category: .session)
-                host.load(url: masterURL, startPosition: position, inPlaceSwap: true)
+                host.load(url: airPlayHostSwapped(masterURL), startPosition: position, inPlaceSwap: true)
                 attempt += 1
 
             case .fallBackToMedia:
@@ -1289,7 +1303,7 @@ public final class AetherEngine: ObservableObject {
                         + "HDR-preserving reduced master (subtitles preserved, DV dropped) at "
                         + "\(String(format: "%.2f", position))s",
                         category: .session)
-                    host.load(url: reducedURL, startPosition: position, inPlaceSwap: true)
+                    host.load(url: airPlayHostSwapped(reducedURL), startPosition: position, inPlaceSwap: true)
                     host.play()
                     let reducedOutcome = await host.awaitStartupReadiness(
                         timeoutSeconds: Self.startupGateReloadSeconds)
@@ -1314,7 +1328,7 @@ public final class AetherEngine: ObservableObject {
                     + "playlist at \(String(format: "%.2f", position))s (HDR10 base, DV upgrade "
                     + "dropped this session)",
                     category: .session)
-                host.load(url: mediaURL, startPosition: position, inPlaceSwap: true)
+                host.load(url: airPlayHostSwapped(mediaURL), startPosition: position, inPlaceSwap: true)
                 host.play()
                 // Best-effort readiness confirm; the media playlist is the universal-compatible route.
                 // Clearing the gate (defer) lets a genuine residual media failure surface normally via
@@ -2528,8 +2542,12 @@ public final class AetherEngine: ObservableObject {
                 // #124: a paused mount skips the terminal play() AND the cold-start readiness gate
                 // (an autostart-path recovery: it plays to poll readiness). loadNative wired
                 // host.$isReady, which settles .loading -> .paused; the host resumes later with play().
+                // #227 follow-up: a master handed to a wireless AirPlay receiver arms the same gate. The
+                // receiver's HDR mode is unreadable from the sender, so an offered HDR/DV master can be
+                // rejected or park silently, and the escalation (reload master -> reduced HDR master ->
+                // media, all on the LAN IP) is exactly the recovery that hop needs.
                 if Self.loadPerformsAutostart(options) {
-                    if didSwitchPanel, let session = nativeVideoSession,
+                    if didSwitchPanel || airPlayServedMasterToReceiver, let session = nativeVideoSession,
                        session.servingMasterPlaylist, !options.isLive {
                         try await runStartupReadinessGate(
                             session: session, position: startPosition ?? 0, gen: gen)
@@ -3337,6 +3355,7 @@ public final class AetherEngine: ObservableObject {
     /// from #86). `subtitleRenditionsServed` is what the served playlist actually carries, which is what
     /// `nativeSubtitleRenditionsServed` promises hosts.
     func airPlayAdjustedPlayback(url: URL, session: HLSVideoEngine) -> (url: URL, subtitleRenditionsServed: Bool) {
+        airPlayServedMasterToReceiver = false
         #if os(iOS)
         guard airPlayActive else { return (url, session.servingMasterPlaylist) }
         let keepMaster = AirPlayPlaylistDecision.servesMasterToReceiver(
@@ -3346,6 +3365,7 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AirPlay] no LAN IP; keeping \(url.absoluteString)", category: .engine)
             return (url, session.servingMasterPlaylist)
         }
+        airPlayServedMasterToReceiver = keepMaster
         EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString) (keepMaster=\(keepMaster) "
                        + "sourceIsHDR=\(session.servedSourceIsHDR) subtitle renditions "
                        + "\(keepMaster ? "carried" : "dropped"))", category: .engine)
@@ -3353,6 +3373,18 @@ public final class AetherEngine: ObservableObject {
         #else
         return (url, session.servingMasterPlaylist)
         #endif
+    }
+
+    /// True while the current native load handed the receiver a MASTER playlist (#227 follow-up). Arms the
+    /// startup-readiness gate on that hop: the sender cannot read the receiver's HDR mode, so a rejected or
+    /// silently parked master has to be caught and downgraded to the LAN media playlist.
+    private(set) var airPlayServedMasterToReceiver = false
+
+    /// The same loopback URL on the device's LAN IP, path untouched (master, reduced master, media). For the
+    /// readiness gate's reloads while AirPlaying, which otherwise hand the receiver a 127.0.0.1 URL it cannot
+    /// reach. Identity when no LAN IP resolves.
+    func airPlayHostSwapped(_ url: URL) -> URL {
+        airPlayPlaybackURL(base: url, keepMaster: true) ?? url
     }
 
     /// AirPlay loopback URL (#86): rewrite the loopback playback URL to the device's LAN IP so the receiver

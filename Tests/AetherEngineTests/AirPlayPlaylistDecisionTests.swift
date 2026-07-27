@@ -7,21 +7,31 @@ struct AirPlayPlaylistDecisionTests {
     @Test("#227: an SDR master survives the AirPlay rewrite, so its subtitle renditions travel")
     func sdrMasterIsKept() {
         #expect(AirPlayPlaylistDecision.servesMasterToReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: false))
+            servingMasterPlaylist: true, sourceIsHDR: false, attemptHDRMaster: false))
+        #expect(AirPlayPlaylistDecision.servesMasterToReceiver(
+            servingMasterPlaylist: true, sourceIsHDR: false, attemptHDRMaster: true))
     }
 
-    @Test("#86: an HDR/DV master is still downgraded (an SDR receiver rejects it)")
-    func hdrMasterIsDowngraded() {
+    @Test("#86: with the HDR attempt off, an HDR/DV master is downgraded up front")
+    func hdrMasterIsDowngradedWhenNotAttempted() {
         #expect(!AirPlayPlaylistDecision.servesMasterToReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: true))
+            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRMaster: false))
     }
 
-    @Test("A session already on the media playlist has no master to keep")
+    @Test("#227 follow-up: with the HDR attempt on, the HDR/DV master is offered to the receiver")
+    func hdrMasterIsOfferedWhenAttempted() {
+        #expect(AirPlayPlaylistDecision.servesMasterToReceiver(
+            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRMaster: true))
+    }
+
+    @Test("A session already on the media playlist has no master to keep, in either mode")
     func mediaSessionStaysMedia() {
-        #expect(!AirPlayPlaylistDecision.servesMasterToReceiver(
-            servingMasterPlaylist: false, sourceIsHDR: false))
-        #expect(!AirPlayPlaylistDecision.servesMasterToReceiver(
-            servingMasterPlaylist: false, sourceIsHDR: true))
+        for attempt in [false, true] {
+            #expect(!AirPlayPlaylistDecision.servesMasterToReceiver(
+                servingMasterPlaylist: false, sourceIsHDR: false, attemptHDRMaster: attempt))
+            #expect(!AirPlayPlaylistDecision.servesMasterToReceiver(
+                servingMasterPlaylist: false, sourceIsHDR: true, attemptHDRMaster: attempt))
+        }
     }
 
     @Test("#86: the rewrite swaps the loopback host for the LAN IP and keeps the port")
