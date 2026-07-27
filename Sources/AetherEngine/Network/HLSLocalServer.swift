@@ -147,13 +147,12 @@ enum HLSVideoRange: String {
 enum MasterPlaylistVariant: Equatable {
     case primary
     case reducedHDR
-    /// #227 experiment: `.reducedHDR` without the RESOLUTION attribute, for a wireless AirPlay receiver.
-    /// Measured 2026-07-27: the receiver takes 1080p and 720p SDR masters and refuses every 4K PQ one,
-    /// including with the declared peak clamped, while decoding those same 4K PQ segments off the media
-    /// playlist. HDR and 4K are perfectly confounded in that data. RESOLUTION is optional in HLS, so
-    /// leaving it out removes 4K from what the receiver can filter on without misdeclaring anything; a
-    /// refusal that survives it belongs to VIDEO-RANGE=PQ alone.
-    case reducedHDRNoResolution
+    /// #227 experiment: `.reducedHDR` plus `HDCP-LEVEL=TYPE-1`, for a wireless AirPlay receiver. Apple's
+    /// authoring spec asks for TYPE-1 above HD, our master declares no level at all, and a receiver that
+    /// cannot tell whether it may render protected 4K HDR has a reason to filter the variant out. Kept off
+    /// every other path on purpose: emitting TYPE-1 generally broke wired HDMI with -11868 / tracks count=0
+    /// when the link's HDCP 2.2 state did not match (Vincent, 2026-05-26), which is why it is nil upstream.
+    case reducedHDRWithHDCP
 }
 
 // MARK: - Local HLS Server
@@ -663,9 +662,9 @@ final class HLSLocalServer: @unchecked Sendable {
             return send404(fd: fd, path: normalizedPath, reason: "no masterCodecs")
 
         case "/master_hdr_ap.m3u8":
-            // #227 experiment: reduced HDR master without RESOLUTION, for a wireless AirPlay receiver.
+            // #227 experiment: reduced HDR master carrying HDCP-LEVEL=TYPE-1, for a wireless AirPlay receiver.
             if provider?.masterCodecs != nil {
-                let body = buildReducedMasterPlaylist(.reducedHDRNoResolution)
+                let body = buildReducedMasterPlaylist(.reducedHDRWithHDCP)
                 stateLock.lock()
                 let firstTime = !loggedAirPlayMasterPlaylist
                 if firstTime { loggedAirPlayMasterPlaylist = true }
@@ -1117,7 +1116,7 @@ final class HLSLocalServer: @unchecked Sendable {
         if variant == .primary, let supplemental = provider.masterSupplementalCodecs {
             streamInfAttrs.append("SUPPLEMENTAL-CODECS=\"\(supplemental)\"")
         }
-        if let resolution = provider.masterResolution, variant != .reducedHDRNoResolution {
+        if let resolution = provider.masterResolution {
             streamInfAttrs.append("RESOLUTION=\(resolution.width)x\(resolution.height)")
         }
         if let frameRate = provider.masterFrameRate {
@@ -1126,7 +1125,7 @@ final class HLSLocalServer: @unchecked Sendable {
         if let range = provider.masterVideoRange {
             streamInfAttrs.append("VIDEO-RANGE=\(range.rawValue)")
         }
-        if let hdcp = provider.masterHDCPLevel {
+        if let hdcp = provider.masterHDCPLevel ?? (variant == .reducedHDRWithHDCP ? "TYPE-1" : nil) {
             streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")
         }
         if let cc = provider.masterClosedCaptions {

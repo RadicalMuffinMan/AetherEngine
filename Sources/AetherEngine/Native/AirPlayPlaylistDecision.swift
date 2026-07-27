@@ -20,14 +20,18 @@ import Foundation
 /// | 4K PQ + DV `SUPPLEMENTAL-CODECS`, 33.8 Mbps | refused |
 /// | 4K PQ, DV dropped (`master_hdr`), 33.8 Mbps | refused |
 /// | 4K PQ, DV dropped, BANDWIDTH clamped to 8 Mbps | refused |
+/// | 4K PQ, DV dropped, RESOLUTION omitted entirely | refused |
 ///
-/// So neither the DV tag nor the declared peak is the trigger, and the receiver decodes those very
-/// segments happily off the media playlist. HDR and 4K are still perfectly confounded in that table: every
-/// accepted master was 1080p or below, every refused one was 4K, and no 4K SDR or 1080p HDR source was
-/// available to separate them. Which of the two it is decides whether HDR can ever carry renditions here,
-/// so `.receiverHDRMaster` drops the optional RESOLUTION attribute to take 4K out of what the receiver can
-/// filter on. (Misdeclaring the range instead is not an option: #98 Stage 1.5 showed `VIDEO-RANGE=SDR` over
-/// HDR content does not fool the compatibility gate, which reads the real `colr` and codec.)
+/// The trigger is `VIDEO-RANGE=PQ`. Not the DV tag, not the declared peak, and not 4K: with RESOLUTION
+/// omitted the receiver cannot know the dimensions before the first segment and refuses anyway, while it
+/// decodes those same 4K PQ segments happily off the media playlist. Two different Apple TV 4K units
+/// behaved identically. The one remaining manifest edit, declaring the range as SDR, was disproven on
+/// hardware in #98 Stage 1.5: the compatibility gate reads the real `colr` and codec, not the string.
+///
+/// **So an HDR or DV source cannot carry subtitle renditions to a wireless AirPlay receiver.** The
+/// renditions exist only in a master, and no master describing HDR content is accepted. The media
+/// downgrade is not a workaround, it is the only routable manifest, and hosts learn about it through
+/// `nativeSubtitleRenditionsServed` going false. SDR keeps its master and its subtitles.
 ///
 /// The refusal is silent, which is why the downgrade is a decision and not a fallback: no `-11868`, no
 /// `.failed` item, the rate flickers to `playing` for one tick so even `hasEverPlayed` latches, and the
@@ -38,8 +42,8 @@ enum AirPlayPlaylistDecision {
     enum ReceiverPlaylist: Equatable {
         /// The playlist the session resolved locally, subtitle renditions included.
         case master
-        /// `master_hdr_ap.m3u8` (#227 experiment): DV dropped and no RESOLUTION, to find out whether the
-        /// receiver's variant filter trips on 4K or on PQ. Carries the renditions.
+        /// `master_hdr_ap.m3u8` (#227 experiment): reduced HDR master with `HDCP-LEVEL=TYPE-1`, the last
+        /// manifest attribute never tried. Carries the renditions.
         case receiverHDRMaster
         /// `media.m3u8`: no renditions, the manifest every receiver takes.
         case media
@@ -54,16 +58,16 @@ enum AirPlayPlaylistDecision {
     static func playlistForReceiver(
         servingMasterPlaylist: Bool,
         sourceIsHDR: Bool,
-        attemptHDRWithoutResolution: Bool = attemptHDRWithoutResolution
+        attemptHDRWithHDCP: Bool = attemptHDRWithHDCP
     ) -> ReceiverPlaylist {
         guard servingMasterPlaylist else { return .media }
         guard sourceIsHDR else { return .master }
-        return attemptHDRWithoutResolution ? .receiverHDRMaster : .media
+        return attemptHDRWithHDCP ? .receiverHDRMaster : .media
     }
 
-    /// #227 experiment switch: offer HDR sources a master without the RESOLUTION attribute instead of
-    /// dropping to media. Set to false once the question is settled; the watchdog covers a refusal.
-    static let attemptHDRWithoutResolution = true
+    /// #227 experiment switch: offer HDR sources a master declaring HDCP-LEVEL=TYPE-1 instead of dropping
+    /// to media. The watchdog covers a refusal, so a wrong guess costs eight seconds, not the session.
+    static let attemptHDRWithHDCP = true
 
     /// Whether the playlist handed to the receiver carries the `EXT-X-MEDIA:TYPE=SUBTITLES` renditions.
     static func carriesSubtitleRenditions(_ playlist: ReceiverPlaylist) -> Bool {

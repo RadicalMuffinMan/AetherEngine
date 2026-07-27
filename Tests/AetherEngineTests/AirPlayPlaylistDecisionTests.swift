@@ -7,31 +7,28 @@ struct AirPlayPlaylistDecisionTests {
     @Test("#227: an SDR source keeps its master, so its subtitle renditions travel")
     func sdrKeepsMaster() {
         #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: false, attemptHDRWithoutResolution: false) == .master)
+            servingMasterPlaylist: true, sourceIsHDR: false, attemptHDRWithHDCP: false) == .master)
     }
 
-    @Test("#227: an HDR source goes to media once the resolution-less master is not attempted")
+    @Test("#227: an HDR source goes to media; no master over HDR content is accepted")
     func hdrGoesToMedia() {
         #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRWithoutResolution: false) == .media)
+            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRWithHDCP: false) == .media)
     }
 
-    @Test("#227 experiment: an HDR source is offered the resolution-less master while it is armed")
-    func hdrGetsResolutionLessMaster() {
+    @Test("#227 experiment: an HDR source is offered the HDCP-declaring master while it is armed")
+    func hdrGetsHDCPMaster() {
         #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRWithoutResolution: true)
-            == .receiverHDRMaster)
+            servingMasterPlaylist: true, sourceIsHDR: true, attemptHDRWithHDCP: true) == .receiverHDRMaster)
     }
 
     @Test("A session already on the media playlist has no master to hand over")
     func mediaSessionStaysMedia() {
         for attempt in [false, true] {
             #expect(AirPlayPlaylistDecision.playlistForReceiver(
-                servingMasterPlaylist: false, sourceIsHDR: false,
-                attemptHDRWithoutResolution: attempt) == .media)
+                servingMasterPlaylist: false, sourceIsHDR: false, attemptHDRWithHDCP: attempt) == .media)
             #expect(AirPlayPlaylistDecision.playlistForReceiver(
-                servingMasterPlaylist: false, sourceIsHDR: true,
-                attemptHDRWithoutResolution: attempt) == .media)
+                servingMasterPlaylist: false, sourceIsHDR: true, attemptHDRWithHDCP: attempt) == .media)
         }
     }
 
