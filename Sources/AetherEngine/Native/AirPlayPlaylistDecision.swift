@@ -76,7 +76,7 @@ enum AirPlayPlaylistDecision {
         components?.host = lanIP
         switch playlist {
         case .master: break
-        case .reducedHDRMaster: components?.path = "/master_hdr.m3u8"
+        case .reducedHDRMaster: components?.path = "/master_hdr_ap.m3u8"
         case .media: components?.path = "/media.m3u8"
         }
         return components?.url

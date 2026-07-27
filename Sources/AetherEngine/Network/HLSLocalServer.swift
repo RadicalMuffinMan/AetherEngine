@@ -147,7 +147,17 @@ enum HLSVideoRange: String {
 enum MasterPlaylistVariant: Equatable {
     case primary
     case reducedHDR
+    /// #227 experiment: `.reducedHDR` with the declared BANDWIDTH clamped, for a wireless AirPlay receiver.
+    /// Measured 2026-07-27: the receiver plays 4K HEVC PQ segments happily off the media playlist, yet
+    /// refuses the master describing the same segments; the SDR masters it accepted declared 5.0 and 7.5
+    /// Mbps against this one's 33.8. If the declared peak is what its variant filter rejects, clamping is
+    /// the whole fix, since nothing about the media itself is beyond it.
+    case reducedHDRClampedBandwidth
 }
+
+/// Peak declared for `.reducedHDRClampedBandwidth` (#227). Below any plausible AirPlay link budget while
+/// still above the source's real average, so the receiver has no reason to filter the variant out.
+let airPlayClampedBandwidthBps = 8_000_000
 
 // MARK: - Local HLS Server
 
@@ -292,6 +302,7 @@ final class HLSLocalServer: @unchecked Sendable {
 
     private var loggedMasterPlaylist = false
     private var loggedReducedMasterPlaylist = false
+    private var loggedAirPlayMasterPlaylist = false
     private var loggedMediaPlaylist = false
     private var loggedRequestHeaders = false
     /// #227 diag: every distinct client address seen this session, logged once each. AirPlay is supposed to
@@ -647,6 +658,23 @@ final class HLSLocalServer: @unchecked Sendable {
                 if firstTime {
                     EngineLog.emit("[HLSLocalServer] \(normalizedPath) body:\n\(body)",
                                    category: .hlsServer)
+                }
+                return send200(fd: fd, path: normalizedPath,
+                               data: Data(body.utf8),
+                               contentType: "application/vnd.apple.mpegurl")
+            }
+            return send404(fd: fd, path: normalizedPath, reason: "no masterCodecs")
+
+        case "/master_hdr_ap.m3u8":
+            // #227: the reduced HDR master with a clamped declared peak, for a wireless AirPlay receiver.
+            if provider?.masterCodecs != nil {
+                let body = buildReducedMasterPlaylist(.reducedHDRClampedBandwidth)
+                stateLock.lock()
+                let firstTime = !loggedAirPlayMasterPlaylist
+                if firstTime { loggedAirPlayMasterPlaylist = true }
+                stateLock.unlock()
+                if firstTime {
+                    EngineLog.emit("[HLSLocalServer] \(normalizedPath) body:\n\(body)", category: .hlsServer)
                 }
                 return send200(fd: fd, path: normalizedPath,
                                data: Data(body.utf8),
@@ -1081,10 +1109,13 @@ final class HLSLocalServer: @unchecked Sendable {
 
         // EXT-X-STREAM-INF attribute order per Apple's HLS Authoring Spec Appendixes: BANDWIDTH, AVERAGE-BANDWIDTH, CODECS, SUPPLEMENTAL-CODECS, RESOLUTION/FRAME-RATE/VIDEO-RANGE, HDCP-LEVEL/CLOSED-CAPTIONS.
         var streamInfAttrs: [String] = []
-        let bandwidth = provider.masterBandwidth ?? 5_000_000
+        let clamp = variant == .reducedHDRClampedBandwidth
+        let bandwidth = clamp
+            ? min(provider.masterBandwidth ?? 5_000_000, airPlayClampedBandwidthBps)
+            : (provider.masterBandwidth ?? 5_000_000)
         streamInfAttrs.append("BANDWIDTH=\(bandwidth)")
         if let avg = provider.masterAverageBandwidth {
-            streamInfAttrs.append("AVERAGE-BANDWIDTH=\(avg)")
+            streamInfAttrs.append("AVERAGE-BANDWIDTH=\(clamp ? min(avg, bandwidth) : avg)")
         }
         streamInfAttrs.append("CODECS=\"\(codecs)\"")
         // #98 Stage 1.5: a reduced master drops the DV SUPPLEMENTAL-CODECS so the variant reads as

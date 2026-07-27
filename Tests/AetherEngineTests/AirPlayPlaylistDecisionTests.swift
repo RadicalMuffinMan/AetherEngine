@@ -48,7 +48,7 @@ struct AirPlayPlaylistDecisionTests {
         let base = try #require(URL(string: "http://127.0.0.1:52341/master.m3u8"))
         let reduced = try #require(AirPlayPlaylistDecision.receiverURL(
             base: base, lanIP: "192.168.8.166", playlist: .reducedHDRMaster))
-        #expect(reduced.absoluteString == "http://192.168.8.166:52341/master_hdr.m3u8")
+        #expect(reduced.absoluteString == "http://192.168.8.166:52341/master_hdr_ap.m3u8")
         let media = try #require(AirPlayPlaylistDecision.receiverURL(
             base: base, lanIP: "192.168.8.166", playlist: .media))
         #expect(media.absoluteString == "http://192.168.8.166:52341/media.m3u8")
