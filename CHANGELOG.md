@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.10] - 2026-07-27
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.10))
+
+### Fixed
+
+- **A software-decoded title no longer wedges its picture on a decoder that asks to be read first.** `avcodec_send_packet` returning `AVERROR(EAGAIN)` is not a decode error: it means the packet was not consumed because the decoder's output queue is full and has to be drained before more input is accepted, which is legal at any point under frame threading, and the software video decoder runs with `thread_count` at the core count and both threading types enabled. It was handled as any other negative result, so the packet was dropped and the queue left full, and every subsequent send hit the same wall: the picture stopped for good while audio kept playing, until a seek flushed the decoder. The send now drains the receive loop and resends the same packet on EAGAIN, a genuine error drops the packet and logs once per decoder, and the drain runs either way since a dropped packet does not invalidate frames the decoder already holds. Found by rrgomes while reading the software path for #220. Covered by `Issue220SoftwareDecoderDrainTests`.
+- **The subtitle forward prefetcher no longer loses its forward park, or its cue timing, to one failed time-base lookup.** The reader memoized its own failure: a stream lookup that returned nothing fell back to `AVRational(0, 1)`, that value went into the per-session cache, and the park guard (`tb.num > 0`) then skipped every subsequent packet on that stream, so the side reader ran the rest of the session with no forward park and pulled from the origin far ahead of the playhead on a second connection. The same value also reached the packet store, where the harvest rate is `num/den`: at zero every cue it harvested would land at second 0. Only usable time bases are cached now, an unusable one drops that single packet and retries on the next, and it logs once per session. Found by rrgomes while reading the software path for #220. Covered by `Issue220PrefetchTimeBaseTests`.
+
 ## [5.23.9] - 2026-07-27
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.9))
