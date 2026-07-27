@@ -2678,7 +2678,12 @@ public final class AetherEngine: ObservableObject {
         let audioToRestore = activeAudioTrackIndex
         let carryover = captureSubtitleSessionCarryover()
         sessionPreservingReloadInFlight = true
-        defer { sessionPreservingReloadInFlight = false }
+        // #227: the reconcile has to run on every exit, including a thrown/superseded load, or an edge held
+        // during the reload is lost and the session stays on the wrong URL for the current route.
+        defer {
+            sessionPreservingReloadInFlight = false
+            reconcileExternalPlaybackAfterReload()
+        }
         // Live: rejoin at the live edge; pre-suspend playhead is stale and may have slid out of the window.
         let resume: Double? = LiveReloadPolicy.resumePosition(
             isLive: loadedOptions.isLive, currentTime: pos)
@@ -3316,7 +3321,23 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
+    /// #227: an external-playback edge arrived while the reload this observer started was still running, so
+    /// the real route state has to be re-read once the rebuilt item exists.
+    private var externalPlaybackEdgeHeld = false
+
     private func handleExternalPlaybackChange(active: Bool) {
+        // #227 (device log 2026-07-27): the reload started below tears down the very item the KVO watches, so
+        // AVPlayer reports a transient `false` in the middle of it. Acting on that edge cleared `airPlayActive`
+        // before `loadNative` read it, the rebuilt session served 127.0.0.1 again, the receiver re-engaged
+        // external playback, and that true edge started the next reload: one full session rebuild per turn,
+        // forever (ports 51291, 51296, 51299, ... in the log), with the LAN swap never once applied. Hold any
+        // edge for the duration of the reload and reconcile against the live route afterwards.
+        if sessionPreservingReloadInFlight {
+            externalPlaybackEdgeHeld = true
+            EngineLog.emit("[AirPlay] external playback \(active) during a session-preserving reload; "
+                           + "holding the edge until the rebuilt item settles", category: .engine)
+            return
+        }
         // A wired HDMI external display (USB-C/Lightning-to-HDMI adapter, Sodalite#34) keeps the device as the
         // stream origin: 127.0.0.1 loopback stays reachable and the panel carries DV/HDR (DrHurt measured his
         // adapter exposing SDR/HDR/DV in Display & Brightness), so AVPlayer just pushes the already-master
@@ -3334,6 +3355,31 @@ public final class AetherEngine: ObservableObject {
         guard playbackBackend == .native, !loadedOptions.nativeRemoteHLS, loadedURL != nil else { return }
         EngineLog.emit("[AirPlay] external playback \(wantAirPlay ? "active (wireless) -> LAN media reload" : "ended -> loopback reload")", category: .engine)
         Task { try? await reloadAtCurrentPosition() }
+    }
+
+    /// Re-read external playback after a session-preserving reload and act on it if it really changed (#227).
+    /// The player flag alone is not trustworthy at this instant: the rebuilt item may not have re-engaged the
+    /// receiver yet, which would read as "AirPlay ended" and start the next reload of the same loop. The audio
+    /// route survives the item teardown, so a receiver still holding the route keeps the session on its LAN URL.
+    func reconcileExternalPlaybackAfterReload() {
+        guard externalPlaybackEdgeHeld else { return }
+        externalPlaybackEdgeHeld = false
+        let active = (currentAVPlayer?.isExternalPlaybackActive ?? false) || Self.isWirelessAirPlayRoute()
+        EngineLog.emit("[AirPlay] reconciling the held edge after the reload: active=\(active) "
+                       + "(player=\(currentAVPlayer?.isExternalPlaybackActive ?? false) "
+                       + "route=\(Self.isWirelessAirPlayRoute()))", category: .engine)
+        handleExternalPlaybackChange(active: active)
+    }
+
+    /// True when a wireless AirPlay receiver holds the current audio route. Unlike
+    /// `AVPlayer.isExternalPlaybackActive` this survives an item teardown, which is what makes it the right
+    /// signal for the post-reload reconcile (#227). Wired HDMI reports `.HDMI` and is excluded by construction.
+    nonisolated static func isWirelessAirPlayRoute() -> Bool {
+        #if os(iOS)
+        return AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .airPlay }
+        #else
+        return false
+        #endif
     }
 
     /// True when a wired HDMI external display is the active audio output (USB-C/Lightning-to-HDMI adapter).
