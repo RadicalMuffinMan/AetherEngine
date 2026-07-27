@@ -16,6 +16,27 @@ import Libavutil
 /// mirroring the native subtitle readers (memory rule: all side readers share positioning fixes).
 enum SubtitleForwardPrefetcher {
 
+    /// Resolve a stream's packet time base, memoizing only usable results (#220).
+    ///
+    /// The lookup used to memoize its own failure: a nil `stream(at:)` fell back to `0/1`, that
+    /// value went into the cache, and the park guard (`tb.num > 0`) then skipped every further
+    /// packet on the stream, so the reader ran the rest of the session with no forward park at
+    /// all. It also fed `0/1` to the store, where `pts * (num/den)` is zero and every harvested
+    /// cue lands at second 0. Caching only valid values makes a failed lookup cost one packet
+    /// and retry on the next.
+    static func resolveTimeBase(
+        streamIndex: Int32,
+        cache: inout [Int32: AVRational],
+        lookup: (Int32) -> AVRational?
+    ) -> AVRational? {
+        if let cached = cache[streamIndex] { return cached }
+        guard let resolved = lookup(streamIndex), resolved.num > 0, resolved.den > 0 else {
+            return nil
+        }
+        cache[streamIndex] = resolved
+        return resolved
+    }
+
     /// Read/harvest until EOF, error, cancellation, or a nil playhead (engine gone). Returns the
     /// number of routed subtitle packets harvested. The demuxer must be positioned by the caller.
     /// Harvest-then-park: the packet whose PTS crosses `playhead + leadSeconds` is stored before
@@ -35,6 +56,7 @@ enum SubtitleForwardPrefetcher {
         guard var playheadSnapshot = await playhead() else { return 0 }
         var harvested = 0
         var timeBaseCache: [Int32: AVRational] = [:]
+        var timeBaseFailures = 0
         readLoop: while !Task.isCancelled {
             guard let pkt = try? demuxer.readPacket() else { break }
             let streamIdx = pkt.pointee.stream_index
@@ -43,12 +65,22 @@ enum SubtitleForwardPrefetcher {
                 trackedPacketFree(&p)
                 continue
             }
-            let tb: AVRational
-            if let cached = timeBaseCache[streamIdx] {
-                tb = cached
-            } else {
-                tb = demuxer.stream(at: streamIdx)?.pointee.time_base ?? AVRational(num: 0, den: 1)
-                timeBaseCache[streamIdx] = tb
+            // #220: an unusable time base drops the packet rather than harvesting it against a
+            // zero rate (every cue would land at second 0) and rather than parking against a
+            // meaningless PTS. It is not cached, so the next packet retries the lookup.
+            guard let tb = resolveTimeBase(streamIndex: streamIdx, cache: &timeBaseCache,
+                                           lookup: { demuxer.stream(at: $0)?.pointee.time_base })
+            else {
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                trackedPacketFree(&p)
+                timeBaseFailures += 1
+                if timeBaseFailures == 1 {
+                    EngineLog.emit(
+                        "[AetherEngine] #151 forward prefetch: no usable time base for stream "
+                        + "\(streamIdx); packet dropped (logged once)",
+                        category: .engine)
+                }
+                continue
             }
             store.harvest(streamIndex: streamIdx, packet: pkt, timeBase: tb,
                           assembleSplitDisplaySets: assemblyIndices.contains(streamIdx),
@@ -59,7 +91,7 @@ enum SubtitleForwardPrefetcher {
             trackedPacketFree(&p)
             // Park once the read passes the lead edge; a packet without a usable PTS (split-set
             // continuation chunks) never parks, its set's PCS anchor already did the pacing.
-            guard rawTS != Int64.min, tb.num > 0, tb.den > 0 else { continue }
+            guard rawTS != Int64.min else { continue }
             let pktSeconds = Double(rawTS) * Double(tb.num) / Double(tb.den)
             while !Task.isCancelled, pktSeconds > playheadSnapshot + leadSeconds {
                 guard let fresh = await playhead() else { break readLoop }
