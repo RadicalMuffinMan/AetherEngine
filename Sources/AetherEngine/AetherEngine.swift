@@ -3332,9 +3332,26 @@ public final class AetherEngine: ObservableObject {
     /// it counts as refused. A receiver that will not play the offered variant does NOT fail the item and
     /// does not report `-11868`: it simply never starts, while the rate flickers to `playing` for a tick
     /// (device log 2026-07-27, DV master). That is invisible to the readiness gate, so progress is the only
-    /// signal left. Generous enough that a slow first fetch across the LAN is not mistaken for a refusal.
-    static let airPlayProgressWatchdogSeconds: Double = 8.0
+    /// signal left. A receiver that does take the master fetches its init segment within about a second of
+    /// the playlist, so this is generous without making a parked receiver wait for nothing.
+    static let airPlayProgressWatchdogSeconds: Double = 5.0
     private var airPlayProgressWatchdog: Task<Void, Never>?
+
+    /// Receivers that failed to start on an HDR master this process, by route UID (#227). An Apple TV
+    /// parked in SDR refuses one, and nothing in the public API reports the receiver's dynamic range, so
+    /// the offer has to be made once and remembered. Per process on purpose: a user who switches the
+    /// receiver's output format to HDR gets the offer again on the next launch.
+    private var airPlayReceiversRefusingHDRMaster: Set<String> = []
+
+    /// Route UID of the wireless AirPlay receiver currently holding the audio route, or nil.
+    nonisolated static func currentAirPlayReceiverUID() -> String? {
+        #if os(iOS)
+        return AVAudioSession.sharedInstance().currentRoute.outputs
+            .first { $0.portType == .airPlay }?.uid
+        #else
+        return nil
+        #endif
+    }
 
     /// Arm the progress watchdog for a load that handed the receiver a playlist with subtitle renditions.
     /// No-op otherwise: the media playlist is the fallback itself, and a local session cannot be refused.
@@ -3361,10 +3378,16 @@ public final class AetherEngine: ObservableObject {
         guard advanced < 0.5 else { return }
         guard let host = nativeHost, let session = nativeVideoSession,
               let mediaURL = session.mediaPlaylistURL else { return }
+        let receiverUID = Self.currentAirPlayReceiverUID()
+        if let receiverUID, nativeVideoSession?.servedSourceIsHDR == true {
+            airPlayReceiversRefusingHDRMaster.insert(receiverUID)
+        }
         EngineLog.emit(
             "[AirPlay] receiver did not start in \(String(format: "%.0f", Self.airPlayProgressWatchdogSeconds))s "
             + "(clock advanced \(String(format: "%.2f", advanced))s); the playlist it was handed is refused, "
-            + "falling back to the LAN media playlist (subtitle renditions dropped)",
+            + "falling back to the LAN media playlist (subtitle renditions dropped"
+            + (receiverUID != nil && nativeVideoSession?.servedSourceIsHDR == true
+               ? ", and this receiver is remembered as refusing HDR masters" : "") + ")",
             category: .session)
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
@@ -3452,9 +3475,12 @@ public final class AetherEngine: ObservableObject {
         airPlayServedMasterToReceiver = false
         #if os(iOS)
         guard airPlayActive else { return (url, session.servingMasterPlaylist) }
+        let receiverUID = Self.currentAirPlayReceiverUID()
+        let refusedBefore = receiverUID.map { airPlayReceiversRefusingHDRMaster.contains($0) } ?? false
         let playlist = AirPlayPlaylistDecision.playlistForReceiver(
             servingMasterPlaylist: session.servingMasterPlaylist,
-            sourceIsHDR: session.servedSourceIsHDR)
+            sourceIsHDR: session.servedSourceIsHDR,
+            receiverRefusedHDRMaster: refusedBefore)
         let carriesRenditions = AirPlayPlaylistDecision.carriesSubtitleRenditions(playlist)
         guard let lanURL = airPlayPlaybackURL(base: url, playlist: playlist) else {
             EngineLog.emit("[AirPlay] no LAN IP; keeping \(url.absoluteString)", category: .engine)
@@ -3462,8 +3488,8 @@ public final class AetherEngine: ObservableObject {
         }
         airPlayServedMasterToReceiver = carriesRenditions
         EngineLog.emit("[AirPlay] loadNative serving via \(lanURL.absoluteString) (playlist=\(playlist) "
-                       + "sourceIsHDR=\(session.servedSourceIsHDR) subtitle renditions "
-                       + "\(carriesRenditions ? "carried" : "dropped"))", category: .engine)
+                       + "sourceIsHDR=\(session.servedSourceIsHDR) refusedBefore=\(refusedBefore) "
+                       + "subtitle renditions \(carriesRenditions ? "carried" : "dropped"))", category: .engine)
         return (lanURL, carriesRenditions)
         #else
         return (url, session.servingMasterPlaylist)

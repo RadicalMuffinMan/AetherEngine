@@ -10,10 +10,19 @@ struct AirPlayPlaylistDecisionTests {
             servingMasterPlaylist: true, sourceIsHDR: false) == .master)
     }
 
-    @Test("#227: an HDR source goes to media; no master over HDR content is accepted")
-    func hdrGoesToMedia() {
+    @Test("#227: an HDR source is offered the master; a receiver in HDR mode can take it")
+    func hdrIsOfferedTheMaster() {
         #expect(AirPlayPlaylistDecision.playlistForReceiver(
-            servingMasterPlaylist: true, sourceIsHDR: true) == .media)
+            servingMasterPlaylist: true, sourceIsHDR: true) == .master)
+    }
+
+    @Test("#227: a receiver that already refused an HDR master is not made to wait again")
+    func refusingReceiverGoesStraightToMedia() {
+        #expect(AirPlayPlaylistDecision.playlistForReceiver(
+            servingMasterPlaylist: true, sourceIsHDR: true, receiverRefusedHDRMaster: true) == .media)
+        // The memory is about HDR only; an SDR master was never the problem.
+        #expect(AirPlayPlaylistDecision.playlistForReceiver(
+            servingMasterPlaylist: true, sourceIsHDR: false, receiverRefusedHDRMaster: true) == .master)
     }
 
     @Test("A session already on the media playlist has no master to hand over")

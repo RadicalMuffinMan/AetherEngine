@@ -30,10 +30,14 @@ import Foundation
 /// behaved identically. The one remaining manifest edit, declaring the range as SDR, was disproven on
 /// hardware in #98 Stage 1.5: the compatibility gate reads the real `colr` and codec, not the string.
 ///
-/// **So an HDR or DV source cannot carry subtitle renditions to a wireless AirPlay receiver.** The
-/// renditions exist only in a master, and no master describing HDR content is accepted. The media
-/// downgrade is not a workaround, it is the only routable manifest, and hosts learn about it through
-/// `nativeSubtitleRenditionsServed` going false. SDR keeps its master and its subtitles.
+/// **Scope of that finding:** the receiver in those runs was parked in SDR. Its output format was 4K SDR
+/// with Match Dynamic Range on, which switches only when tvOS decides the content warrants it and
+/// evidently never does for AirPlay content. That is the same rule the engine already applies locally
+/// (`resolveUseMasterPlaylist` serves media for an HDR source on a panel that is not in HDR mode), so the
+/// refusal is consistent rather than an AirPlay prohibition, and DrHurt's #86 advice was exactly this:
+/// users should set their Apple TV to HDR or DV. An HDR master is therefore still offered, and a receiver
+/// that will not take it is caught by the progress watchdog and remembered, so the cost of a parked
+/// receiver is one delayed start per process rather than a permanent loss.
 ///
 /// The refusal is silent, which is why the downgrade is a decision and not a fallback: no `-11868`, no
 /// `.failed` item, the rate flickers to `playing` for one tick so even `hasEverPlayed` latches, and the
@@ -54,8 +58,16 @@ enum AirPlayPlaylistDecision {
     ///   - sourceIsHDR: the served variant advertises HDR (`HLSVideoEngine.servedSourceIsHDR`). Must be the
     ///     real `VIDEO-RANGE`, not the DV-capability-inflated `sourceIsHDR`, or SDR content on a DV-capable
     ///     device takes the HDR branch and the renditions are dropped for no reason.
-    static func playlistForReceiver(servingMasterPlaylist: Bool, sourceIsHDR: Bool) -> ReceiverPlaylist {
-        (servingMasterPlaylist && !sourceIsHDR) ? .master : .media
+    ///   - receiverRefusedHDRMaster: this receiver already failed to start on an HDR master this process.
+    ///     Skips the offer and the watchdog wait it would cost again.
+    static func playlistForReceiver(
+        servingMasterPlaylist: Bool,
+        sourceIsHDR: Bool,
+        receiverRefusedHDRMaster: Bool = false
+    ) -> ReceiverPlaylist {
+        guard servingMasterPlaylist else { return .media }
+        guard sourceIsHDR else { return .master }
+        return receiverRefusedHDRMaster ? .media : .master
     }
 
     /// Whether the playlist handed to the receiver carries the `EXT-X-MEDIA:TYPE=SUBTITLES` renditions.
