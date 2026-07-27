@@ -262,6 +262,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { winCond.unlock() }
         return persistentTaskSuspended
     }
+
+    /// #220: winCond-guarded snapshot of the sliding window for the periodic memprobe.
+    /// `ahead` is the undrained forward extent, the quantity `appendPersistentData` gates
+    /// the suspend on, so a window sitting far above winHighWater with `suspended=false` is
+    /// backpressure that never engaged rather than a transport overshoot.
+    var windowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool) {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return (window.count,
+                window.count - max(0, Int(position - winStart)),
+                persistentTaskSuspended)
+    }
     // #93 restart latency diagnostics (winCond-guarded): bytes dropped by the stale-generation
     // guard, plus per-generation time-to-first-data tracking.
     private var staleGenDroppedBytes: Int64 = 0

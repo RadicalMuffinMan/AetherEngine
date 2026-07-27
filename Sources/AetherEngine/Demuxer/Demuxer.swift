@@ -172,6 +172,13 @@ public final class Demuxer: @unchecked Sendable {
         (avioProvider as? AVIOReader)?.lastUnplannedReconnectAt
     }
 
+    /// #220: sliding-window snapshot of this demuxer's network reader, nil for disc / custom /
+    /// file providers that have no window. Surfaced per demuxer (pump and subtitle side reader
+    /// are separate readers against the same origin) in the periodic memprobe.
+    var ioWindowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool)? {
+        (avioProvider as? AVIOReader)?.windowDiagnostics
+    }
+
     /// Forwarded to the playback `AVIOReader` so source stall/reconnect transitions reach the engine (#85).
     /// `didSet` re-forwards so it works whether set before or after `open()`. Set only on the playback
     /// demuxer; the subtitle side-demuxer leaves it nil so its stalls never move `playbackPhase`. Disc /

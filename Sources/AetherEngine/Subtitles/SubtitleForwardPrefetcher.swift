@@ -35,6 +35,8 @@ enum SubtitleForwardPrefetcher {
         guard var playheadSnapshot = await playhead() else { return 0 }
         var harvested = 0
         var timeBaseCache: [Int32: AVRational] = [:]
+        let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted()
+        defer { SubtitlePrefetchTelemetry.sessionEnded(generation: telemetryGeneration) }
         readLoop: while !Task.isCancelled {
             guard let pkt = try? demuxer.readPacket() else { break }
             let streamIdx = pkt.pointee.stream_index
@@ -49,6 +51,13 @@ enum SubtitleForwardPrefetcher {
             } else {
                 tb = demuxer.stream(at: streamIdx)?.pointee.time_base ?? AVRational(num: 0, den: 1)
                 timeBaseCache[streamIdx] = tb
+                if tb.num <= 0 || tb.den <= 0 {
+                    SubtitlePrefetchTelemetry.recordTimeBaseFallback()
+                    EngineLog.emit(
+                        "[AetherEngine] #151 forward prefetch time-base lookup failed for stream "
+                        + "\(streamIdx); park guard skipped",
+                        category: .engine)
+                }
             }
             store.harvest(streamIndex: streamIdx, packet: pkt, timeBase: tb,
                           assembleSplitDisplaySets: assemblyIndices.contains(streamIdx),
@@ -61,12 +70,19 @@ enum SubtitleForwardPrefetcher {
             // continuation chunks) never parks, its set's PCS anchor already did the pacing.
             guard rawTS != Int64.min, tb.num > 0, tb.den > 0 else { continue }
             let pktSeconds = Double(rawTS) * Double(tb.num) / Double(tb.den)
+            SubtitlePrefetchTelemetry.recordPacket(seconds: pktSeconds, harvested: harvested)
+            var didPark = false
             while !Task.isCancelled, pktSeconds > playheadSnapshot + leadSeconds {
+                if !didPark {
+                    didPark = true
+                    SubtitlePrefetchTelemetry.recordPark(true)
+                }
                 guard let fresh = await playhead() else { break readLoop }
                 playheadSnapshot = fresh
                 if pktSeconds <= playheadSnapshot + leadSeconds { break }
                 do { try await Task.sleep(nanoseconds: parkPollNanoseconds) } catch { break readLoop }
             }
+            if didPark { SubtitlePrefetchTelemetry.recordPark(false) }
         }
         return harvested
     }
