@@ -462,7 +462,12 @@ extension AetherEngine {
         let streams = demuxer.subtitleStreamIndices()
         guard !streams.isEmpty else { return }
         let assembly = demuxer.splitDisplaySetSubtitleStreamIndices()
-        demuxer.discardAllStreamsExcept(streams)
+        // #230: one non-subtitle stream stays deliverable at AVDISCARD_NONKEY so the loop has a
+        // read-position control point between cues. AVDISCARD_ALL is applied inside av_read_frame,
+        // so a fully discarded source hands the loop nothing at all between two subtitle packets
+        // and a single read call walks whatever lies between them.
+        let pacing = demuxer.prefetchPacingStreamIndex()
+        demuxer.discardAllStreamsExcept(streams, pacing: pacing)
 
         // Prewarm MKV cue index (lives at EOF), then bounded positioning with the verified
         // byte-estimate fallback, both budgeted (#112 round 10). Skip prewarm for disc (#76).
@@ -485,11 +490,12 @@ extension AetherEngine {
 
         EngineLog.emit(
             "[AetherEngine] #151 forward prefetch started: streams=\(streams.sorted()) "
-            + "startAt=\(String(format: "%.2f", startAt))s lead=\(leadSeconds)s",
+            + "pacing=\(pacing) startAt=\(String(format: "%.2f", startAt))s lead=\(leadSeconds)s",
             category: .engine)
         let harvested = await SubtitleForwardPrefetcher.run(
             demuxer: demuxer, store: store,
             streamIndices: streams, assemblyIndices: assembly,
+            pacingIndex: pacing,
             leadSeconds: leadSeconds,
             parkPollNanoseconds: Self.subtitleForwardPrefetchParkPollNanoseconds,
             playhead: { [weak self] in
@@ -1165,9 +1171,18 @@ extension AetherEngine {
         // reach the sparse mov_text samples (mov_read_packet reads the sample unless AVDISCARD_ALL). On a file
         // with many subtitle tracks that meant streaming the whole program through a parallel connection, RSS
         // growing with playback position until jetsam. Matches the main pump / FrameDecodeContext, which already
-        // discard. AVDISCARD_ALL drops before AVPacket alloc; seeks stay index-driven, park pacing rides the
-        // subtitle PTS (av_read_frame fast-walks the discarded index between cues, no I/O).
-        demuxer.discardAllStreamsExcept(Set(routes.keys))
+        // discard.
+        //
+        // #230: AVDISCARD_ALL drops inside av_read_frame, so a fully discarded source delivers this loop
+        // NOTHING between two subtitle packets and the park below (which is evaluated per delivered packet,
+        // routed or not) never runs across a dialogue-free stretch. What "fast-walks the index, no I/O" was
+        // measured on is mov: `mov_read_packet` skips the avio_seek + read entirely at AVDISCARD_ALL. Matroska
+        // does not, `ebml_parse` reads each cluster's blocks off the wire and `matroska_parse_block` only then
+        // checks discard, so on MKV the bytes are pulled regardless. Leaving one stream at AVDISCARD_NONKEY
+        // restores a control point (one packet per IRAP) at a cost that ends as soon as the park engages.
+        // readToEOF wants no park at all, so it wants no pacing stream either.
+        let pacing = readToEOF ? -1 : demuxer.prefetchPacingStreamIndex()
+        demuxer.discardAllStreamsExcept(Set(routes.keys), pacing: pacing)
 
         EngineLog.emit(
             "[AetherEngine] native subtitle readers started: streams=\(routes.keys.sorted()) " +
@@ -1185,19 +1200,16 @@ extension AetherEngine {
             guard let pkt = try? demuxer.readPacket() else { break }
             let streamIdx = pkt.pointee.stream_index
 
-            let rawTS = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            // #230: a pacing packet is placed by DTS, the read position the park bounds; a routed
+            // subtitle packet keeps its PTS. Shares the prefetcher's resolver so a transient lookup
+            // failure is not memoized into a park-free session (#220).
             var pktSeconds: Double?
-            if rawTS != Int64.min {
-                let ptb: AVRational
-                if let cached = timeBaseCache[streamIdx] {
-                    ptb = cached
-                } else {
-                    ptb = demuxer.stream(at: streamIdx)?.pointee.time_base ?? AVRational(num: 0, den: 1)
-                    timeBaseCache[streamIdx] = ptb
-                }
-                if ptb.num > 0, ptb.den > 0 {
-                    pktSeconds = Double(rawTS) * Double(ptb.num) / Double(ptb.den)
-                }
+            if let ptb = SubtitleForwardPrefetcher.resolveTimeBase(
+                streamIndex: streamIdx, cache: &timeBaseCache,
+                lookup: { demuxer.stream(at: $0)?.pointee.time_base }) {
+                pktSeconds = SubtitleForwardPrefetcher.packetSeconds(
+                    pts: pkt.pointee.pts, dts: pkt.pointee.dts,
+                    timeBase: ptb, preferDecodeOrder: routes[streamIdx] == nil)
             }
 
             if let route = routes[streamIdx] {
