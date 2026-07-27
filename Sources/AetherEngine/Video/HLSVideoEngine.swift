@@ -1469,7 +1469,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// `true` when the served variant carries HDR/DV signaling (`VIDEO-RANGE` other than SDR, or a DV
     /// codec tag), i.e. the master an external receiver in SDR mode rejects (#227). Read after `start()`.
-    public private(set) var servedSourceIsHDR: Bool = false
+    /// Internal on purpose: it feeds the engine's own AirPlay routing, and hosts read the consequence
+    /// (`AetherEngine.nativeSubtitleRenditionsServed`) rather than the input.
+    private(set) var servedSourceIsHDR: Bool = false
 
     /// The loopback server's media (single-variant) playlist URL, for the reactive master->media
     /// fallback (#98). Nil before the server starts.
