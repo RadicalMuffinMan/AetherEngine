@@ -220,7 +220,9 @@ struct Issue234SideReaderSeekAnchorTests {
                 "a target past the last cue must land on that cue, not back at the landing")
     }
 
-    private static let fixtureBase64 = """
+    /// Shared with `NativeSubtitleReaderSeekAnchorTests`, which models the other side reader's
+    /// setup order on the same bytes.
+    static let fixtureBase64 = """
 GkXfo6NChoEBQveBAULygQRC84EIQoKIbWF0cm9za2FCh4EEQoWBAhhTgGcBAAAAAAANYRFNm3TAv4QghbfcTbuLU6uEFUmp
     ZlOsgaFNu4tTq4QWVK5rU6yB8U27jFOrhBJUw2dTrIIBwU27jFOrhBxTu2tTrIIMHewBAAAAAAAAUwAAAAAAAAAAAAAAAAAA
     AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFUmp
