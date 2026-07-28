@@ -1183,7 +1183,15 @@ extension AetherEngine {
         // #112 round 10: same bounded positioning + verified byte-estimate fallback as the embedded reader
         // (memory rule: both side readers share every positioning fix). A whole-program read (readToEOF)
         // starts at 0 and needs no fallback.
-        if !demuxer.seekBounded(to: seekTo, timeout: Self.sideReaderSeekBudgetSeconds) {
+        //
+        // #234: anchored on the routed subtitle axis for the same reason the prefetcher is, arrived at from
+        // the other direction. This seek runs before the discard flags below, so every stream still scores
+        // `av_find_default_stream_index`'s +200 for `discard != AVDISCARD_ALL` and video takes the reference
+        // on its own +75. Unlike the prefetcher there was never an accidental subtitle anchor here to lose,
+        // so this is not part of the #230 regression, but the landing cue it drops is the same one.
+        let seekAnchor = pairs.map(\.streamIndex).min() ?? -1
+        if !demuxer.seekBounded(to: seekTo, anchorStreamIndex: seekAnchor,
+                                timeout: Self.sideReaderSeekBudgetSeconds) {
             demuxer.markTimestampSeekUnreliable()
             let engineDisplayDuration = await MainActor.run { [weak self] in self?.duration ?? 0 }
             let fellBack = demuxer.seekByteEstimate(
@@ -1236,7 +1244,7 @@ extension AetherEngine {
         EngineLog.emit(
             "[AetherEngine] native subtitle readers started: streams=\(routes.keys.sorted()) " +
             "startAt=\(String(format: "%.2f", startAt))s effectiveStart=\(String(format: "%.2f", effectiveStart))s " +
-            "seekTo=\(String(format: "%.2f", seekTo))s",
+            "seekTo=\(String(format: "%.2f", seekTo))s anchor=\(seekAnchor)",
             category: .engine
         )
 

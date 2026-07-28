@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The native subtitle readers anchor their positioning seek on the subtitle axis too.** Same defect as #234 reached from the other direction, and not part of that regression: these readers seek before they set their discard flags, so at seek time every stream is still `AVDISCARD_DEFAULT`, every stream collects `av_find_default_stream_index`'s +200 for `discard != AVDISCARD_ALL`, and video takes the reference on its own +75. There was never an accidental subtitle anchor here to lose, so this predates #230 entirely, but the consequence is the one #234 describes: on Matroska the seek lands in the cluster holding the last video keyframe, and a cue that starts further back is behind the read head before the first packet arrives. These readers feed the native WebVTT renditions, so what went missing was the line that should be on screen where a seek lands. The anchor is now the lowest routed subtitle stream, and the `native subtitle readers started` line carries `anchor=<index>`. A whole-program read (Sodalite#32) starts at 0 and is unaffected either way.
+
 ## [5.25.1] - 2026-07-28
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.25.1))
