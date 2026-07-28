@@ -2374,6 +2374,48 @@ public final class AetherEngine: ObservableObject {
             av1Available: VTCapabilityProbe.av1Available,
             spsIndicatesInterlaced: spsIndicatesInterlaced
         )
+        // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
+        // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
+        // progressive pictures, and FFmpeg's parser reports TT for them off SEI pic_struct alone while
+        // its decoder leaves AV_FRAME_FLAG_INTERLACED clear on the very same picture. Those streams took
+        // the software detour and then never deinterlaced, because SoftwareVideoDecoder engages the
+        // filter on that flag and on nothing else. So decode a sample and ask the runtime's own
+        // question: would the deinterlacer ever engage. Only a clean answer overrules the declaration;
+        // inconclusive keeps today's routing. VOD + seekable only: the sample moves the read position of
+        // the demuxer the session reuses, and live 1080i broadcast (the case the rule exists for) is
+        // neither seekable nor mis-declared.
+        if useSoftwarePath, probeOpened, !options.isLive, probe.isSourceSeekable,
+           probe.videoStreamIndex >= 0,
+           VideoRoutingPolicy.routesSoftwareForDeclaredInterlace(
+               codecID: detectedCodecID,
+               fieldOrder: detectedFieldOrder,
+               spsIndicatesInterlaced: spsIndicatesInterlaced) {
+            let videoIdx = probe.videoStreamIndex
+            let verdict = await Task.detached(priority: .userInitiated) { [probe] in
+                let verdict = InterlaceProbe.run(demuxer: probe, streamIndex: videoIdx)
+                probe.seek(to: 0)  // sample consumed packets; the session reuses this demuxer
+                return verdict
+            }.value
+            if loadGeneration != gen {
+                probe.markClosed()
+                Task.detached { [probe] in probe.close() }
+                try checkLoadCurrent(gen)
+            }
+            if InterlaceProbe.refutesDeclaredInterlace(verdict) {
+                useSoftwarePath = false
+                EngineLog.emit(
+                    "[AetherEngine] declared interlaced (fieldOrder=\(detectedFieldOrder.rawValue)) but "
+                    + "\(verdict); the deinterlacer would never engage, routing native for HW decode (#232)",
+                    category: .engine
+                )
+            } else {
+                EngineLog.emit(
+                    "[AetherEngine] declared interlaced and the frame sample agrees (\(verdict)); "
+                    + "keeping the software deinterlace path (#232)",
+                    category: .engine
+                )
+            }
+        }
         // #2: an H.264 / HEVC format AVPlayer accepts at the HLS CODECS level but VideoToolbox can't
         // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches
         // readyToPlay then renders nothing on the native path. QuickTime plays it via its own software decoder;
