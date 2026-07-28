@@ -120,6 +120,9 @@ public final class AetherEngine: ObservableObject {
     /// Recomputes isSeeking/seekTarget from both in-flight flags. Idempotent to avoid redundant Combine emissions.
     private func recomputeSeekSignal(target: Double?) {
         let seeking = programmaticSeekInFlight || nativeScrubSeekInFlight
+        // #240: a seek owns the link until it lands. Set unconditionally (not inside the
+        // change guard) so the gate cannot drift from the flags it mirrors.
+        sideReaderLinkGate.setSeeking(seeking)
         if isSeeking != seeking { isSeeking = seeking }
         if seeking {
             if let target { seekTarget = target }
@@ -474,6 +477,16 @@ public final class AetherEngine: ObservableObject {
     /// nil while idle (subs off, live session, EOF reached).
     var subtitleForwardPrefetchTask: Task<Void, Never>?
     var subtitleForwardPrefetchDemuxer: Demuxer?
+    /// #240: the running session's in-place anchor box, so a playhead jump moves its cursor instead
+    /// of rebuilding the session. nil while no session is live.
+    var subtitleForwardPrefetchReanchor: SubtitleForwardPrefetcher.SideReaderReanchor?
+    /// #240: the lead the running session was started with. A changed lead (the OCR worker arming)
+    /// is the one anchor change that still needs a rebuild, since the loop captures it at start.
+    var subtitleForwardPrefetchActiveLead: Double?
+    /// #240: link arbitration between the video path and the subtitle side readers. On Matroska a
+    /// side reader is a second full copy of the stream, so on a link with little headroom the two
+    /// starve each other; the video path has priority. See `SideReaderLinkPolicy`.
+    nonisolated let sideReaderLinkGate = SideReaderLinkGate()
     /// #121: session-monotonic id source for cues entering the retained overlay stores
     /// (`subtitleCues` / `secondarySubtitleCues`). The overlay decoder is rebuilt on every seek
     /// (`.resetAndDecode`), restarting its own `nextCueID` at zero, so decoder-local ids cannot stay

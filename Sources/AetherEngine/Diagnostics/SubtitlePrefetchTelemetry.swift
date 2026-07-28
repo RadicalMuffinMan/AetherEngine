@@ -27,6 +27,12 @@ enum SubtitlePrefetchTelemetry {
         /// the park guard was skipped at least once; historically that fallback was cached and
         /// disarmed the park permanently.
         var timeBaseFallbacks = 0
+        /// #240: the reader is holding the link for the video path right now.
+        var linkYield = false
+        /// #240: cumulative seconds spent yielding the link. On a link with room this stays near
+        /// zero; a number that tracks playback time says the source is barely faster than the
+        /// content and the lookahead is being paid for out of the video path's budget.
+        var linkYieldSeconds = 0.0
         /// Why the loop stopped, nil while it runs. Reported instead of a bare `dead`, which
         /// could not tell the defect apart from the expected end of a session: the reader works
         /// `leadSeconds` ahead, so it reaches EOF a full lead before the playhead does and every
@@ -66,6 +72,15 @@ enum SubtitlePrefetchTelemetry {
         state.withLock { $0.parked = parked }
     }
 
+    /// #240: enter or leave a link yield. `seconds` is charged on the way out, so the cumulative
+    /// figure counts real waiting rather than poll ticks.
+    static func recordLinkYield(_ yielding: Bool, seconds: Double = 0) {
+        state.withLock { s in
+            s.linkYield = yielding
+            s.linkYieldSeconds += seconds
+        }
+    }
+
     static func recordTimeBaseFallback() {
         state.withLock { $0.timeBaseFallbacks &+= 1 }
     }
@@ -94,9 +109,11 @@ enum SubtitlePrefetchTelemetry {
             case .cancelled, nil: return "cancelled"
             }
         }()
-        return "prefetch=\(s.running ? (s.parked ? "park" : "read") : stopped) "
+        let live = s.linkYield ? "yield" : (s.parked ? "park" : "read")
+        return "prefetch=\(s.running ? live : stopped) "
             + "prefetchLead=\(lead)s "
             + "prefetchHarvested=\(s.harvested) "
             + "prefetchTbFallback=\(s.timeBaseFallbacks) "
+            + "prefetchYielded=\(String(format: "%.0f", s.linkYieldSeconds))s "
     }
 }

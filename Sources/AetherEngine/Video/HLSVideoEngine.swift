@@ -343,6 +343,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// for subtitle cue lookup.
     var onPlaylistShiftChanged: (@Sendable (Double) -> Void)?
 
+    /// #240: link arbitration shared with the engine's subtitle side readers. Set by `AetherEngine`
+    /// before `start()`; nil when the session is driven without one (`aetherctl`, tests), which
+    /// leaves the readers ungated exactly as before.
+    var sideReaderLinkGate: SideReaderLinkGate?
+
     /// Fires when AVKit scrub drives a producer restart (AetherEngine#38). `(true, playlistTime)`
     /// at restart-run start; `(false, nil)` when settled. `playlistTime` folds with
     /// `playlistShiftSeconds` onto the source-PTS `seekTarget`.
@@ -1796,6 +1801,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // arrives; from then on every producer of the session muxes moov from this frame.
             audioMoovPrimeFrame: sessionAudioMoovPrimeFrame
         )
+        // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
+        // below. The side readers read one gate for the whole session, so a restart must not leave
+        // a gap where nobody claims the link.
+        prod.sideReaderLinkGate = sideReaderLinkGate
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
         }

@@ -136,7 +136,11 @@ extension AetherEngine {
                 let pumpWin = self.softwareHost?.ioWindowDiagnostics
                     ?? self.nativeVideoSession?.demuxer?.ioWindowDiagnostics
                 let prefetchWin = self.subtitleForwardPrefetchDemuxer?.ioWindowDiagnostics
-                let readerStr = Self.readerWindowFragment(pump: pumpWin, prefetch: prefetchWin)
+                let readerStr = Self.readerWindowFragment(
+                    pump: pumpWin, prefetch: prefetchWin,
+                    pumpFetchedBytes: self.softwareHost?.demuxerBytesFetched
+                        ?? self.nativeVideoSession?.demuxerBytesFetched,
+                    prefetchFetchedBytes: self.subtitleForwardPrefetchDemuxer?.avioBytesFetched)
 
                 let line = "[AetherEngine] memprobe t=\(elapsed)s "
                     + "rss=\(rssMB)MB "
@@ -244,21 +248,31 @@ extension AetherEngine {
     /// `postMB` is what the transport delivered after the suspend was issued. #174 priced that
     /// as a bounded in-flight overshoot; a value tracking the whole window says `suspend()` is
     /// not stopping delivery, so the high water bounds nothing at all.
+    ///
+    /// #240: `FetchedMB` per reader is the link attribution. The aggregate `avioFetchedMB` cannot
+    /// answer "who took the bandwidth", and the reporter of #240 had to infer a second reader from
+    /// connection-start lines that carried no identity. Two counters side by side answer it directly:
+    /// a session whose `prefFetchedMB` tracks `pumpFetchedMB` is reading the stream twice.
     nonisolated static func readerWindowFragment(
         pump: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?,
-        prefetch: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?
+        prefetch: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?,
+        pumpFetchedBytes: Int64? = nil,
+        prefetchFetchedBytes: Int64? = nil
     ) -> String {
         func fragment(
             _ prefix: String,
-            _ w: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?
+            _ w: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?,
+            _ fetched: Int64?
         ) -> String {
             guard let w else { return "" }
             return "\(prefix)WinMB=\(w.windowBytes / 1024 / 1024) "
                 + "\(prefix)AheadMB=\(w.aheadBytes / 1024 / 1024) "
                 + "\(prefix)Susp=\(w.suspended ? 1 : 0) "
                 + "\(prefix)PostMB=\(w.postSuspendBytes / 1024 / 1024) "
+                + (fetched.map { "\(prefix)FetchedMB=\($0 / 1024 / 1024) " } ?? "")
         }
-        return fragment("pump", pump) + fragment("pref", prefetch)
+        return fragment("pump", pump, pumpFetchedBytes)
+            + fragment("pref", prefetch, prefetchFetchedBytes)
     }
 
     // MARK: - Live telemetry bridge

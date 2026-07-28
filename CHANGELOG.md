@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Far seeks stop competing with the subtitle side reader for the source link.** On Matroska a subtitle-only side reader is a second full copy of the stream (`matroska_parse_cluster` reads every block off the wire, `matroska_parse_block` only then honours the discard flag), so a subtitled session asks the link for roughly twice the media rate. Above about 2x headroom nobody notices; at 1.3x to 1.5x, an ordinary Wi-Fi bench in front of a high-bitrate remux, the two readers split the link and the video path misses its deadlines. The reporter measured the same segment serving in 2.2 s alone and 7.5 s alongside the prefetcher, which expired the seek landing budget; the recovery then re-anchored, which jumped the clock, which rebuilt the prefetch session, which took more link, and landings stacked to 25 s. The video path now has priority: a side reader fetches while the pump is parked, yields while it is fetching, yields completely while a seek is in flight, keeps a bounded grace window after each anchor so a freshly selected track still fills, and takes the link back after a 60 s continuous yield so a pump that never parks cannot disable lookahead for a session. A playhead jump re-anchors the running prefetch session in place instead of tearing it down and building a new one, which since the bounded ranges of 5.24.0 cost an open, a Matroska cue-index prewarm and a positioning seek, each a full range off the link, once per jump. Measured on a shaped 1.4x-headroom bench: far-seek landings 23.5 s to 12.7 s at the median, source connections 35 to 21, and the side reader's share of the bytes roughly halved. Reported by cmcpherson274 (#240).
+
+### Added
+
+- **Per-reader link attribution in the log.** Every `AVIOReader` carries a label (`pump`, `prefetch`, `nativesubs`, `extract`), the connection-start line names it and reports its range length, and it is no longer `DEBUG`-only; the 30 s memprobe reports `pumpFetchedMB` next to `prefFetchedMB` plus the prefetcher's cumulative link yield. Without those, several readers against one origin are indistinguishable in a field log, and a single reader walking forward in bounded ranges reads like several concurrent connections.
+- **`aetherctl play --seek-pattern a,b,c` and `throttle-origin.py --shared`.** A list of absolute far-seek targets, one per `--seek-every` tick, with the elapsed time printed per seek; and a throttling mode that shapes the sum of all connections rather than each one. Per-connection shaping gives two readers the full rate each, so a contention defect cannot reproduce under it at all.
+
 ## [5.27.0] - 2026-07-28
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.27.0))

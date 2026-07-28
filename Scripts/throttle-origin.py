@@ -13,7 +13,7 @@ touching the server. Per-connection byte totals are logged on close, which is th
 client-independent ground truth: a healthy reader measures at media rate, and a connection
 running above it is reading further ahead than the consumer is draining.
 
-  python3 Scripts/throttle-origin.py <upstream> <port> <MB/s> [--lan]
+  python3 Scripts/throttle-origin.py <upstream> <port> <MB/s> [--lan] [--shared] [--head MB]
 
 `upstream` takes two forms, picked automatically:
 
@@ -28,6 +28,11 @@ stay at full speed and just the media stream is shaped.
 
 To pick the rate, take the source's media rate (bit_rate / 8) and multiply. For a 53.5
 Mbit/s remux that is 6.7 MB/s, so 17 is roughly 2.5x.
+
+`--shared` shapes the SUM of all connections instead of each one, which is what a real link
+does. Without it two readers each get the full rate and a defect that only appears when they
+have to share it cannot reproduce: #240 is exactly that shape, a subtitle side reader and the
+video pump on one link with ~1.4x headroom, where per-connection shaping shows nothing.
 
 Binds loopback unless `--lan` is given. It forwards the upstream's credentials and has no
 auth of its own, so exposing it is opt-in even though testing a separate device (an Apple
@@ -51,6 +56,7 @@ RATE = float(_argv[2]) * 1e6
 # credentials, and no auth of its own. Testing from a separate device needs --lan, which is
 # the case server mode is usually for, so it is a flag rather than the default.
 BIND = "0.0.0.0" if "--lan" in _flags else "127.0.0.1"
+SHARED = "--shared" in _flags
 
 # A bare scheme://host[:port] means proxy the whole server; anything with a path is one
 # media URL. urlsplit rather than string matching so a port-only authority is not mistaken
@@ -62,11 +68,50 @@ SERVER_MODE = _parts.path in ("", "/") and not _parts.query
 # playlists pass at full speed and only the media stream is shaped. Decided on bytes
 # actually sent rather than on Content-Length, because a server answering chunked gives no
 # length up front and must not be mistaken for a small response.
+#
+# `--head MB` overrides it. Set it to 0 when measuring a reader that fetches in bounded ranges:
+# every range is a new body, so an 8 MB free head hands a reader 8 MB of unshaped bytes per range
+# and, worse, rewards whichever build opens MORE connections. That is exactly backwards for #240,
+# where opening fewer is the fix.
 THROTTLE_AFTER_BYTES = 8 * 1024 * 1024
+for _i, _a in enumerate(sys.argv[1:]):
+    if _a == "--head" and _i + 2 <= len(sys.argv) - 1:
+        THROTTLE_AFTER_BYTES = int(float(sys.argv[_i + 2]) * 1024 * 1024)
 
 conns = {}
 lock = threading.Lock()
 t0 = time.time()
+shared_sent = 0
+
+
+class SharedLink:
+    """One token budget for every connection at once (`--shared`).
+
+    A virtual clock rather than a token bucket: each chunk reserves the time it would take on a
+    link of RATE bytes/s, starting from whichever is later, now or the end of the last
+    reservation. Chunks from different connections interleave at 256 KB, so several readers
+    divide the link the way they would divide a real one, and an idle link never accrues credit
+    a burst could spend.
+    """
+
+    def __init__(self, rate):
+        self.rate = rate
+        self.lock = threading.Lock()
+        self.next_free = time.time()
+
+    def reserve(self, nbytes):
+        if self.rate <= 0:
+            return
+        with self.lock:
+            start = max(time.time(), self.next_free)
+            self.next_free = start + nbytes / self.rate
+            deadline = self.next_free
+        delay = deadline - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+
+link = SharedLink(RATE) if SHARED else None
 
 # Hop-by-hop headers must not be forwarded (RFC 9110). Content-Length and Content-Range are
 # rewritten from what we actually serve, and Accept-Encoding is dropped so the upstream
@@ -103,6 +148,12 @@ def reporter():
         with lock:
             snap = list(conns.items())
         now = time.time()
+        if link is not None:
+            with lock:
+                total_sent = shared_sent
+            print("[proxy t=%5.1fs] shared link: %.2f MB/s aggregate over %d conns (cap %.2f MB/s)"
+                  % (now - t0, (total_sent / (now - t0)) / 1e6 if now > t0 else 0.0,
+                     len(snap), RATE / 1e6), flush=True)
         for cid, c in snap:
             dur = now - c["start"]
             pos = c["range_start"] + c["sent"]
@@ -132,6 +183,7 @@ def read_request(f):
 
 
 def handle(sock, cid):
+    global shared_sent
     sock.settimeout(180)
     f = sock.makefile("rb")
     up = None
@@ -212,7 +264,10 @@ def handle(sock, cid):
                     with lock:
                         if cid in conns:
                             conns[cid]["sent"] = sent - THROTTLE_AFTER_BYTES
-                    if RATE > 0:
+                        shared_sent += len(chunk)
+                    if link is not None:
+                        link.reserve(len(chunk))
+                    elif RATE > 0:
                         owed = (sent - THROTTLE_AFTER_BYTES) / RATE - (time.time() - began)
                         if owed > 0:
                             time.sleep(min(owed, 0.5))
@@ -264,7 +319,9 @@ def main():
         print("proxying server %s at %.1f MB/s on %s:%d (shaping after %d MB per body)"
               % (UPSTREAM, RATE / 1e6, BIND, PORT, THROTTLE_AFTER_BYTES // (1024 * 1024)), flush=True)
     else:
-        print("proxying %.2f GB upstream at %.1f MB/s on %s:%d" % (SIZE / 1e9, RATE / 1e6, BIND, PORT),
+        print("proxying %.2f GB upstream at %.1f MB/s (%s) on %s:%d"
+              % (SIZE / 1e9, RATE / 1e6, "shared across connections" if SHARED else "per connection",
+                 BIND, PORT),
               flush=True)
     threading.Thread(target=reporter, daemon=True).start()
     cid = 0

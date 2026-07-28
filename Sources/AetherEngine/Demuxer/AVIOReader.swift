@@ -390,8 +390,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var throttleVClockNs: UInt64 = 0
     private let throttleLock = NSLock()
 
-    init(url: URL, extraHeaders: [String: String] = [:], chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil) {
+    /// #240: which reader this is, for the connection log. Several readers run against the same
+    /// origin at once and the line used to name none of them.
+    private let label: String
+
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil) {
         self.url = url
+        self.label = label
         self.extraHeaders = extraHeaders
         self.chunkSize = chunkSize
         self.prefetchEnabled = prefetchEnabled
@@ -1161,14 +1166,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 if isPastReadDeadline { continue }
                 if !signaled {
                     if recordReconnectAndShouldGiveUp() {
-                        EngineLog.emit("[AVIOReader] Persistent stall gave up at offset \(frontier) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
+                        EngineLog.emit("[AVIOReader] \(label) stall gave up at offset \(frontier) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
                         emitNetworkPhase(.flowing)   // reader is exiting; let state carry the terminal outcome (#85)
                         if isLive {
                             return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
                         }
                         return totalRead > 0 ? Int32(totalRead) : -1
                     }
-                    EngineLog.emit("[AVIOReader] Persistent stall at offset \(frontier), reconnecting", category: .demux)
+                    EngineLog.emit("[AVIOReader] \(label) stall at offset \(frontier), reconnecting", category: .demux)
                     lastUnplannedReconnectAt = Date()
                     emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
                     let backoffStart = DispatchTime.now()
@@ -1188,7 +1193,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // the host). Without this the cap would spend the give-up budget on a healthy link.
             if endedByBackpressure {
                 EngineLog.emit(
-                    "[AVIOReader] window drained after hard cap; re-requesting at \(frontier)",
+                    "[AVIOReader] \(label) window drained after hard cap; re-requesting at \(frontier)",
                     category: .demux)
                 timedReconnect(seek: false, at: frontier)
                 continue
@@ -1209,7 +1214,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                                        : recordReconnectAndShouldGiveUp(status: status)
             if giveUp {
                 let streakDesc = isRateLimited ? "\(rateLimitStreak) consecutive 429/503" : "\(unproductiveReconnects) unproductive"
-                EngineLog.emit("[AVIOReader] Persistent reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
+                EngineLog.emit("[AVIOReader] \(label) reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
                 emitNetworkPhase(.flowing)   // reader is exiting; let state carry the terminal outcome (#85)
                 if isLive {
                     return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
@@ -1217,7 +1222,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 return totalRead > 0 ? Int32(totalRead) : -1
             }
             let backoffStreak = isRateLimited ? rateLimitStreak : unproductiveReconnects
-            EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
+            EngineLog.emit("[AVIOReader] \(label) conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
             emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
             let backoffStart = DispatchTime.now()
@@ -1489,9 +1494,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.unlock()
 
         task.resume()
-        #if DEBUG
-        EngineLog.emit("[AVIOReader] Persistent conn start gen=\(generation) offset=\(offset)", category: .demux)
-        #endif
+        // #240: not DEBUG-only any more, and it names its reader. This is the line a field report
+        // needs to answer "who is on the link": with bounded ranges every 32 MiB refill starts a
+        // generation, so an unlabelled sequence of them reads like several concurrent connections
+        // when it is one reader walking forward. One line per range is a line every few seconds.
+        EngineLog.emit(
+            "[AVIOReader] \(label) conn start gen=\(generation) offset=\(offset)"
+            + (resolvedBound.map { " len=\($0 / 1024 / 1024)MB" } ?? " open-ended"),
+            category: .demux)
     }
 
     /// Force-copies `data` into the sliding window and applies backpressure by
@@ -1561,7 +1571,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         toSuspend?.suspend()
         if let toCancel {
             EngineLog.emit(
-                "[AVIOReader] window hard cap: \(ahead / 1024 / 1024)MB resident with the task "
+                "[AVIOReader] \(label) window hard cap: \(ahead / 1024 / 1024)MB resident with the task "
                 + "suspended (\(suspendedDeliveryBytes / 1024 / 1024)MB arrived after the "
                 + "suspend); ending the connection, will re-request at the frontier",
                 category: .demux)
@@ -1574,11 +1584,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // stalled after headers; large header gap = server-side connection queuing. Fast reads stay
             // on the DEBUG-only path to keep the release log quiet.
             if firstDataMs > 2000 {
-                EngineLog.emit("[AVIOReader] gen=\(generation) first data after \(Int(firstDataMs))ms",
+                EngineLog.emit("[AVIOReader] \(label) gen=\(generation) first data after \(Int(firstDataMs))ms",
                                category: .demux)
             } else {
                 #if DEBUG
-                EngineLog.emit("[AVIOReader] gen=\(generation) first data after \(Int(firstDataMs))ms",
+                EngineLog.emit("[AVIOReader] \(label) gen=\(generation) first data after \(Int(firstDataMs))ms",
                                category: .demux)
                 #endif
             }
@@ -1665,7 +1675,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.broadcast()
         winCond.unlock()
         if let error {
-            EngineLog.emit("[AVIOReader] Persistent conn gen=\(generation) ended with error: \(error.localizedDescription)", category: .demux)
+            EngineLog.emit("[AVIOReader] \(label) conn gen=\(generation) ended with error: \(error.localizedDescription)", category: .demux)
         }
         if isCurrentGen && isLive {
             EngineLog.emit("[AVIOReader] Live source: connection ended gen=\(generation) buffered=\(windowAhead / 1024)KB; reconnect will fire when buffer drains", category: .demux)
