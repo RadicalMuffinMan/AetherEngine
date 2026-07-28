@@ -238,6 +238,11 @@ final class EmbeddedSubtitleDecoder {
         }
         avsubtitle_free(&sub)
 
+        // #233: WebVTT cue settings never reach the ASS event line (the decoder drops them), but
+        // the demuxer keeps them on the packet, and the #112 store carries them through a rebuild.
+        // An ASS `\an` / `\pos` still wins, since that came from the payload itself.
+        placement = placement ?? WebVTTCueSettings.placement(onPacket: packet)
+
         let merged = textLines
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
