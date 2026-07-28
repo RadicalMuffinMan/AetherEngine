@@ -579,6 +579,10 @@ extension AetherEngine {
         pkt.pointee.dts = pkt.pointee.pts
         pkt.pointee.duration = Int64((entry.durationSeconds * 1000).rounded())
         pkt.pointee.flags = entry.flags
+        // #233: WebVTT placement lives in side data, not in the payload, so it has to be put back.
+        if let settings = entry.webvttSettings {
+            WebVTTCueSettings.attach(settings: settings, to: pkt)
+        }
         return decoder.decode(packet: pkt, streamTimeBase: AVRational(num: 1, den: 1000))
     }
 

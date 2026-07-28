@@ -13,6 +13,19 @@ struct StoredSubtitlePacket: Sendable {
     /// decode packet (AV_PKT_FLAG_KEY matters for bitmap acquisition points).
     let flags: Int32
     let payload: Data
+    /// #233: `AV_PKT_DATA_WEBVTT_SETTINGS` as attached by the demuxer. WebVTT cue settings live
+    /// only in packet side data (the decoder never puts them in the ASS line), so a rebuilt packet
+    /// loses the cue's placement unless the string rides along with the payload.
+    let webvttSettings: String?
+
+    init(ptsSeconds: Double, durationSeconds: Double, flags: Int32, payload: Data,
+         webvttSettings: String? = nil) {
+        self.ptsSeconds = ptsSeconds
+        self.durationSeconds = durationSeconds
+        self.flags = flags
+        self.payload = payload
+        self.webvttSettings = webvttSettings
+    }
 }
 
 final class SubtitlePacketStore: @unchecked Sendable {
@@ -103,21 +116,23 @@ final class SubtitlePacketStore: @unchecked Sendable {
     }
 
     func append(streamIndex: Int32, ptsSeconds: Double, durationSeconds: Double,
-                flags: Int32 = 0, payload: Data) {
+                flags: Int32 = 0, payload: Data, webvttSettings: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         appendLocked(streamIndex: streamIndex, ptsSeconds: ptsSeconds,
-                     durationSeconds: durationSeconds, flags: flags, payload: payload)
+                     durationSeconds: durationSeconds, flags: flags, payload: payload,
+                     webvttSettings: webvttSettings)
     }
 
     private func appendLocked(streamIndex: Int32, ptsSeconds: Double, durationSeconds: Double,
-                              flags: Int32, payload: Data) {
+                              flags: Int32, payload: Data, webvttSettings: String? = nil) {
         let before = bytesByStream[streamIndex] ?? 0
         var entries = entriesByStream[streamIndex] ?? []
         var bytes = before
         let entry = StoredSubtitlePacket(ptsSeconds: ptsSeconds,
                                          durationSeconds: durationSeconds,
                                          flags: flags,
-                                         payload: payload)
+                                         payload: payload,
+                                         webvttSettings: webvttSettings)
         // #235: several packets legitimately share a PTS. ASS/SSA authors overlapping lines on
         // identical Start/End, and a karaoke or layered-style track puts a whole burst of distinct
         // Dialogue events on one timestamp. Only a byte-identical payload is the pump and the
@@ -222,21 +237,24 @@ final class SubtitlePacketStore: @unchecked Sendable {
                      flags: packet.pointee.flags,
                      payload: Data(bytes: data, count: Int(packet.pointee.size)),
                      assembleSplitDisplaySets: assembleSplitDisplaySets,
-                     writer: writer)
+                     writer: writer,
+                     webvttSettings: WebVTTCueSettings.settings(onPacket: packet))
     }
 
     /// Testable core of `harvest`. ptsSeconds nil = packet carried no PTS (AV_NOPTS_VALUE):
     /// dropped on the per-packet path, folded into the pending set on the assembly path.
     func harvestChunk(streamIndex: Int32, ptsSeconds: Double?, durationSeconds: Double,
                       flags: Int32, payload: Data, assembleSplitDisplaySets: Bool,
-                      writer: Writer = .pump) {
+                      writer: Writer = .pump, webvttSettings: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard assembleSplitDisplaySets else {
             guard let ptsSeconds else { return }
             appendLocked(streamIndex: streamIndex, ptsSeconds: ptsSeconds,
-                         durationSeconds: durationSeconds, flags: flags, payload: payload)
+                         durationSeconds: durationSeconds, flags: flags, payload: payload,
+                         webvttSettings: webvttSettings)
             return
         }
+        // The assembly path below is PGS display sets; those carry no WebVTT settings.
         // Mirror the decoder's SUP-wrapper rule: strip a leading "PG" 10-byte header so
         // concatenated chunks form one clean [type][len BE][body] segment run.
         var chunk = payload

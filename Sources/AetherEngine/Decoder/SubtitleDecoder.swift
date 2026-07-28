@@ -284,6 +284,11 @@ enum SubtitleDecoder {
                 }
                 avsubtitle_free(&sub)
 
+                // #233: WebVTT cue settings never reach the ASS event line (the decoder drops
+                // them), but the demuxer keeps them on the packet. An ASS `\an` / `\pos` still
+                // wins, since that came from the payload itself.
+                placement = placement ?? WebVTTCueSettings.placement(onPacket: pkt)
+
                 let merged = lines
                     .joined(separator: "\n")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
