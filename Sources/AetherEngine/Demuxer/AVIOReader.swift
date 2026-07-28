@@ -288,6 +288,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// #174: winCond-guarded snapshot of the suspend state, internal so the task-level
     /// backpressure is unit-tested against a loopback origin without private state access.
+    /// #220: planned range ends must leave the failure budget alone.
+    var unproductiveReconnectsForTesting: Int {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return unproductiveReconnects
+    }
+
     var persistentTaskIsSuspendedForTesting: Bool {
         winCond.lock()
         defer { winCond.unlock() }
@@ -1071,20 +1078,31 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 emitNetworkPhase(.flowing)      // recovered: source delivering again (#85)
                 // #174: resume the suspended transfer once the drain crosses lowWater.
                 var toResume: URLSessionDataTask?
-                if persistentTaskSuspended,
-                   window.count - max(0, Int(position - winStart)) <= Self.winLowWater {
+                var refillFrom: Int64? = nil
+                let undrained = window.count - max(0, Int(position - winStart))
+                if persistentTaskSuspended, undrained <= Self.winLowWater {
                     persistentTaskSuspended = false
                     toResume = activeTask
+                }
+                // #220: the range ended on purpose and the consumer has now drawn down far
+                // enough that the next one should already be in flight. Requesting at the
+                // frontier rather than at the read position keeps every delivered byte, and
+                // doing it here rather than on an empty window is what stops a range boundary
+                // from becoming a stall.
+                if connEndedAtRangeEnd, activeTask == nil, undrained <= Self.winLowWater {
+                    refillFrom = winStart + Int64(window.count)
                 }
                 winCond.broadcast()
                 winCond.unlock()
                 toResume?.resume()
+                if let refillFrom { timedReconnect(seek: false, at: refillFrom) }
                 continue
             }
 
             let frontier = winStart + Int64(window.count)
             let ended = connEnded
             let endedByBackpressure = connEndedByBackpressure
+            let endedByRangeEnd = connEndedAtRangeEnd
             let status = connStatus
             let retryAfter = connRetryAfter
 
@@ -1172,6 +1190,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 EngineLog.emit(
                     "[AVIOReader] window drained after hard cap; re-requesting at \(frontier)",
                     category: .demux)
+                timedReconnect(seek: false, at: frontier)
+                continue
+            }
+            // #220: the range was delivered in full and the window has now drained, which is
+            // the ordinary way a bounded read moves forward. No backoff and no streak charge:
+            // nothing failed, and spending the give-up budget on range boundaries would kill
+            // the reader on a healthy link.
+            if endedByRangeEnd {
                 timedReconnect(seek: false, at: frontier)
                 continue
             }
@@ -1631,6 +1657,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let isCurrentGen = (generation == connGeneration)
         if isCurrentGen {
             connEnded = true
+            // #220: the refill below keys off there being no live connection, so the finished
+            // task must not stay installed.
+            activeTask = nil
         }
         let windowAhead = isCurrentGen ? (window.count - max(0, Int(position - winStart))) : 0
         winCond.broadcast()
