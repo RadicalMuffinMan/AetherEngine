@@ -133,7 +133,18 @@ player.selectAudioTrack(index: trackID)
 player.subtitleTracks                          // [TrackInfo], text + bitmap + external, one list
 player.selectSubtitleTrack(index: streamID)
 player.clearSubtitle()
-player.$subtitleCues                           // [SubtitleCue]: .text(String), .richText([SubtitleTextRun]) (coloured teletext), or .image(SubtitleImage)
+player.$subtitleCues                           // [SubtitleCue]: .text(String), .richText([SubtitleTextRun]), or .image(SubtitleImage)
+
+// #233: styled text arrives as .richText. A run carries colour, bold, italic, underline,
+// strikeout, font face and an ASS-relative font size; the cue carries the placement it asks
+// for (numpad alignment plus an optional [0, 1] anchor). This covers SRT, WebVTT, teletext
+// and ASS alike, because libavcodec converts them all to ASS event lines before the engine
+// sees them. A cue with no styling still arrives as .text, so handling only that case keeps
+// working. WebVTT cue settings are the exception: libavcodec does not convert them, so VTT
+// positioning does not arrive (its inline bold/italic/underline does).
+for cue in player.subtitleCues {
+    if case .richText(let runs) = cue.body { render(runs, at: cue.placement) }
+}
 
 // External subtitle files are first-class tracks (#88): they appear in subtitleTracks
 // (isExternal == true, synthetic id) and select through the same call as embedded streams.
