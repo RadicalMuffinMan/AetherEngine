@@ -13,7 +13,7 @@ touching the server. Per-connection byte totals are logged on close, which is th
 client-independent ground truth: a healthy reader measures at media rate, and a connection
 running above it is reading further ahead than the consumer is draining.
 
-  python3 Scripts/throttle-origin.py <upstream> <port> <MB/s> [--lan] [--shared]
+  python3 Scripts/throttle-origin.py <upstream> <port> <MB/s> [--lan] [--shared] [--head MB]
 
 `upstream` takes two forms, picked automatically:
 
@@ -68,7 +68,15 @@ SERVER_MODE = _parts.path in ("", "/") and not _parts.query
 # playlists pass at full speed and only the media stream is shaped. Decided on bytes
 # actually sent rather than on Content-Length, because a server answering chunked gives no
 # length up front and must not be mistaken for a small response.
+#
+# `--head MB` overrides it. Set it to 0 when measuring a reader that fetches in bounded ranges:
+# every range is a new body, so an 8 MB free head hands a reader 8 MB of unshaped bytes per range
+# and, worse, rewards whichever build opens MORE connections. That is exactly backwards for #240,
+# where opening fewer is the fix.
 THROTTLE_AFTER_BYTES = 8 * 1024 * 1024
+for _i, _a in enumerate(sys.argv[1:]):
+    if _a == "--head" and _i + 2 <= len(sys.argv) - 1:
+        THROTTLE_AFTER_BYTES = int(float(sys.argv[_i + 2]) * 1024 * 1024)
 
 conns = {}
 lock = threading.Lock()

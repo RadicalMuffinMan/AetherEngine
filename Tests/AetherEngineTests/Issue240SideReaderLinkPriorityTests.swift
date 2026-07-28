@@ -17,46 +17,48 @@ import Libavutil
 /// session, which took more link: the engine starved itself in a loop it kept feeding.
 ///
 /// The fix is a strict priority rather than a share. Playback is load-bearing, subtitle lookahead is
-/// not, so a side reader fetches while the video path does not need the link, with a lead floor so
-/// subtitles never go dark and a yield cap so a signal that never clears cannot mute them either.
+/// not, so a side reader fetches while the video path does not need the link, with a bounded grace
+/// window after each anchor so a fresh selection is not left with an empty store, and a yield cap so
+/// a signal that never clears cannot mute lookahead for the session either.
 struct Issue240SideReaderLinkPriorityTests {
 
     // MARK: - The policy
 
-    /// The reported window. A seek owns the link until it lands; that budget is the whole point.
-    @Test("a seek in flight takes the link, whatever the side reader has banked")
+    /// The reported window. A seek owns the link until it lands; that budget is the whole point,
+    /// and not even a just-anchored reader may spend it.
+    @Test("a seek in flight takes the link, grace window or not")
     func seekWins() {
         #expect(SideReaderLinkPolicy.shouldYield(
-            seeking: true, videoProducing: false, leadSeconds: 45, yieldedSeconds: 0))
+            seeking: true, videoProducing: false, inAnchorGrace: false, yieldedSeconds: 0))
         #expect(SideReaderLinkPolicy.shouldYield(
-            seeking: true, videoProducing: true, leadSeconds: 0, yieldedSeconds: 0))
+            seeking: true, videoProducing: true, inAnchorGrace: true, yieldedSeconds: 0))
     }
 
     /// A pump that is pulling from the source outranks lookahead.
-    @Test("a fetching producer takes the link from a reader that is already ahead")
-    func producerWinsAboveTheFloor() {
+    @Test("a fetching producer takes the link from a settled side reader")
+    func producerWinsOutsideGrace() {
         #expect(SideReaderLinkPolicy.shouldYield(
-            seeking: false, videoProducing: true, leadSeconds: 30, yieldedSeconds: 0))
+            seeking: false, videoProducing: true, inAnchorGrace: false, yieldedSeconds: 0))
     }
 
-    /// The floor: cues at the playhead are not lookahead, they are the feature working at all.
-    @Test("below the lead floor the side reader keeps fetching")
-    func floorProtectsTheDrainer() {
+    /// The grace window: a freshly anchored reader has nothing in the store for the new position,
+    /// so it fetches through a busy pump for a bounded time. Bounded is the load-bearing word: the
+    /// rule this replaced was "fetch while the lead is under 5 s", and on a link that cannot carry
+    /// two readers the lead never rises, so that rule never expired. Measured on a 1.4x bench, the
+    /// reader kept 47% of the link and the seek landings did not move.
+    @Test("a just-anchored reader fetches through a busy pump, a settled one does not")
+    func anchorGraceIsBounded() {
         #expect(!SideReaderLinkPolicy.shouldYield(
-            seeking: false, videoProducing: true, leadSeconds: 0, yieldedSeconds: 0))
-        #expect(!SideReaderLinkPolicy.shouldYield(
-            seeking: false, videoProducing: true,
-            leadSeconds: SideReaderLinkPolicy.leadFloorSeconds - 0.01, yieldedSeconds: 0))
+            seeking: false, videoProducing: true, inAnchorGrace: true, yieldedSeconds: 0))
         #expect(SideReaderLinkPolicy.shouldYield(
-            seeking: false, videoProducing: true,
-            leadSeconds: SideReaderLinkPolicy.leadFloorSeconds, yieldedSeconds: 0))
+            seeking: false, videoProducing: true, inAnchorGrace: false, yieldedSeconds: 0))
     }
 
     /// A parked pump has a full buffer and no use for the link.
     @Test("an idle video path leaves the link to the side reader")
     func idleVideoPathYieldsTheLink() {
         #expect(!SideReaderLinkPolicy.shouldYield(
-            seeking: false, videoProducing: false, leadSeconds: 300, yieldedSeconds: 0))
+            seeking: false, videoProducing: false, inAnchorGrace: false, yieldedSeconds: 0))
     }
 
     /// The valve. A wedged pump never parks and a host that reports no producer at all never claims
@@ -64,10 +66,10 @@ struct Issue240SideReaderLinkPriorityTests {
     @Test("a continuous yield past the cap takes the link back")
     func yieldCapIsAValve() {
         #expect(SideReaderLinkPolicy.shouldYield(
-            seeking: true, videoProducing: true, leadSeconds: 60,
+            seeking: true, videoProducing: true, inAnchorGrace: false,
             yieldedSeconds: SideReaderLinkPolicy.maxYieldSeconds - 0.01))
         #expect(!SideReaderLinkPolicy.shouldYield(
-            seeking: true, videoProducing: true, leadSeconds: 60,
+            seeking: true, videoProducing: true, inAnchorGrace: false,
             yieldedSeconds: SideReaderLinkPolicy.maxYieldSeconds))
     }
 
@@ -147,27 +149,32 @@ struct Issue240SideReaderLinkPriorityTests {
     private static func arbiter(
         seeking: Bool = false, videoProducing: Bool = false,
         maxYieldSeconds: Double = SideReaderLinkPolicy.maxYieldSeconds,
-        valveGrantSeconds: Double = SideReaderLinkPolicy.maxYieldSeconds
+        valveGrantSeconds: Double = SideReaderLinkPolicy.maxYieldSeconds,
+        anchorGraceSeconds: Double = 0
     ) -> SideReaderLinkArbiter {
         var a = SideReaderLinkArbiter(state: { (seeking, videoProducing) })
         a.maxYieldSeconds = maxYieldSeconds
         a.valveGrantSeconds = valveGrantSeconds
+        a.anchorGraceSeconds = anchorGraceSeconds
         a.pollNanoseconds = 1_000_000
         return a
     }
 
-    /// The defect and the fix in one pair. With the video path fetching, the reader gets to the lead
-    /// floor and stops there; ungated it walks the whole file, which over a 48 GB remux is the second
-    /// copy of the stream that took the reporter's link.
-    @Test("a fetching video path holds the side reader at the lead floor")
-    func readerStopsAtTheFloorWhileTheVideoPathFetches() async throws {
+    /// The defect and the fix in one pair. Ungated the reader walks the whole file, which over a
+    /// 48 GB remux is the second copy of the stream that took the reporter's link; gated behind a
+    /// fetching video path it stops once its grace window is spent.
+    @Test("a fetching video path stops the side reader once its grace is spent")
+    func readerStopsWhileTheVideoPathFetches() async throws {
         let ungated = try await Self.harvestedPTS(link: nil)
         #expect(ungated.contains { $0 >= 13 }, "ungated the reader walks the whole fixture")
 
         let gated = try await Self.harvestedPTS(link: Self.arbiter(videoProducing: true))
-        #expect(gated.contains { $0 <= 3 }, "everything below the floor must still be harvested")
-        #expect(!gated.contains { $0 >= 8 },
-                "past the floor the link belongs to the video path")
+        #expect(!gated.contains { $0 >= 13 }, "a busy video path owns the link")
+
+        let inGrace = try await Self.harvestedPTS(
+            link: Self.arbiter(videoProducing: true, anchorGraceSeconds: 30))
+        #expect(inGrace.contains { $0 >= 13 },
+                "inside its grace window the reader fetches through a busy pump")
     }
 
     /// The reported window, at the loop: a seek in flight stops the reader even below the floor,

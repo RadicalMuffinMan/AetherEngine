@@ -22,10 +22,17 @@ import Foundation
 /// disable subtitle lookahead for the rest of the session.
 enum SideReaderLinkPolicy {
 
-    /// Lead below which a side reader fetches regardless of the video path. The drainer needs cues
-    /// slightly ahead of the playhead to render at all; everything above this floor is lookahead
-    /// (host ADVANCE sync offsets, the OCR window) and can wait for a free link.
-    static let leadFloorSeconds: Double = 5
+    /// How long a side reader may fetch unconditionally after it anchors or re-anchors, so the cues
+    /// around the new position reach the store even while the video path is busy.
+    ///
+    /// This used to be a lead floor ("fetch while less than 5 s ahead of the playhead"), which is
+    /// wrong in exactly the case the arbitration exists for. On a link that cannot carry two
+    /// readers the side reader never gets ahead at all, so its lead stays negative, so the floor
+    /// never expires: measured on a 1.4x bench, the reader took 47% of the link with the floor rule
+    /// in force and the seek landings did not move. A grace window cannot get stuck that way, and
+    /// it protects the case that actually needed protecting, which is the freshly selected track
+    /// with nothing in the store yet, not steady-state lookahead.
+    static let anchorGraceSeconds: Double = 8
 
     /// Longest continuous yield before the side reader takes the link anyway. Longer than the seek
     /// machinery's whole budget (8 s + 4x4 s extensions + re-anchor waits, #216), so a real seek
@@ -37,19 +44,19 @@ enum SideReaderLinkPolicy {
     /// Ordered so each rule is decidable on its own:
     /// 1. the cap fires first, because its whole purpose is to override a signal that is not clearing
     /// 2. a seek in flight yields unconditionally: the landing budget is what this exists to protect
-    /// 3. below the floor the reader fetches, so subtitles never go dark waiting for a busy link
+    /// 3. inside its anchor grace the reader fetches, so a fresh selection is not left with an empty
+    ///    store on a busy link
     /// 4. an actively fetching producer wins the link
     static func shouldYield(
         seeking: Bool,
         videoProducing: Bool,
-        leadSeconds: Double,
+        inAnchorGrace: Bool,
         yieldedSeconds: Double,
-        leadFloorSeconds: Double = SideReaderLinkPolicy.leadFloorSeconds,
         maxYieldSeconds: Double = SideReaderLinkPolicy.maxYieldSeconds
     ) -> Bool {
         if yieldedSeconds >= maxYieldSeconds { return false }
         if seeking { return true }
-        if leadSeconds < leadFloorSeconds { return false }
+        if inAnchorGrace { return false }
         return videoProducing
     }
 }
@@ -100,7 +107,7 @@ final class SideReaderLinkGate: @unchecked Sendable {
 /// drive every rule without an engine, a producer or a network.
 struct SideReaderLinkArbiter: Sendable {
     let state: @Sendable () -> (seeking: Bool, videoProducing: Bool)
-    var leadFloorSeconds: Double = SideReaderLinkPolicy.leadFloorSeconds
+    var anchorGraceSeconds: Double = SideReaderLinkPolicy.anchorGraceSeconds
     var maxYieldSeconds: Double = SideReaderLinkPolicy.maxYieldSeconds
     /// How long the reader keeps the link once the cap has fired, before it starts asking again.
     /// Without a window the valve would be worthless: the cap is evaluated per loop iteration, so it
@@ -124,14 +131,13 @@ struct SideReaderLinkArbiter: Sendable {
         state().seeking
     }
 
-    func shouldYield(leadSeconds: Double, yieldedSeconds: Double) -> Bool {
+    func shouldYield(inAnchorGrace: Bool, yieldedSeconds: Double) -> Bool {
         let now = state()
         return SideReaderLinkPolicy.shouldYield(
             seeking: now.seeking,
             videoProducing: now.videoProducing,
-            leadSeconds: leadSeconds,
+            inAnchorGrace: inAnchorGrace,
             yieldedSeconds: yieldedSeconds,
-            leadFloorSeconds: leadFloorSeconds,
             maxYieldSeconds: maxYieldSeconds)
     }
 

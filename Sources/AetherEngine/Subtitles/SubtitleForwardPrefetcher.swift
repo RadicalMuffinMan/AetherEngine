@@ -224,6 +224,10 @@ enum SubtitleForwardPrefetcher {
         /// #240: the valve's grant window. Set when a yield hit the cap, checked before the next
         /// arbitration so the reader keeps the link for a while rather than for one packet.
         var valveGrantedUntil: DispatchTime? = nil
+        /// #240: the head start after anchoring, re-armed by every in-place re-anchor. Bounded by
+        /// wall time on purpose, see `SideReaderLinkPolicy.anchorGraceSeconds`.
+        var anchorGraceUntil = DispatchTime.now()
+            + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
         let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted()
         // #220: the exit reason reaches the gauge, not just the fact that the loop stopped.
         // `defer` reads `exit` at unwind, so every break path reports the reason it set.
@@ -237,7 +241,7 @@ enum SubtitleForwardPrefetcher {
             if let link, valveGrantedUntil.map({ DispatchTime.now() > $0 }) ?? true {
                 var yielded: Double = 0
                 while !Task.isCancelled,
-                      link.shouldYield(leadSeconds: max(0, (readPosition ?? playheadSnapshot) - playheadSnapshot),
+                      link.shouldYield(inAnchorGrace: DispatchTime.now() < anchorGraceUntil,
                                        yieldedSeconds: yielded) {
                     if yielded == 0 { SubtitlePrefetchTelemetry.recordLinkYield(true) }
                     // The playhead moves while we wait, so the lead shrinks: a reader parked behind
@@ -272,6 +276,8 @@ enum SubtitleForwardPrefetcher {
                     + "\(String(format: "%.2f", target))s (\(landed))",
                     category: .engine)
                 readPosition = nil
+                anchorGraceUntil = DispatchTime.now()
+                    + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
                 if let fresh = await playhead() { playheadSnapshot = fresh }
             }
 

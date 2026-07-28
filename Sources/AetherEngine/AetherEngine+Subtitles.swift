@@ -1295,11 +1295,10 @@ extension AetherEngine {
         )
 
         var playheadSnapshot = effectiveStart
-        // #240: the read position, for the link arbitration's lead (the park below uses the packet
-        // in hand; the arbiter is asked before the read that would produce the next one).
-        var lastReadSeconds = effectiveStart
-        /// #240: the valve's grant window, see the prefetcher's loop.
+        /// #240: the valve's grant window and the post-anchor head start, see the prefetcher's loop.
         var valveGrantedUntil: DispatchTime? = nil
+        let anchorGraceUntil = DispatchTime.now()
+            + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
         var parkLogged = false
         var timeBaseCache: [Int32: AVRational] = [:]
         var totalCues = 0
@@ -1312,7 +1311,7 @@ extension AetherEngine {
             if let link, !readToEOF, valveGrantedUntil.map({ DispatchTime.now() > $0 }) ?? true {
                 var yielded: Double = 0
                 while !Task.isCancelled,
-                      link.shouldYield(leadSeconds: max(0, lastReadSeconds - playheadSnapshot),
+                      link.shouldYield(inAnchorGrace: DispatchTime.now() < anchorGraceUntil,
                                        yieldedSeconds: yielded) {
                     guard let fresh = await MainActor.run(body: { [weak self] in self?.sourceTime })
                     else { break readLoop }
@@ -1365,7 +1364,6 @@ extension AetherEngine {
             // and cached empty for the VOD rendition. Only runs while a native rendition is selected (PiP).
             // Sodalite#32: a whole-program .vtt must hold EVERY cue, so read straight to EOF without parking
             // (cue data is tiny). markFinished after the loop lets the .vtt handler wait for a complete file.
-            if let pktSeconds { lastReadSeconds = pktSeconds }
             if !readToEOF, let pktSeconds, pktSeconds > playheadSnapshot + Self.nativeSubtitleReadAheadSeconds {
                 while !Task.isCancelled {
                     guard let fresh = await MainActor.run(body: { [weak self] in self?.sourceTime }) else {
