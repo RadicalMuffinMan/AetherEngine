@@ -10,8 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.27.0] - 2026-07-28
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.27.0))
+
 ### Added
 
+- **External WebVTT subtitle files load at all.** The FFmpeg build carried the `webvtt` decoder but never the `webvtt` demuxer, so `avformat_open_input` rejected every standalone `.vtt` file with `AVERROR_INVALIDDATA` and a sidecar WebVTT track failed before a single cue was decoded, on every path that opens one. Same shape as the raw-PGS `sup` gap fixed in FFmpegBuild 2.1.3, and it hid for the same reason: the codec was present, so the failure looked like it had to be elsewhere. Requires FFmpegBuild 2.3.0, which this release pins.
 - **WebVTT cue settings reach the host after all: `line`, `position` and `align` arrive as `SubtitleCue.placement`.** 5.26.0 reported them as upstream-blocked, which was a conclusion about the wrong layer. libavcodec's WebVTT decoder really does drop them, and says so as a `@todo` in `webvttdec.c`'s file header, so nothing about the placement is in the ASS event line it synthesises. The demuxer keeps them: `libavformat/webvttdec.c` attaches the verbatim settings string to every packet as `AV_PKT_DATA_WEBVTT_SETTINGS`, and `matroskadec.c` propagates the same side data for WebVTT in Matroska. Both subtitle decoders now read it, and the packet store carries the string through a rebuild, since side data does not live in the payload and a stored packet would otherwise lose the placement a freshly demuxed one has. A percentage `line` becomes an anchor point plus the alignment row, anchored to the frame edge it is nearer (the spec's default line alignment would pin the box top at `line:90%` and hang a two-line cue off the frame); a `line` number keeps only the half of the frame it names, because line boxes need a rendered line height the engine does not have. An ASS `\an` or `\pos` still wins, since that came from the payload itself. `size` and `vertical` have no equivalent in the placement model and are ignored, and a `position` without a `line` keeps only the alignment column, because an anchor point needs both axes.
 
 ### Fixed
