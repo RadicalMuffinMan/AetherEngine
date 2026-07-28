@@ -513,7 +513,16 @@ extension AetherEngine {
             demuxer.seekBounded(to: duration * 0.5, timeout: Self.sideReaderSeekBudgetSeconds)
         }
         let seekTo = max(0, startAt - 2.0)
-        if !demuxer.seekBounded(to: seekTo, timeout: Self.sideReaderSeekBudgetSeconds) {
+        // #234: anchor the positioning on the subtitle axis explicitly. A -1 seek lets libavformat
+        // pick the reference stream by score, and `discard != AVDISCARD_ALL` is worth +200 there:
+        // before #230 the subtitle stream was the only stream not fully discarded and won that
+        // vote by accident, after #230 the pacing stream outranks it and the seek lands on a video
+        // keyframe instead. On Matroska that is a different cluster, so a landing cue further back
+        // than one keyframe is behind the read head before the first packet arrives and the seek
+        // destination stays dark. Lowest index matches what the score used to elect.
+        let seekAnchor = streams.min() ?? -1
+        if !demuxer.seekBounded(to: seekTo, anchorStreamIndex: seekAnchor,
+                                timeout: Self.sideReaderSeekBudgetSeconds) {
             demuxer.markTimestampSeekUnreliable()
             let engineDisplayDuration = await MainActor.run { [weak self] in self?.duration ?? 0 }
             let fellBack = demuxer.seekByteEstimate(
@@ -527,7 +536,8 @@ extension AetherEngine {
 
         EngineLog.emit(
             "[AetherEngine] #151 forward prefetch started: streams=\(streams.sorted()) "
-            + "pacing=\(pacing) startAt=\(String(format: "%.2f", startAt))s lead=\(leadSeconds)s",
+            + "pacing=\(pacing) anchor=\(seekAnchor) "
+            + "startAt=\(String(format: "%.2f", startAt))s lead=\(leadSeconds)s",
             category: .engine)
         let outcome = await SubtitleForwardPrefetcher.run(
             demuxer: demuxer, store: store,

@@ -1035,12 +1035,33 @@ public final class Demuxer: @unchecked Sendable {
         timestampSeekUnreliable = true
     }
 
+    /// The stream libavformat would measure a `-1` seek against, or -1 when there is no context.
+    ///
+    /// Exposed because that choice is not stable across a session: `av_find_default_stream_index`
+    /// scores `discard != AVDISCARD_ALL` at +200, so which stream anchors a seek changes with the
+    /// discard configuration (#234).
+    func defaultSeekReferenceStreamIndex() -> Int32 {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext else { return -1 }
+        return av_find_default_stream_index(ctx)
+    }
+
     /// Seek with AVIO read deadline. Returns true if completed; false if aborted.
     /// Needed for VOD cue prewarm: missing/truncated MKV Cues causes matroska to
     /// degrade from "1-2 byte-range reads" into a linear half-file scan on a remote
     /// 70+ GB source (de-facto hang). Only AVIOReader honours the deadline.
+    ///
+    /// `anchorStreamIndex` names the stream the target is measured against. -1, the default, hands
+    /// that choice to libavformat, which scores `discard != AVDISCARD_ALL` at +200 and therefore
+    /// re-decides it whenever the discard configuration changes: a side reader that discarded
+    /// everything but its subtitle stream was anchored on that stream by accident, and #230's
+    /// pacing stream silently moved the anchor onto video keyframes (#234). A caller that reads one
+    /// sparse stream wants its own axis, so it says so. An index outside the source falls back to
+    /// the default rather than failing the seek.
     @discardableResult
-    func seekBounded(to seconds: Double, timeout: TimeInterval) -> Bool {
+    func seekBounded(to seconds: Double, anchorStreamIndex: Int32 = -1,
+                     timeout: TimeInterval) -> Bool {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return false }
@@ -1049,8 +1070,17 @@ public final class Demuxer: @unchecked Sendable {
         // seek on a remote ISO sat wedged ~230 s and every later re-arm queued behind it.
         avioProvider?.beginReadDeadline(secondsFromNow: timeout)
         defer { avioProvider?.endReadDeadline() }
-        let timestamp = Int64(seconds * Double(AV_TIME_BASE))
-        let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
+        // A stream-anchored seek carries the target in that stream's own time base; only the -1
+        // form is expressed in AV_TIME_BASE units.
+        var anchor: Int32 = -1
+        var timestamp = Int64(seconds * Double(AV_TIME_BASE))
+        if anchorStreamIndex >= 0, anchorStreamIndex < Int32(ctx.pointee.nb_streams),
+           let tb = ctx.pointee.streams[Int(anchorStreamIndex)]?.pointee.time_base,
+           tb.num > 0, tb.den > 0 {
+            anchor = anchorStreamIndex
+            timestamp = Int64(seconds * Double(tb.den) / Double(tb.num))
+        }
+        let ret = avformat_seek_file(ctx, anchor, Int64.min, timestamp, Int64.max, 0)
         avformat_flush(ctx)
         lastReadClipIdx = -1  // AE#105: post-seek reads may land mid-clip; require a fresh clean crossing
         // matroska may return success with a partial index after abort; deadline flag
