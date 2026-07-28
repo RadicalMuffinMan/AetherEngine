@@ -117,10 +117,21 @@ final class SubtitlePacketStore: @unchecked Sendable {
                                          durationSeconds: durationSeconds,
                                          flags: flags,
                                          payload: payload)
+        // Multiple packets can share a PTS (e.g. ASS/SSA overlapping events).
+        // Only collapse true re-harvests: matching PTS and byte-identical payload.
         let insertAt = entries.firstIndex { $0.ptsSeconds >= ptsSeconds } ?? entries.count
-        if insertAt < entries.count, entries[insertAt].ptsSeconds == ptsSeconds {
-            bytes -= entries[insertAt].payload.count
-            entries[insertAt] = entry
+        var duplicateIndex: Int?
+        var probe = insertAt
+        while probe < entries.count, entries[probe].ptsSeconds == ptsSeconds {
+            if entries[probe].payload == payload {
+                duplicateIndex = probe
+                break
+            }
+            probe += 1
+        }
+        if let duplicateIndex {
+            bytes -= entries[duplicateIndex].payload.count
+            entries[duplicateIndex] = entry
         } else {
             entries.insert(entry, at: insertAt)
         }
