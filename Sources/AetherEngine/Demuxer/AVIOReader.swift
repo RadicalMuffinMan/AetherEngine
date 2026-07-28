@@ -208,6 +208,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // reaches it, and at the rates where the defect appears the excess is 1-2 MB/s, so the
     // cycle is tens of seconds. No byte is discarded or re-fetched either way.
     static let winHardCap = 48 * 1024 * 1024
+    // #220: how much the persistent reader asks for at a time. The resident window is then
+    // bounded by low water plus this, 40 MB, whatever the transport chooses to do with a
+    // suspend. Sized so the request rate stays modest (about one per 5 s on a 4K remux) while
+    // leaving clearance under winHardCap, so a firing cap still means something is wrong
+    // rather than being the normal ceiling.
+    static let persistentRangeBytes: Int64 = 32 * 1024 * 1024
     // Keep this many bytes behind the cursor for small matroska backward re-reads.
     private static let winLookback = 2 * 1024 * 1024
     // Trim in batches to avoid O(n^2) memmove storm on every 256 KB read.
@@ -300,6 +306,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// `recordReconnectAndShouldGiveUp` would kill the reader on a perfectly healthy link.
     /// winCond-guarded, cleared by `startPersistentConnection`.
     private var connEndedByBackpressure = false
+
+    /// #220: last byte the live connection was asked for, nil when the request was open-ended
+    /// (live sources, and any source whose total size is not resolved yet). winCond-guarded.
+    private var connRangeEnd: Int64?
+
+    /// #220: set when the connection ended because its range was delivered in full. That is a
+    /// planned end, not a failure, and must not be charged to the reconnect budgets. Mirrors
+    /// `connEndedByBackpressure`; cleared by `startPersistentConnection`.
+    private var connEndedAtRangeEnd = false
 
     /// #220: winCond-guarded snapshot of the sliding window for the periodic memprobe.
     /// `ahead` is the undrained forward extent, the quantity `appendPersistentData` gates
@@ -1375,10 +1390,30 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         connGeneration &+= 1
         let generation = connGeneration
+        // #220: VOD asks for a fixed amount at a time, so the origin cannot deliver more than
+        // was requested and the window is bounded by construction rather than by reaction. Two
+        // cases keep the open-ended form: live, where the material is produced in real time so
+        // the origin cannot outrun media rate and the end is moving, and a source whose total
+        // size is not resolved yet, where there is nothing to clamp the last range against. An
+        // explicit caller bound (boundedInitialFetch) still wins. `fileSize` is read here
+        // because winCond is already held, as every fileSize access requires.
+        let resolvedBound: Int64? = boundedTo ?? {
+            guard !isLive else { return nil }
+            // fileSize is still 0 on the very first connection, since the response's
+            // Content-Range is what resolves it. Asking for a fixed amount anyway is both safe
+            // and necessary: safe because a server clamps a range that overruns the file (416
+            // needs the START past the end, which cannot happen here), and necessary because
+            // waiting for a resolved size would leave the first connection, the one that reads
+            // from byte zero, open-ended.
+            if fileSize > offset { return min(Self.persistentRangeBytes, fileSize - offset) }
+            return fileSize <= 0 ? Self.persistentRangeBytes : nil
+        }()
         winStart = offset
         window = Data()
         connEnded = false
         connEndedByBackpressure = false
+        connEndedAtRangeEnd = false
+        connRangeEnd = resolvedBound.map { offset + $0 - 1 }
         suspendedDeliveryBytes = 0
         connStatus = 0
         connRetryAfter = 0
@@ -1401,8 +1436,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // #93 residual: a bounded open connection asks for a finite range so an origin that dribbles
         // the open-ended `bytes=0-` stream serves it as a fast finite GET. The 206 Content-Range still
         // carries the total size, so fileSize resolution (issue #70) is unaffected.
-        if let boundedTo {
-            request.setValue("bytes=\(offset)-\(offset + boundedTo - 1)", forHTTPHeaderField: "Range")
+        if let resolvedBound {
+            request.setValue("bytes=\(offset)-\(offset + resolvedBound - 1)", forHTTPHeaderField: "Range")
         } else {
             request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
         }
@@ -1467,6 +1502,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
         }
         addBytesFetched(count)
+        // #220: the requested range has been delivered in full. That ends the connection on
+        // purpose; the read loop re-requests at the frontier once the consumer has drawn down.
+        if let end = connRangeEnd, winStart + Int64(window.count) > end {
+            connEndedAtRangeEnd = true
+            connEnded = true
+        }
         winCond.broadcast()
         // Deliveries already dispatched before the suspend takes effect still land here
         // (flag already set, no double-suspend), so the window can overshoot highWater by
