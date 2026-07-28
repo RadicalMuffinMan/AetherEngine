@@ -191,12 +191,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // `endPersistentConnectionForBackpressure`.
     private static let winHighWater = 16 * 1024 * 1024
     private static let winLowWater = 8 * 1024 * 1024
-    // #220 hard bound on the resident window, 8x the high water. Above this the transport is
-    // demonstrably ignoring the suspend, and no amount of waiting brings it back down. Sized
-    // to sit far above healthy sessions (measured 25-73 MB across both readers against a real
-    // Jellyfin origin) so it never fires on a well-behaved link, and far below the multi-GB
-    // growth that reaches jetsam. Per reader, and a subtitled session has two.
-    static let winHardCap = 128 * 1024 * 1024
+    // #220 hard bound on the resident window. Above this the transport is demonstrably
+    // ignoring the suspend, and no amount of waiting brings it back down.
+    //
+    // 3x the high water, not 8x. The first attempt used 128 MB, reasoning that healthy
+    // sessions sit far below it. They do (16-21 MB measured on both macOS and tvOS, across
+    // both readers), but the cap is not the peak: the window is a `Data`, so crossing the cap
+    // means a realloc that holds the old and new buffers at once, and a field capture with
+    // this bound already working named `bigExact=160301056,135544832`, two blocks at 153 and
+    // 129 MB, with `size_in_use` still touching 1003 MB. The cap sets the peak at roughly
+    // twice its own value, so it has to be chosen against the peak that is affordable, not
+    // against the window that looks reasonable. It also caught that event with 4 MB to spare,
+    // which is not a margin.
+    //
+    // Lower costs reconnects only in the regime that is already broken: a healthy link never
+    // reaches it, and at the rates where the defect appears the excess is 1-2 MB/s, so the
+    // cycle is tens of seconds. No byte is discarded or re-fetched either way.
+    static let winHardCap = 48 * 1024 * 1024
     // Keep this many bytes behind the cursor for small matroska backward re-reads.
     private static let winLookback = 2 * 1024 * 1024
     // Trim in batches to avoid O(n^2) memmove storm on every 256 KB read.

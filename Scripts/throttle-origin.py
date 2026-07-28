@@ -13,7 +13,7 @@ touching the server. Per-connection byte totals are logged on close, which is th
 client-independent ground truth: a healthy reader measures at media rate, and a connection
 running above it is reading further ahead than the consumer is draining.
 
-  python3 Scripts/throttle-origin.py <upstream> <port> <MB/s>
+  python3 Scripts/throttle-origin.py <upstream> <port> <MB/s> [--lan]
 
 `upstream` takes two forms, picked automatically:
 
@@ -28,6 +28,10 @@ stay at full speed and just the media stream is shaped.
 
 To pick the rate, take the source's media rate (bit_rate / 8) and multiply. For a 53.5
 Mbit/s remux that is 6.7 MB/s, so 17 is roughly 2.5x.
+
+Binds loopback unless `--lan` is given. It forwards the upstream's credentials and has no
+auth of its own, so exposing it is opt-in even though testing a separate device (an Apple
+TV, a phone) needs exactly that.
 """
 import re
 import socket
@@ -38,9 +42,15 @@ import urllib.parse
 import urllib.error
 import urllib.request
 
-UPSTREAM = sys.argv[1].rstrip("/")
-PORT = int(sys.argv[2])
-RATE = float(sys.argv[3]) * 1e6
+_argv = [a for a in sys.argv[1:] if not a.startswith("--")]
+_flags = {a for a in sys.argv[1:] if a.startswith("--")}
+UPSTREAM = _argv[0].rstrip("/")
+PORT = int(_argv[1])
+RATE = float(_argv[2]) * 1e6
+# Loopback by default: this serves whatever the upstream serves, with the upstream's own
+# credentials, and no auth of its own. Testing from a separate device needs --lan, which is
+# the case server mode is usually for, so it is a flag rather than the default.
+BIND = "0.0.0.0" if "--lan" in _flags else "127.0.0.1"
 
 # A bare scheme://host[:port] means proxy the whole server; anything with a path is one
 # media URL. urlsplit rather than string matching so a port-only authority is not mistaken
@@ -248,13 +258,13 @@ def handle(sock, cid):
 def main():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", PORT))
+    srv.bind((BIND, PORT))
     srv.listen(16)
     if SERVER_MODE:
-        print("proxying server %s at %.1f MB/s on port %d (shaping after %d MB per body)"
-              % (UPSTREAM, RATE / 1e6, PORT, THROTTLE_AFTER_BYTES // (1024 * 1024)), flush=True)
+        print("proxying server %s at %.1f MB/s on %s:%d (shaping after %d MB per body)"
+              % (UPSTREAM, RATE / 1e6, BIND, PORT, THROTTLE_AFTER_BYTES // (1024 * 1024)), flush=True)
     else:
-        print("proxying %.2f GB upstream at %.1f MB/s on port %d" % (SIZE / 1e9, RATE / 1e6, PORT),
+        print("proxying %.2f GB upstream at %.1f MB/s on %s:%d" % (SIZE / 1e9, RATE / 1e6, BIND, PORT),
               flush=True)
     threading.Thread(target=reporter, daemon=True).start()
     cid = 0
