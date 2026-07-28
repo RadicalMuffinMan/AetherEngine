@@ -114,9 +114,14 @@ enum SubtitleRectText {
     /// -> newline and `\h` -> space. Tags that merely look like these (`\be`, `\bord`, `\iclip`,
     /// `\shad`, `\fscx`, `\fsp`) are left alone. Adjacent runs of equal styling are collapsed.
     /// nil when nothing displayable remains.
+    ///
+    /// `firstTextRow` is the 0-based index of the newline-delimited row the first displayable
+    /// character sits on, measured BEFORE the edge trim removes it. libzvbi carries teletext
+    /// row positioning in exactly that ordinal on pages it does not flag as subtitle pages
+    /// (see `teletextBody`); every other format ignores it.
     static func styledRuns(fromASSEventLine line: String,
                            playRes: CGSize = SubtitleRectText.defaultASSPlayRes)
-        -> (runs: [SubtitleTextRun], placement: SubtitleTextPlacement?)? {
+        -> (runs: [SubtitleTextRun], placement: SubtitleTextPlacement?, firstTextRow: Int)? {
         var body = line
         if body.hasPrefix("Dialogue: ") { body.removeFirst("Dialogue: ".count) }
         let parts = body.split(separator: ",", maxSplits: 8, omittingEmptySubsequences: false)
@@ -167,9 +172,24 @@ enum SubtitleRectText {
         var runs = pieces.map { $0.style.run($0.text) }
         let placement = (alignment == nil && position == nil)
             ? nil : SubtitleTextPlacement(alignment: alignment, position: position)
+        let firstTextRow = Self.firstTextRow(in: runs)
         guard let trimmed = edgeTrimmed(runs) else { return nil }
         runs = trimmed
-        return (runs, placement)
+        return (runs, placement, firstTextRow)
+    }
+
+    /// Index of the row the first displayable character sits on, counting the newline-delimited
+    /// rows of the untrimmed run sequence from 0.
+    private static func firstTextRow(in runs: [SubtitleTextRun]) -> Int {
+        var row = 0
+        for run in runs {
+            for ch in run.text {
+                if ch.isNewline { row += 1; continue }
+                if ch.isWhitespace { continue }
+                return row
+            }
+        }
+        return row
     }
 
     /// Apply one override block's tags. Inline attributes mutate `style`; `\an` and `\pos` are
@@ -236,15 +256,18 @@ enum SubtitleRectText {
         // teletext ass can prefix a row-positioning newline that would otherwise render as a blank
         // line ONLY on coloured cues (#107). Interior blank lines are folded separately below;
         // single line breaks and colours are preserved.
+        // Predicate matches the plain path's `.whitespacesAndNewlines` (Unicode Zs plus tab plus
+        // the newline characters). A literal-space/tab/newline test let U+00A0 survive on a styled
+        // cue that an unstyled one trimmed, so the two paths disagreed on the same payload.
         while let first = cleaned.first {
-            let d = String(first.text.drop(while: { $0 == " " || $0 == "\t" || $0 == "\n" }))
+            let d = String(first.text.drop(while: \.isWhitespace))
             if d.isEmpty { cleaned.removeFirst(); continue }
             cleaned[0] = first.withText(d)
             break
         }
         while let last = cleaned.last {
             var s = last.text
-            while let c = s.last, c == " " || c == "\t" || c == "\n" { s.removeLast() }
+            while let c = s.last, c.isWhitespace { s.removeLast() }
             if s.isEmpty { cleaned.removeLast(); continue }
             cleaned[cleaned.count - 1] = last.withText(s)
             break
@@ -256,25 +279,50 @@ enum SubtitleRectText {
     /// Collapse interior blank lines across a run sequence (#107). libzvbi joins teletext rows with
     /// `\N`, so a caption whose lines sit on non-adjacent rows (an empty row between them, used only
     /// for vertical placement) arrives as `line1\n\nline2` and would render a blank line the
-    /// broadcaster never intended. Consecutive newlines (optionally separated by horizontal
-    /// whitespace) fold to one; single line breaks and colours are preserved. The empty row lands
-    /// inside a single run in practice, but a colour change at a row boundary could split it, so the
-    /// boundary between adjacent runs is folded too.
+    /// broadcaster never intended. Consecutive newlines separated by nothing but horizontal
+    /// whitespace fold to one; single line breaks, colours and the indentation of a real row are
+    /// preserved.
+    ///
+    /// Folds the FLATTENED sequence and re-splits it along the original run boundaries. A per-run
+    /// regex plus an adjacent-pair check missed the case the source produces most easily: the
+    /// padding of an empty row carries the spacing attribute that changes colour, so the blank row
+    /// can land in a whitespace-only run of its own and break the chain (`line` / whitespace run /
+    /// `line`).
     private static func collapseInteriorBlankLines(_ runs: [SubtitleTextRun]) -> [SubtitleTextRun] {
-        var folded = runs.map { run in
-            run.withText(run.text.replacingOccurrences(
-                of: #"\n(?:[ \t]*\n)+"#, with: "\n", options: .regularExpression))
-        }
-        var i = 0
-        while i < folded.count - 1 {
-            if folded[i].text.hasSuffix("\n") {
-                var next = folded[i + 1].text
-                while next.hasPrefix("\n") { next.removeFirst() }
-                folded[i + 1] = folded[i + 1].withText(next)
+        var chars: [Character] = []
+        var owner: [Int] = []
+        for (index, run) in runs.enumerated() {
+            for ch in run.text {
+                chars.append(ch)
+                owner.append(index)
             }
-            i += 1
         }
-        return folded.filter { !$0.text.isEmpty }
+
+        var keep = [Bool](repeating: true, count: chars.count)
+        var i = 0
+        while i < chars.count {
+            guard chars[i].isNewline else { i += 1; continue }
+            // Scan past horizontal whitespace and further newlines; everything up to and including
+            // the last newline found is one blank-row gap and collapses onto the first newline.
+            var probe = i + 1
+            var lastNewline = i
+            while probe < chars.count {
+                let c = chars[probe]
+                if c.isNewline { lastNewline = probe }
+                else if !c.isWhitespace { break }
+                probe += 1
+            }
+            if lastNewline > i {
+                for k in (i + 1)...lastNewline { keep[k] = false }
+            }
+            i = lastNewline + 1
+        }
+
+        var texts = [String](repeating: "", count: runs.count)
+        for (index, ch) in chars.enumerated() where keep[index] {
+            texts[owner[index]].append(ch)
+        }
+        return zip(runs, texts).map { $0.withText($1) }.filter { !$0.text.isEmpty }
     }
 
     /// Body + placement for any text rect's ASS event line (#233): `.richText` when a run asks for
@@ -288,13 +336,41 @@ enum SubtitleRectText {
     }
 
     /// Teletext variant (#107): identical, plus the interior blank-line fold libzvbi's row joining
-    /// requires. That fold is deliberately teletext-only, since a blank line in an ASS or SRT cue
-    /// can be intentional.
+    /// requires, plus the grid-row placement fallback below. Both are deliberately teletext-only,
+    /// since a blank line in an ASS or SRT cue can be intentional and a leading one is never a row
+    /// ordinal.
     static func teletextBody(fromASSEventLine line: String,
                              playRes: CGSize = SubtitleRectText.defaultASSPlayRes)
         -> (body: SubtitleCue.Body, placement: SubtitleTextPlacement?)? {
         guard let parsed = styledRuns(fromASSEventLine: line, playRes: playRes) else { return nil }
-        return body(for: collapseInteriorBlankLines(parsed.runs)).map { ($0, parsed.placement) }
+        let placement = parsed.placement ?? gridPlacement(firstTextRow: parsed.firstTextRow)
+        return body(for: collapseInteriorBlankLines(parsed.runs)).map { ($0, placement) }
+    }
+
+    /// Vertical anchor for a teletext page that carried no `\an` (#233).
+    ///
+    /// `gen_sub_ass` derives the anchor from the grid row and emits it as `{\anN}`, but only for
+    /// pages `subtitle_map` flags as subtitle pages (row-0 header: NEWSFLASH clear AND SUBTITLE set
+    /// AND SUPPRESS_HEADER set). Off that path it writes the whole page instead, one `" \N"` per
+    /// grid row with the empty ones included, and the row ordinal becomes the only carrier of the
+    /// position. This is that same derivation applied to the ordinal, so a page keeps the placement
+    /// its broadcaster chose whether or not the flags made it through:
+    ///
+    ///     vertical_align = 2 - av_clip(i + 1, 0, 23) / 8
+    ///     an             = alignment + vertical_align * 3
+    ///
+    /// with `i` the grid row (emitted row + 1, since `txt_chop_top` defaults to 1) and the
+    /// horizontal alignment left at ffmpeg's own default of 2, centre: the column analysis it does
+    /// for subtitle pages needs the per-row trim that this path never ran. Coarse on purpose. Three
+    /// bands is what the source encodes; mapping each row to its own offset makes consecutive cues
+    /// of different heights sit at different heights, which reads as a blink.
+    ///
+    /// Never overrides an `\an` that arrived, including `{\an2}`: bottom is a real answer and it
+    /// looks exactly like no answer.
+    static func gridPlacement(firstTextRow row: Int) -> SubtitleTextPlacement {
+        let gridRow = row + 1
+        let verticalAlign = 2 - min(max(gridRow + 1, 0), 23) / 8
+        return SubtitleTextPlacement(alignment: 2 + verticalAlign * 3, position: nil)
     }
 
     private static func body(for runs: [SubtitleTextRun]) -> SubtitleCue.Body? {
