@@ -399,6 +399,9 @@ extension AetherEngine {
             maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration,
             forwardBufferSegments: loadedOptions.forwardBufferSegments
         )
+        // #240: the pump claims the source link through this gate while it is fetching, so the
+        // subtitle side readers can stay out of its way. Set before start().
+        session.sideReaderLinkGate = sideReaderLinkGate
         session.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }
         }

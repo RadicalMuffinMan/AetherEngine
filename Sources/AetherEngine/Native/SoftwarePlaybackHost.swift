@@ -36,6 +36,12 @@ final class SoftwarePlaybackHost {
         demuxer?.ioWindowDiagnostics
     }
 
+    /// #240: lifetime bytes this pump pulled from the source, so the memprobe can put it next to the
+    /// subtitle side reader's own total and say which one took the link.
+    var demuxerBytesFetched: Int64? {
+        demuxer?.avioBytesFetched
+    }
+
     @Published private(set) var isReady: Bool = false
     @Published private(set) var currentTime: Double = 0
     /// Raw synchronizer clock in the SOURCE axis (same axis as demuxed packet PTS and

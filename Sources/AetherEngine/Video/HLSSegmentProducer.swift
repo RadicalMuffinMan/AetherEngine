@@ -304,6 +304,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var firstActualVideoDts: Int64 = Int64.min
     private var firstActualAudioDts: Int64 = Int64.min
 
+    /// #240: link arbitration. The pump claims the link while it is pulling from the source and
+    /// releases it while parked, so the subtitle side readers (a second full copy of the stream on
+    /// Matroska) can tell "the video path needs the bytes" from "the buffer is full". Set once
+    /// before `start()`; nil for hosts that drive the engine without one (`aetherctl`, tests).
+    var sideReaderLinkGate: SideReaderLinkGate?
+
     /// Forward-only producer restart counter; surfaced in live telemetry. Written on pump thread, read under packetCounterLock.
     var restartCount: Int {
         packetCounterLock.lock()
@@ -969,6 +975,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func awaitBackpressureRelease(target: Int, head: Int, context: String) -> Bool {
         // Already broken on this session (e.g. a teardown-flush ensureMuxer call): stay broken, don't re-park.
         if isBackpressureWedgeBroken() { return false }
+        // #240: parked means the forward buffer is full and the link is free. Released here rather
+        // than at the call sites so it is balanced whatever the park returns.
+        sideReaderLinkGate?.videoFetchEnded()
+        defer { sideReaderLinkGate?.videoFetchBegan() }
         var parked = 0
         var nextLogAt = Self.backpressureWedgeLogThresholdSeconds
         // #65 Piece A: a genuine VOD wedge is the consumer fetch target frozen past the break threshold.
@@ -1042,6 +1052,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// requested.
     private func awaitPrefetchDiskBudgetRelease(head: Int, context: String) -> Bool {
         guard prefetchDiskBudgetBytes > 0 else { return true }
+        // #240: same release as the backpressure park; a parked pump is not using the link.
+        sideReaderLinkGate?.videoFetchEnded()
+        defer { sideReaderLinkGate?.videoFetchBegan() }
         var parked = 0
         var nextLogAt = Self.prefetchDiskParkLogThresholdSeconds
         while !checkShouldStop() {
@@ -1575,6 +1588,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if restartTargetVideoPts > Int64.min {
             bumpRestartCount()
         }
+        // #240: a running pump is pulling from the source. Claimed for the whole loop and released
+        // on every exit path; the two park helpers hand it back for the duration of their wait.
+        sideReaderLinkGate?.videoFetchBegan()
+        defer { sideReaderLinkGate?.videoFetchEnded() }
         let pumpStart = DispatchTime.now()
         var packetsRead = 0
         var lastError: Int32 = 0

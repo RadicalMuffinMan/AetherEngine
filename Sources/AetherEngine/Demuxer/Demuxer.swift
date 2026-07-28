@@ -41,6 +41,20 @@ struct DemuxerOpenProfile: Sendable {
     /// ~300 ms). nil keeps the open-ended behaviour for every other path (playback streams from 0).
     var boundedInitialFetch: Int64? = nil
 
+    /// #240: what to call this demuxer's network reader in the log. Several readers run against the
+    /// same origin at once (the pump, the subtitle forward prefetcher, the native subtitle readers),
+    /// and a connection line without a name cannot say which one opened it: the reporter of #240 read
+    /// one reader's generation counter as several concurrent connections, because nothing in the line
+    /// distinguished them. Defaults to the pump, since every other path builds its profile explicitly.
+    var readerLabel: String = "pump"
+
+    /// A copy of `self` under a different reader name, for two call sites that share a profile.
+    func withReaderLabel(_ label: String) -> DemuxerOpenProfile {
+        var copy = self
+        copy.readerLabel = label
+        return copy
+    }
+
     static let playback = DemuxerOpenProfile(
         probesize: 50 * 1024 * 1024,
         maxAnalyzeDuration: 60 * 1_000_000,
@@ -58,7 +72,8 @@ struct DemuxerOpenProfile: Sendable {
         avioChunkSize: 1 * 1024 * 1024,
         avioRequestTimeout: 8,
         avioMaxRetries: 1,
-        skipStreamInfo: false
+        skipStreamInfo: false,
+        readerLabel: "extract"
     )
 
     /// A copy of `self` with only the open-time probe budget overridden (#68).
@@ -116,6 +131,7 @@ struct DemuxerOpenProfile: Sendable {
         let analyze = min(callerMaxAnalyzeDuration ?? analyzeCeiling, analyzeCeiling)
         var profile = playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: analyze)
         profile.skipStreamInfo = true
+        profile.readerLabel = "subs"
         return profile
     }
 
@@ -372,6 +388,7 @@ public final class Demuxer: @unchecked Sendable {
         let reader = AVIOReader(
             url: url,
             extraHeaders: extraHeaders,
+            label: openProfile.readerLabel,
             chunkSize: openProfile.avioChunkSize,
             prefetchEnabled: openProfile.avioPrefetch,
             isLive: isLive,

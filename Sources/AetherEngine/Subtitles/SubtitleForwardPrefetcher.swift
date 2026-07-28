@@ -17,6 +17,84 @@ import Libavutil
 /// mirroring the native subtitle readers (memory rule: all side readers share positioning fixes).
 enum SubtitleForwardPrefetcher {
 
+    /// How far behind the anchor a side reader starts reading, so the cue covering the anchor is
+    /// not already behind the read head when the first packet arrives (#112 round 10).
+    static let anchorBackscanSeconds: Double = 2.0
+
+    /// Where a positioning attempt landed. The byte estimate is a fallback, not a failure: the
+    /// reader keeps working from wherever it put the cursor, it just cannot trust timestamps.
+    enum Positioning: Equatable {
+        case seek
+        case byteEstimate
+        case failed
+    }
+
+    /// Position a side-reader demuxer at `seconds`, the one place the rules live (memory rule: all
+    /// side readers share every positioning fix). Bounded timestamp seek on the routed subtitle axis
+    /// (#234), byte-estimate fallback with the same budget when the container cannot seek by time.
+    static func reposition(
+        demuxer: Demuxer,
+        to seconds: Double,
+        anchorStreamIndex: Int32,
+        fallbackDuration: Double,
+        timeout: TimeInterval
+    ) -> Positioning {
+        let seekTo = max(0, seconds - anchorBackscanSeconds)
+        if demuxer.seekBounded(to: seekTo, anchorStreamIndex: anchorStreamIndex, timeout: timeout) {
+            return .seek
+        }
+        demuxer.markTimestampSeekUnreliable()
+        let duration = demuxer.duration > 0 ? demuxer.duration : fallbackDuration
+        return demuxer.seekByteEstimate(to: seekTo, knownDuration: duration, timeout: timeout)
+            ? .byteEstimate : .failed
+    }
+
+    /// #240: an anchor change handed to a RUNNING prefetch session, in place of tearing it down.
+    ///
+    /// A playhead jump used to rebuild the whole session: a fresh demuxer open, the Matroska
+    /// cue-index prewarm (a seek to mid-file whose only purpose is to make libavformat parse the
+    /// index that lives at EOF) and the positioning seek. Since the bounded ranges of #220 every one
+    /// of those seeks opens a fresh 32 MiB range and the origin delivers all of it, so a rebuild
+    /// costs tens of megabytes of link before a single cue is harvested, once per jump, on exactly
+    /// the constrained link where a seek is already struggling. The running session already holds an
+    /// open demuxer with a parsed index; moving its cursor is one seek.
+    ///
+    /// The anchor stream and the seek budget are captured from the session that created the box, so
+    /// an in-place move cannot drift from the session-start rules (#234: a -1 seek elects the pacing
+    /// stream by score and lands on a video keyframe in a different Matroska cluster).
+    final class SideReaderReanchor: @unchecked Sendable {
+        let anchorStreamIndex: Int32
+        let fallbackDuration: Double
+        let seekTimeout: TimeInterval
+        private let lock = NSLock()
+        private var pending: Double?
+
+        init(anchorStreamIndex: Int32, fallbackDuration: Double, seekTimeout: TimeInterval) {
+            self.anchorStreamIndex = anchorStreamIndex
+            self.fallbackDuration = fallbackDuration
+            self.seekTimeout = seekTimeout
+        }
+
+        /// Latest request wins: a seek burst leaves one move, not one per seek.
+        func request(_ seconds: Double) {
+            lock.lock()
+            pending = seconds
+            lock.unlock()
+        }
+
+        func take() -> Double? {
+            lock.lock()
+            defer { pending = nil; lock.unlock() }
+            return pending
+        }
+
+        func clear() {
+            lock.lock()
+            pending = nil
+            lock.unlock()
+        }
+    }
+
     /// Why a prefetch session ended (#231).
     ///
     /// The loop used to leave on the first failed read with no way to tell why, and its exit line
@@ -129,6 +207,8 @@ enum SubtitleForwardPrefetcher {
         pacingIndex: Int32,
         leadSeconds: Double,
         parkPollNanoseconds: UInt64,
+        link: SideReaderLinkArbiter? = nil,
+        reanchor: SideReaderReanchor? = nil,
         playhead: @Sendable () async -> Double?
     ) async -> Outcome {
         guard var playheadSnapshot = await playhead() else {
@@ -138,11 +218,63 @@ enum SubtitleForwardPrefetcher {
         var timeBaseCache: [Int32: AVRational] = [:]
         var timeBaseFailures = 0
         var exit = Exit.cancelled
+        // #240: the read position, for the link arbitration's lead. Distinct from the park's own
+        // comparison because the arbiter is asked BEFORE the read that would produce a new position.
+        var readPosition: Double? = nil
+        /// #240: the valve's grant window. Set when a yield hit the cap, checked before the next
+        /// arbitration so the reader keeps the link for a while rather than for one packet.
+        var valveGrantedUntil: DispatchTime? = nil
         let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted()
         // #220: the exit reason reaches the gauge, not just the fact that the loop stopped.
         // `defer` reads `exit` at unwind, so every break path reports the reason it set.
         defer { SubtitlePrefetchTelemetry.sessionEnded(generation: telemetryGeneration, exit: exit) }
         readLoop: while !Task.isCancelled {
+            // #240: leave the link to the video path while it needs it. Asked before the read
+            // because `readPacket` is what pulls bytes, and on Matroska it pulls the video and audio
+            // bytes too. The lead is measured from the last read position, which is what the reader
+            // has actually banked; a session that has read nothing yet counts as lead 0 and is let
+            // through by the floor rule, so positioning is never blocked behind a busy pump forever.
+            if let link, valveGrantedUntil.map({ DispatchTime.now() > $0 }) ?? true {
+                var yielded: Double = 0
+                while !Task.isCancelled,
+                      link.shouldYield(leadSeconds: max(0, (readPosition ?? playheadSnapshot) - playheadSnapshot),
+                                       yieldedSeconds: yielded) {
+                    if yielded == 0 { SubtitlePrefetchTelemetry.recordLinkYield(true) }
+                    // The playhead moves while we wait, so the lead shrinks: a reader parked behind
+                    // a busy pump returns to fetching on its own once it falls under the floor.
+                    guard let fresh = await playhead() else { break readLoop }
+                    playheadSnapshot = fresh
+                    do { try await Task.sleep(nanoseconds: link.pollNanoseconds) } catch { break readLoop }
+                    yielded += link.pollSeconds
+                }
+                if yielded > 0 { SubtitlePrefetchTelemetry.recordLinkYield(false, seconds: yielded) }
+                if yielded >= link.maxYieldSeconds {
+                    valveGrantedUntil = DispatchTime.now() + link.valveGrantSeconds
+                    EngineLog.emit(
+                        "[AetherEngine] #151 forward prefetch yielded the link for "
+                        + "\(Int(yielded))s; taking \(Int(link.valveGrantSeconds))s of it back "
+                        + "(the video path is not releasing it)",
+                        category: .engine)
+                }
+            }
+
+            // #240: re-anchor in place instead of tearing the session down and building a new one.
+            // A rebuild pays a fresh open, the Matroska cue-index prewarm and the positioning seek,
+            // and since the bounded ranges of #220 every one of those seeks costs a full 32 MiB
+            // range off the link. A seek burst rebuilt the session once per jump.
+            if let reanchor, let target = reanchor.take() {
+                let landed = reposition(demuxer: demuxer, to: target,
+                                        anchorStreamIndex: reanchor.anchorStreamIndex,
+                                        fallbackDuration: reanchor.fallbackDuration,
+                                        timeout: reanchor.seekTimeout)
+                EngineLog.emit(
+                    "[AetherEngine] #151 forward prefetch re-anchored in place at "
+                    + "\(String(format: "%.2f", target))s (\(landed))",
+                    category: .engine)
+                readPosition = nil
+                if let fresh = await playhead() { playheadSnapshot = fresh }
+            }
+
             let next: UnsafeMutablePointer<AVPacket>?
             do {
                 next = try demuxer.readPacket()
@@ -199,6 +331,7 @@ enum SubtitleForwardPrefetcher {
             // (split-set continuation chunks) never parks, its set's PCS anchor already did the
             // pacing.
             guard let position else { continue }
+            readPosition = position
             // #220 gauge: `position` is the read position on the source axis for both packet
             // kinds, a cue PTS for a harvested one and the monotone read DTS for a pacing one,
             // which is the same quantity the park decides on. Since #230 that means
