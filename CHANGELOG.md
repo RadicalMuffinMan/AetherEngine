@@ -10,6 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.23.12] - 2026-07-28
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.12))
+
+### Fixed
+
+- **A source served over a link only moderately faster than the content no longer grows the reader's window without bound.** The persistent reader applies backpressure by suspending the URLSession task above a 16 MB high water, and `suspend()` is advisory: CFNetwork keeps draining the socket and delivering to the delegate. Whether that matters depends on the link, which is why it went unseen. Against a fast origin the socket buffer fills, TCP throttles the sender, and the suspend is never asked to hold anything, so every measurement looks correct, including this project's own regression test for the mechanism. Against an origin delivering a moderate multiple of media rate the socket never fills and every byte is accepted while the task is flagged suspended: measured at 911 MB post-suspend on one reader with the window climbing linearly, and over 3 GB across both readers on a real 4K remux, taking the host machine down. The resident window is now bounded at 48 MB, three times the high water, past which the connection is ended deliberately and re-requested at the frontier once the consumer has drained it, so no delivered byte is discarded or re-fetched. The bound is sized against the peak rather than the window, since crossing it is a `Data` realloc that holds both buffers at once; a field capture with an earlier 128 MB bound in place still reached 1003 MB of live allocation with two blocks at 153 and 129 MB. Two readers exist on a subtitled source and both were affected, on the native path as much as the software one: on a direct-play source the native path runs the HLS loopback and demuxes from the origin itself. Healthy sessions sit at 16-21 MB on macOS and tvOS alike and never reach the bound. Reported and field-verified by rrgomes (#220).
+- **The malloc census no longer aborts the process it is measuring.** Its recorder runs inside `malloc_zone`'s in-use enumerator with every zone held through `force_lock`, so it must not allocate, and `for i in 0..<Int(count)` iterates a `Range` through `IndexingIterator`'s protocol witness when the call is not specialized. That allocates, which takes the same `os_unfair_lock` recursively, and libplatform aborts with "Trying to recursively lock an os_unfair_lock". Optimized builds specialize the range away and never reach it, so release builds were fine while debug builds died on the first census.
+
+### Added
+
+- **Per-reader window diagnostics in the periodic memory probe.** `pumpWinMB` / `prefWinMB` (resident window), `AheadMB` (undrained forward extent, the quantity the suspend gates on), `Susp` and `PostMB` (bytes the delegate accepted while the task was already flagged suspended) for the playback reader and the subtitle side reader separately, on both the software and native paths. `PostMB` is what separates backpressure that never engaged from backpressure that engaged and was ignored; the suspend flag alone reads identically in the healthy and the failing case.
+- **A prefetch gauge in the same line.** `prefetch=` reports the subtitle forward prefetcher's state and, once stopped, why (`eof`, `failed`, `openfail`, `cancelled`), alongside `prefetchLead`, `prefetchHarvested` and `prefetchTbFallback`. The reader works a full lead ahead of the playhead, so it reaches EOF before playback ends and a bare "stopped" state fired on every completed session.
+- **`Scripts/throttle-origin.py`**, a range-preserving throttling proxy that puts a chosen link shape in front of a real server, in single-URL or whole-server form, logging per-connection byte totals. Defects that only appear at a moderate multiple of media rate are not reachable by repeating runs on a fast link.
+
 ## [5.23.11] - 2026-07-27
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.11))
