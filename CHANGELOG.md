@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.25.0] - 2026-07-28
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.25.0))
+
+### Changed
+
+- **A declared interlaced field order is now verified against decoded frames before it routes a stream to software.** H.264 that declares interlaced carriage takes the software path so the deinterlacer can run, because tvOS AVPlayer does not deinterlace and 1080i broadcast would otherwise comb. On progressive-in-interlaced-carriage (PsF) that detour never deinterlaces anything, and European 25 fps Blu-ray masters are exactly that class, Blu-ray having no 1080p25: interlaced carriage, progressive pictures. The two signals disagree by construction. `h264_parser.c` reports `AV_FIELD_TT` for a frame-coded picture on SEI `pic_struct=3` alone, weighing neither `ct_type` nor how the slices were actually coded, while `h264_slice.c` weighs both and leaves `AV_FRAME_FLAG_INTERLACED` clear on that same picture. Routing consumed the structurally less informed of the two, so those titles gave up hardware decode, and the power and thermal headroom that goes with it, for a filter that never built a graph. `InterlaceProbe` now decodes a short sample first and applies the exact predicate that engages the deinterlacer, so it never has to judge content: `SoftwareVideoDecoder` engages on that frame flag and on nothing else, so a sample in which the flag never appears proves the detour would be a no-op and the native path renders the same frames with hardware decode. Only a clean sample overrules the declaration, an inconclusive one keeps the previous routing, and a flagged frame ends the sample at once, so genuinely interlaced material pays a frame or two of decode rather than a full sample (29 ms against 104 ms measured on 1920x1080). Seekable VOD only: the sample moves the read position of the demuxer the session reuses, and live 1080i broadcast, the case the rule exists for, is neither seekable nor mis-declared. Reported by rrgomes (#232).
+
 ## [5.24.0] - 2026-07-28
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.24.0))
