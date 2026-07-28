@@ -274,7 +274,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var connRetryAfter: TimeInterval = 0
     // Bumped on every (re)connect; stale delegate callbacks are ignored.
     private var connGeneration = 0
-    private var activeSession: URLSession?
     private var activeTask: URLSessionDataTask?
     // #174: true while the persistent task is suspended for window backpressure.
     // winCond-guarded; every suspend/resume transition goes through this flag so the
@@ -463,9 +462,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // a size; if not, abandon it (generation bump ignores a size landing in the
                 // race window). fileSize is read under the lock because the delegate thread now
                 // writes it (issue #70 review #4/#5).
-                let (haveSize, abandoned, abandonedTask, wasSuspended) = resolveOptimisticOpen()
+                let (haveSize, abandonedTask, wasSuspended) = resolveOptimisticOpen()
                 if wasSuspended { abandonedTask?.resume() }
-                abandoned?.invalidateAndCancel()
+                abandonedTask?.cancel()
                 if !haveSize {
                     // The data connection resolved no size (no-length origin, a transient 429,
                     // slow headers, or an origin whose length only comes via HEAD). Fall back to
@@ -563,21 +562,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the read means a size that lands in the race window is ignored rather than racing a
     /// half-done teardown (issue #70 review #4/#5). Returns the session to cancel outside
     /// the lock. Demux thread, open-time only; leaves the AVIO context intact (unlike close()).
-    private func resolveOptimisticOpen() -> (haveSize: Bool, abandoned: URLSession?, abandonedTask: URLSessionDataTask?, wasSuspended: Bool) {
+    private func resolveOptimisticOpen() -> (haveSize: Bool, abandonedTask: URLSessionDataTask?, wasSuspended: Bool) {
         winCond.lock()
         defer { winCond.unlock() }
-        if fileSize > 0 { return (true, nil, nil, false) }
+        if fileSize > 0 { return (true, nil, false) }
         connGeneration &+= 1
-        let session = activeSession
         let task = activeTask
         let suspended = persistentTaskSuspended
         persistentTaskSuspended = false
-        activeSession = nil
         activeTask = nil
         window = Data()
         connEnded = true
         winCond.broadcast()
-        return (false, session, task, suspended)
+        return (false, task, suspended)
     }
 
     // Close flags written on the teardown thread (markClosed / fullyClose) and read on the demux
@@ -665,18 +662,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // fresh reader's cold read, which is exactly the per-connection starvation behind the residual
         // 15-30s cold reads. The AVIO context is untouched (close() still frees it); only the socket
         // is released. Grab under winCond, invalidate outside it (mirrors close()).
-        let session = activeSession
         let task = activeTask
         let persistentWasSuspended = persistentTaskSuspended
         persistentTaskSuspended = false
-        activeSession = nil
         activeTask = nil
         connEnded = true
         winCond.broadcast()
         winCond.unlock()
         if persistentWasSuspended { task?.resume() }
         task?.cancel()
-        session?.invalidateAndCancel()
     }
 
     /// Free all resources. Separate from `markClosed` (step 1: unblock reads)
@@ -723,17 +717,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         connGeneration &+= 1
         connEnded = true
-        let session = activeSession
         let task = activeTask
         let persistentWasSuspended = persistentTaskSuspended
         persistentTaskSuspended = false
-        activeSession = nil
         activeTask = nil
         window = Data()
         winCond.broadcast()
         winCond.unlock()
         if persistentWasSuspended { task?.resume() }
-        session?.invalidateAndCancel()
+        // #220: the shared session is never invalidated, so the task has to be cancelled
+        // explicitly. Invalidating used to be what released this connection.
+        task?.cancel()
     }
 
     // MARK: - Read (called by FFmpeg on demux thread)
@@ -1390,18 +1384,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connRetryAfter = 0
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
-        let oldSession = activeSession
         let oldTask = activeTask
         let oldSuspended = persistentTaskSuspended
         persistentTaskSuspended = false
-        activeSession = nil
         activeTask = nil
         winCond.broadcast()
         winCond.unlock()
 
         // #174: balance a pending suspend before cancel (mirrors the streaming teardown).
         if oldSuspended { oldTask?.resume() }
-        oldSession?.invalidateAndCancel()
+        oldTask?.cancel()
 
         if isClosed { return }
 
@@ -1422,21 +1414,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             generation: generation,
             extraHeaders: extraHeaders
         )
-        let session = URLSession(
-            configuration: Self.makeSessionConfig(longLived: true),
-            delegate: delegate,
-            delegateQueue: nil
-        )
-        let task = session.dataTask(with: request)
+        let task = Self.persistentSession.dataTask(with: request)
+        task.delegate = delegate
 
         winCond.lock()
         // A close() that raced in bumped the generation; don't install a stale connection.
         guard generation == connGeneration, !isClosed else {
             winCond.unlock()
-            session.invalidateAndCancel()
+            task.cancel()
             return
         }
-        activeSession = session
         activeTask = task
         winCond.unlock()
 
@@ -1486,7 +1473,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // the transport's in-flight amount; the suspend count stays balanced via the flag.
         var toSuspend: URLSessionDataTask?
         var toCancel: URLSessionDataTask?
-        var cancelSession: URLSession?
         let ahead = window.count - max(0, Int(position - winStart))
         if ahead > Self.winHighWater, !persistentTaskSuspended, !isClosed {
             persistentTaskSuspended = true
@@ -1499,9 +1485,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if ahead > Self.winHardCap, !connEndedByBackpressure, !isClosed {
             connEndedByBackpressure = true
             connEnded = true
-            cancelSession = activeSession
             toCancel = activeTask
-            activeSession = nil
             activeTask = nil
             persistentTaskSuspended = false
             winCond.broadcast()
@@ -1516,7 +1500,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 category: .demux)
             toCancel.resume()   // balance the suspend so the cancel is not charged to a parked task
             toCancel.cancel()
-            cancelSession?.invalidateAndCancel()
         }
         if let firstDataMs {
             // #93/#96 residual: a slow first-data gap is release-visible so a device trace can pair it
@@ -2065,6 +2048,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private static let chunkSession: URLSession = {
         let config = makeSessionConfig()
         return URLSession(configuration: config, delegate: nil, delegateQueue: nil)
+    }()
+
+    /// #220: long-lived session for the persistent streaming path, paired with a per-task
+    /// `PersistentReadDelegate`. Bounded ranges end a connection every `persistentRangeBytes`,
+    /// and a session per connection would make each of those a fresh TLS handshake against the
+    /// origin. The delegate carries the connection generation, so per-task assignment is all
+    /// that was ever needed here. The per-request-session rule from the task-pool leak does not
+    /// apply: it was scoped to completion-handler tasks, and this path is delegate-based, which
+    /// is what removed the retention in the first place.
+    ///
+    /// Never invalidated. Releasing a connection is `task.cancel()` now, not session teardown.
+    private static let persistentSession: URLSession = {
+        URLSession(configuration: makeSessionConfig(longLived: true), delegate: nil, delegateQueue: nil)
     }()
 
     /// Outcome of an abortable semaphore wait (issue #27).
