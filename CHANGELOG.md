@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The subtitle forward prefetcher positions on the subtitle axis explicitly, so a seek landing several keyframes behind the destination is delivered again.** 5.23.11 added a pacing stream at `AVDISCARD_NONKEY` (#230) to give the reader a read-position control point between sparse cues, and that flag silently moved the seek. The reader positions with `avformat_seek_file(ctx, -1, ...)`, and a -1 stream index leaves the reference stream to `av_find_default_stream_index`, whose score awards +200 to any stream with `discard != AVDISCARD_ALL`. Until 5.23.10 the subtitle stream was the only stream not fully discarded and therefore won that vote, 200 to 75, by accident rather than by intent: the target was measured on the subtitle axis and the seek landed on the last cue at or before it. `AVDISCARD_NONKEY` is not `AVDISCARD_ALL`, so from 5.23.11 the pacing stream collected the same +200 and video outranked it at 275. On Matroska the seek then jumps to the cluster holding the last video keyframe and everything in earlier clusters is never read, so a line that starts well behind the destination, the shape a long cue with a distant clear produces, was gone before the first packet arrived. Nothing downstream could recover it: the landing display set was never decoded, so neither the #143 candidate seed nor the #204 finalize ever saw it. The anchor is now passed explicitly (`seekBounded(to:anchorStreamIndex:timeout:)`), which also converts the target into that stream's own time base, so positioning no longer depends on what else the source happens to deliver. The park from #230 is unchanged. Not reproducible on MP4, which is why the #230 tests did not catch it: `mov_read_seek` re-seeks every stream individually and backwards, while `matroska_read_seek` jumps to one cluster position for all of them. Reported by cmcpherson274 with a bisection across four releases on identical fixture bytes (#234).
+
 ## [5.25.0] - 2026-07-28
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.25.0))
