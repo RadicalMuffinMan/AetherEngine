@@ -36,10 +36,23 @@ struct Issue174PersistentReadBackpressureTests {
         private var _bytesWritten: Int64 = 0
         private var _connFDs: [Int32] = []
         private var _stopped = false
+        private var _requestedRanges: [(start: Int64, end: Int64?)] = []
 
         var bytesWritten: Int64 {
             lock.lock(); defer { lock.unlock() }
             return _bytesWritten
+        }
+
+        /// #220: what each request actually asked for. `end` is nil for an open-ended
+        /// `bytes=X-`, which is what live sources and unresolved sizes keep using.
+        var requestedRanges: [(start: Int64, end: Int64?)] {
+            lock.lock(); defer { lock.unlock() }
+            return _requestedRanges
+        }
+
+        var rangeRequestCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return _requestedRanges.count
         }
 
         private var stopped: Bool {
@@ -123,32 +136,52 @@ struct Issue174PersistentReadBackpressureTests {
             }
         }
 
+        /// One connection, many requests: a bounded-range reader issues the next range on the
+        /// same socket, so serving exactly one and hanging up would force a new connection per
+        /// range and make the pooling measurement meaningless.
         private func serve(_ fd: Int32) {
-            guard let request = readRequestHeader(fd) else { return }
+            while !stopped {
+                if !serveOneRequest(fd) { return }
+            }
+        }
+
+        /// Returns false when the connection should close (client gone, or a malformed request).
+        private func serveOneRequest(_ fd: Int32) -> Bool {
+            guard let request = readRequestHeader(fd) else { return false }
             var offset: Int64 = 0
+            var rangeEnd: Int64? = nil
             if let rangeLine = request.components(separatedBy: "\r\n")
                 .first(where: { $0.lowercased().hasPrefix("range:") }),
                let eq = rangeLine.range(of: "bytes="),
-               let dash = rangeLine.range(of: "-", range: eq.upperBound..<rangeLine.endIndex),
-               let start = Int64(rangeLine[eq.upperBound..<dash.lowerBound]) {
-                offset = start
+               let dash = rangeLine.range(of: "-", range: eq.upperBound..<rangeLine.endIndex) {
+                if let start = Int64(rangeLine[eq.upperBound..<dash.lowerBound]) { offset = start }
+                let tail = rangeLine[dash.upperBound...].trimmingCharacters(in: .whitespaces)
+                if !tail.isEmpty, let end = Int64(tail) { rangeEnd = min(end, totalSize - 1) }
             }
-            let remaining = totalSize - offset
+            lock.lock()
+            _requestedRanges.append((offset, rangeEnd))
+            lock.unlock()
+
+            let last = rangeEnd ?? (totalSize - 1)
+            let remaining = last - offset + 1
+            // Keep-alive, not close: a bounded range that tears the socket down would make every
+            // refill a fresh connection and would hide exactly the pooling question under test.
             let header = "HTTP/1.1 206 Partial Content\r\n"
-                + "Content-Range: bytes \(offset)-\(totalSize - 1)/\(totalSize)\r\n"
+                + "Content-Range: bytes \(offset)-\(last)/\(totalSize)\r\n"
                 + "Content-Length: \(remaining)\r\n"
                 + "Accept-Ranges: bytes\r\n"
-                + "Connection: close\r\n\r\n"
-            guard writeFully(fd, Array(header.utf8)) else { return }
+                + "Connection: keep-alive\r\n\r\n"
+            guard writeFully(fd, Array(header.utf8)) else { return false }
 
             let chunk = [UInt8](repeating: 0x55, count: chunkBytes)
             var served: Int64 = 0
             while served < remaining && !stopped {
                 let n = Int(min(Int64(chunkBytes), remaining - served))
-                guard writeBody(fd, Array(chunk[0..<n])) else { return }
+                guard writeBody(fd, Array(chunk[0..<n])) else { return false }
                 served += Int64(n)
                 if throttleUs > 0 { usleep(throttleUs) }
             }
+            return true
         }
 
         private func readRequestHeader(_ fd: Int32) -> String? {
@@ -257,5 +290,20 @@ struct Issue174PersistentReadBackpressureTests {
         reader.markClosed()
         reader.close()
         #expect(!reader.persistentTaskIsSuspendedForTesting)
+    }
+
+    /// #220: bounded ranges cannot be exercised against an origin that ignores the range end.
+    /// It would stream to EOF whatever was asked for, and every later assertion about window
+    /// size or request count would be measuring the server's behaviour instead of the reader's.
+    @Test("the test origin serves exactly the requested range and no more")
+    func originHonoursFiniteRange() async throws {
+        let server = try #require(ThrottledOriginServer(totalSize: 512 * 1024 * 1024))
+        defer { server.stop() }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        request.setValue("bytes=0-1048575", forHTTPHeaderField: "Range")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 206)
+        #expect(data.count == 1024 * 1024)
+        #expect(server.requestedRanges.first?.end == 1_048_575)
     }
 }
