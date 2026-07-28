@@ -8,8 +8,9 @@ import Libavutil
 /// finds no cues, text and bitmap alike. This reader fills the same session SubtitlePacketStore
 /// up to playhead + lead independently of the producer: it reads every embedded subtitle stream
 /// (all other streams discarded, #104), parks on the subtitle PTS axis, and resumes as the
-/// playhead advances. Overlapping packets dedupe by PTS in the store; split-PES PGS sets assemble
-/// under the `.prefetch` writer key so the pump's in-flight set is never corrupted.
+/// playhead advances. A packet the pump already harvested collapses onto its entry in the store on
+/// a byte-identical payload (#235: not on the PTS, which distinct cues share); split-PES PGS sets
+/// assemble under the `.prefetch` writer key so the pump's in-flight set is never corrupted.
 ///
 /// This is the loop half only; positioning (bounded seek + byte-estimate fallback), lifecycle,
 /// and seek re-anchoring live on the engine (`AetherEngine.startSubtitleForwardPrefetcher`),

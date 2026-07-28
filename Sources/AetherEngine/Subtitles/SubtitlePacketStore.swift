@@ -41,8 +41,9 @@ final class SubtitlePacketStore: @unchecked Sendable {
     static let maxPendingDisplaySetBytes: Int = 16 * 1024 * 1024
 
     /// #151: which reader is writing. The pump and the forward prefetcher can both feed the same
-    /// stream; completed entries dedupe by PTS in appendLocked, but an in-assembly display set
-    /// must stay private to its writer or the two would interleave chunks into one corrupt set.
+    /// stream; a completed entry re-harvested by the other collapses on a byte-identical payload in
+    /// appendLocked (#235: the PTS alone does not identify it), but an in-assembly display set must
+    /// stay private to its writer or the two would interleave chunks into one corrupt set.
     enum Writer: Hashable, Sendable {
         case pump
         case prefetch
@@ -117,11 +118,14 @@ final class SubtitlePacketStore: @unchecked Sendable {
                                          durationSeconds: durationSeconds,
                                          flags: flags,
                                          payload: payload)
-        // Multiple packets can share a PTS (e.g. ASS/SSA overlapping events).
-        // Only collapse true re-harvests: matching PTS and byte-identical payload.
-        let insertAt = entries.firstIndex { $0.ptsSeconds >= ptsSeconds } ?? entries.count
+        // #235: several packets legitimately share a PTS. ASS/SSA authors overlapping lines on
+        // identical Start/End, and a karaoke or layered-style track puts a whole burst of distinct
+        // Dialogue events on one timestamp. Only a byte-identical payload is the pump and the
+        // prefetcher re-harvesting the same packet (#151), and only that collapses. Anything else
+        // joins the end of the run, so a shared timestamp reaches the drainer in harvest order:
+        // the drainer decodes a window in array order and later events layer over earlier ones.
+        var probe = Self.lowerBound(entries, ptsSeconds)
         var duplicateIndex: Int?
-        var probe = insertAt
         while probe < entries.count, entries[probe].ptsSeconds == ptsSeconds {
             if entries[probe].payload == payload {
                 duplicateIndex = probe
@@ -133,7 +137,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
             bytes -= entries[duplicateIndex].payload.count
             entries[duplicateIndex] = entry
         } else {
-            entries.insert(entry, at: insertAt)
+            entries.insert(entry, at: probe)
         }
         bytes += payload.count
         while bytes > perStreamCap, entries.count > 1 {
@@ -145,6 +149,26 @@ final class SubtitlePacketStore: @unchecked Sendable {
         touchCounter &+= 1
         lastTouchByStream[streamIndex] = touchCounter
         enforceAggregateCapLocked(justTouched: streamIndex)
+    }
+
+    /// First index at or past `ptsSeconds` in a PTS-sorted run. Harvest is near-monotonic, but the
+    /// forward prefetcher (#151) backfills far behind the frontier, so the position is searched
+    /// rather than assumed. Searched in log time rather than scanned from the front: the scan made
+    /// one append O(n) and a session's harvest O(n^2) in retained packets, which #235 turned from
+    /// academic into load-bearing, since a dense ASS track now keeps every event on a shared
+    /// timestamp instead of collapsing the burst to one entry.
+    static func lowerBound(_ entries: [StoredSubtitlePacket], _ ptsSeconds: Double) -> Int {
+        var low = 0
+        var high = entries.count
+        while low < high {
+            let mid = low + (high - low) / 2
+            if entries[mid].ptsSeconds < ptsSeconds {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low
     }
 
     /// #166: bound retained bytes across ALL streams. Evict oldest entries from the coldest
