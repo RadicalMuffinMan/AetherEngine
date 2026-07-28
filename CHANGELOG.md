@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.24.0] - 2026-07-28
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.24.0))
+
+### Changed
+
+- **The persistent reader now requests a bounded range at a time instead of the rest of the file.** 5.23.12 bounded the resident window by ending the connection once it passed 48 MB, which caught the damage but left the cause: the reader asked for `bytes=X-`, the entire remainder of the source, and then tried to regulate the resulting flow by suspending the URLSession task, which CFNetwork treats as advisory. It now asks for 32 MB and re-requests at the frontier once the consumer drains below the 8 MB low water, so the resident window is bounded by construction (low water plus one range, 40 MB) rather than by reaction, and no delivered byte is discarded or re-fetched at a boundary. The refill is issued from the low-water crossing rather than from an empty window, so a range boundary does not become a stall. A full range delivery is recognised as a planned end and takes its own path: no backoff, no unproductive-reconnect charge, no `.reconnecting` phase and no `lastUnplannedReconnectAt`, because nothing failed and spending the give-up budget on range boundaries would kill the reader on a healthy link. All persistent connections now share one `URLSession` with a per-task delegate, the pattern the chunk path has used since the task-pool leak was fixed, so a range boundary is not a TLS handshake; releasing a connection is `task.cancel()` rather than session teardown. Live sources and any source whose total size is not yet resolved keep the open-ended form. Measured against a real 52.7 GB 4K HEVC remux over a link shaped to 1.46x media rate, the band where the defect actually appears: post-suspend delivery 29-124 MB to zero, cap events 8 to zero, malloc 142-201 MB to 92-151 MB, window peak 51 MB to 21 MB, with playback, subtitle counts and stall counts unchanged. Keep-Alive verified from the server side, 90 range requests served over 3 connections. The 48 MB cap and the task suspend both stay in place as a net that should now never engage, so a firing cap is a signal rather than the normal ceiling.
+
 ## [5.23.12] - 2026-07-28
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.23.12))
