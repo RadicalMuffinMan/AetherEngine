@@ -4,6 +4,32 @@ import AVFoundation
 
 extension AetherEngine {
 
+    /// #220 diagnostic opt-in: appends a live large-block census (blocks >= 1 MB, bucketed by
+    /// size class) to the 30 s memprobe line. A flat `mallocBlocks` with a rising `mallocMB`
+    /// identifies "one large buffer is growing" but not which one; the census names the size
+    /// class so the search does not depend on having guessed the site.
+    ///
+    /// Off by default and intended for triage builds only: the walk holds every malloc zone
+    /// through `force_lock`, which briefly blocks allocating threads.
+    ///
+    /// Enabling also arms a jump trigger on its own queue (see `MallocBlockCensusTrigger`). The 30 s
+    /// memprobe cannot catch a failure that completes inside one sample, which is what every kill on
+    /// #220 turned out to be, so the counter is polled at `triggerPollHz` and the zone walk runs once
+    /// it climbs `triggerThresholdMB` above its running high-water. Pass `triggerPollHz: 0` for the
+    /// plain 30 s census with no watcher.
+    public nonisolated static func setLargeAllocationCensusEnabled(
+        _ enabled: Bool,
+        triggerThresholdMB: Int = 64,
+        triggerPollHz: Double = 8
+    ) {
+        MallocBlockCensus.isEnabled = enabled
+        if enabled {
+            MallocBlockCensus.startTriggerWatch(thresholdMB: triggerThresholdMB, pollHz: triggerPollHz)
+        } else {
+            MallocBlockCensus.stopTriggerWatch()
+        }
+    }
+
     // MARK: - Buffer probe
 
     /// Seconds of AVPlayer buffer ahead of the current playhead (sum of loadedTimeRanges beyond now). 0 on SW path / pre-start.
@@ -96,10 +122,32 @@ extension AetherEngine {
                     mallocStr = ""
                 }
 
+                // #220: the two readers of a subtitled VOD session, separately attributable.
+                // `ahead` above winHighWater (16 MB) with `susp=0` is backpressure that never
+                // engaged; the pump's own window is the control.
+                //
+                // Both paths, not just software. On a direct-play source the native path runs
+                // the HLS loopback, so `HLSVideoEngine` demuxes from the origin through an
+                // AVIOReader of its own and only the remuxed segments reach AVPlayer. Its
+                // producer parks whenever the forward buffer is full, which is exactly the
+                // shape that lets a connection ignoring the suspend keep filling the window,
+                // and the #174 field crash it was built against (HTTPS origin, boringssl in
+                // the stack) was on this path. Reporting software-only hid that.
+                let pumpWin = self.softwareHost?.ioWindowDiagnostics
+                    ?? self.nativeVideoSession?.demuxer?.ioWindowDiagnostics
+                let prefetchWin = self.subtitleForwardPrefetchDemuxer?.ioWindowDiagnostics
+                let readerStr = Self.readerWindowFragment(pump: pumpWin, prefetch: prefetchWin)
+
                 let line = "[AetherEngine] memprobe t=\(elapsed)s "
                     + "rss=\(rssMB)MB "
                     + vmStr
                     + mallocStr
+                    // #220: empty unless the host opted in. A flat mallocBlocks with a rising
+                    // mallocMB says one large buffer is growing but not which; this names the
+                    // size class. `peak` is the watcher's high-water, which survives a step the
+                    // 30 s cadence never sampled.
+                    + MallocBlockCensus.probeFragment()
+                    + (MallocBlockCensus.isEnabled ? "peakMB=\(MallocBlockCensus.peakSizeInUseMB) " : "")
                     + "avioFetchedMB=\(avioMB) "
                     + "cacheCount=\(cacheCount) cacheMB=\(cacheMB) "
                     + "packetsWritten=\(packetsWritten) "
@@ -109,6 +157,11 @@ extension AetherEngine {
                     + "srvConns=\(srvConns) srvBytesMB=\(srvBytesMB) srvSfMB=\(srvSfMB) "
                     + "pktAlive=\(pktAlive) pktTotal=\(pktTotal) "
                     + "subCues=\(cueCount) "
+                    + readerStr
+                    // #220: the lead is the live tell. It is visible minutes before a kill and
+                    // separates "reads fast while building its lead" from "the lead never settles".
+                    + SubtitlePrefetchTelemetry.probeFragment(playhead: self.sourceTime)
+                    + "swFrames=\(self.softwareHostFramesEnqueued) "
                     + "audioTracks=\(self.audioTracks.count) "
                     + "subTracks=\(self.subtitleTracks.count) "
                     + "subActive=\(self.isSubtitleActive) "
@@ -182,6 +235,30 @@ extension AetherEngine {
         malloc_zone_statistics(nil, &stats)
         return (blocksInUse: Int(stats.blocks_in_use),
                 sizeInUseMB: Int(stats.size_in_use / 1024 / 1024))
+    }
+
+    /// #220: one memprobe fragment per live `AVIOReader` window. `win` is the whole buffer,
+    /// `ahead` the undrained forward extent that `appendPersistentData` gates the suspend on.
+    /// `ahead` far above winHighWater (16 MB) while `susp=0` means the backpressure never
+    /// engaged, which is a different defect from a transport overshoot past a suspend that did.
+    /// `postMB` is what the transport delivered after the suspend was issued. #174 priced that
+    /// as a bounded in-flight overshoot; a value tracking the whole window says `suspend()` is
+    /// not stopping delivery, so the high water bounds nothing at all.
+    nonisolated static func readerWindowFragment(
+        pump: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?,
+        prefetch: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?
+    ) -> String {
+        func fragment(
+            _ prefix: String,
+            _ w: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)?
+        ) -> String {
+            guard let w else { return "" }
+            return "\(prefix)WinMB=\(w.windowBytes / 1024 / 1024) "
+                + "\(prefix)AheadMB=\(w.aheadBytes / 1024 / 1024) "
+                + "\(prefix)Susp=\(w.suspended ? 1 : 0) "
+                + "\(prefix)PostMB=\(w.postSuspendBytes / 1024 / 1024) "
+        }
+        return fragment("pump", pump) + fragment("pref", prefetch)
     }
 
     // MARK: - Live telemetry bridge

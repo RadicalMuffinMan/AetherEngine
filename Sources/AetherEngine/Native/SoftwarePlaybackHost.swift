@@ -30,6 +30,12 @@ final class SoftwarePlaybackHost {
     private let framesEnqueuedLock = NSLock()
     nonisolated(unsafe) private var _framesEnqueued: Int = 0
 
+    /// #220: the pump demuxer's network sliding window, for the periodic memprobe. Paired with
+    /// the subtitle side reader's own window, the two connections are separately attributable.
+    var ioWindowDiagnostics: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)? {
+        demuxer?.ioWindowDiagnostics
+    }
+
     @Published private(set) var isReady: Bool = false
     @Published private(set) var currentTime: Double = 0
     /// Raw synchronizer clock in the SOURCE axis (same axis as demuxed packet PTS and

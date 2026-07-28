@@ -137,6 +137,10 @@ enum SubtitleForwardPrefetcher {
         var timeBaseCache: [Int32: AVRational] = [:]
         var timeBaseFailures = 0
         var exit = Exit.cancelled
+        let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted()
+        // #220: the exit reason reaches the gauge, not just the fact that the loop stopped.
+        // `defer` reads `exit` at unwind, so every break path reports the reason it set.
+        defer { SubtitlePrefetchTelemetry.sessionEnded(generation: telemetryGeneration, exit: exit) }
         readLoop: while !Task.isCancelled {
             let next: UnsafeMutablePointer<AVPacket>?
             do {
@@ -171,6 +175,7 @@ enum SubtitleForwardPrefetcher {
                 var p: UnsafeMutablePointer<AVPacket>? = pkt
                 trackedPacketFree(&p)
                 timeBaseFailures += 1
+                SubtitlePrefetchTelemetry.recordTimeBaseFallback()
                 if timeBaseFailures == 1 {
                     EngineLog.emit(
                         "[AetherEngine] #151 forward prefetch: no usable time base for stream "
@@ -193,12 +198,24 @@ enum SubtitleForwardPrefetcher {
             // (split-set continuation chunks) never parks, its set's PCS anchor already did the
             // pacing.
             guard let position else { continue }
+            // #220 gauge: `position` is the read position on the source axis for both packet
+            // kinds, a cue PTS for a harvested one and the monotone read DTS for a pacing one,
+            // which is the same quantity the park decides on. Since #230 that means
+            // `prefetchLead` tracks the reader rather than the last cue, so on a sparse track it
+            // now moves between cues instead of standing still.
+            SubtitlePrefetchTelemetry.recordPacket(seconds: position, harvested: harvested)
+            var didPark = false
             while !Task.isCancelled, position > playheadSnapshot + leadSeconds {
+                if !didPark {
+                    didPark = true
+                    SubtitlePrefetchTelemetry.recordPark(true)
+                }
                 guard let fresh = await playhead() else { break readLoop }
                 playheadSnapshot = fresh
                 if position <= playheadSnapshot + leadSeconds { break }
                 do { try await Task.sleep(nanoseconds: parkPollNanoseconds) } catch { break readLoop }
             }
+            if didPark { SubtitlePrefetchTelemetry.recordPark(false) }
         }
         return Outcome(exit: exit, harvested: harvested)
     }
