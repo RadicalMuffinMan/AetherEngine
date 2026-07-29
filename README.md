@@ -171,7 +171,10 @@ player.$discTitles                             // [TitleInfo]: id, name, duratio
 player.$selectedDiscTitle                      // TitleInfo?
 player.selectTitle(id: titleID)                // switch title (rebuilds from the new title's head)
 player.$discChapters                           // [ChapterInfo] for the selected title
-player.selectChapter(id: chapterID)            // seek to a chapter
+player.selectChapter(id: chapterID)            // seek to a chapter (disc chapters only)
+
+// Container chapters (Matroska / MP4; empty for disc sources, which publish discChapters instead)
+player.$mediaChapters                          // [ChapterInfo]; startSeconds are seek(to:) timestamps
 
 // Info panel / Now Playing (iOS / tvOS)
 player.setExternalMetadata([ AVMetadataItem(/* title, artwork, etc. */) ])

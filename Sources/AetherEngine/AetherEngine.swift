@@ -3358,6 +3358,12 @@ public final class AetherEngine: ObservableObject {
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
         fontAttachments = []
+        // Container chapters belong to the source URL, not to the pipeline, so they follow the same rule:
+        // every reopen of the same source (audio switch, iOS background return, #127 expiry) runs through
+        // stopInternal without re-probing, and a wipe there would strip them for the rest of the session.
+        // Disc chapters are NOT in this block: a title switch really does change them, and the reload path
+        // recaptures them from the reopened demuxer.
+        mediaChapters = []
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
@@ -4102,7 +4108,6 @@ public final class AetherEngine: ObservableObject {
         discTitles = []
         selectedDiscTitle = nil
         discChapters = []
-        mediaChapters = []
         activeDiscTitleID = nil
         sourceStartSeconds = 0
         isLive = false

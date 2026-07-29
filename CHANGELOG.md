@@ -10,7 +10,9 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Container chapters as `mediaChapters`.** Matroska and MP4 chapters are read off the probe demuxer at load and published as `@Published mediaChapters: [ChapterInfo]`, so a host can bind a chapter picker for ordinary files the way it already can for discs. Empty for disc sources, which keep publishing `discChapters`; unlike those, a container chapter's `startSeconds` is already a timestamp on the `seek(to:)` axis and needs no base (`selectChapter(id:)` stays disc-only). Ids are sequential in start order, untitled entries are numbered, and a chapter's duration runs to the next chapter's start rather than to its declared end, because muxers routinely write `end == start`. Contributed by natedogg058 (#179).
 
 ## [5.28.2] - 2026-07-29
 
