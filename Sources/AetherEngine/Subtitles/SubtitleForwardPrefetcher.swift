@@ -228,9 +228,6 @@ enum SubtitleForwardPrefetcher {
         var timeBaseCache: [Int32: AVRational] = [:]
         var timeBaseFailures = 0
         var exit = Exit.cancelled
-        // #240: the read position, for the link arbitration's lead. Distinct from the park's own
-        // comparison because the arbiter is asked BEFORE the read that would produce a new position.
-        var readPosition: Double? = nil
         /// #240: the valve's grant window. Set when a yield hit the cap, checked before the next
         /// arbitration so the reader keeps the link for a while rather than for one packet.
         var valveGrantedUntil: DispatchTime? = nil
@@ -290,7 +287,6 @@ enum SubtitleForwardPrefetcher {
                 // Stamped here rather than at request time so the window between the two reads
                 // as unresolved instead of validating a position the seek has not reached yet.
                 SubtitlePrefetchTelemetry.recordReanchor(seekGeneration: target.seekGeneration)
-                readPosition = nil
                 anchorGraceUntil = DispatchTime.now()
                     + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
                 if let fresh = await playhead() { playheadSnapshot = fresh }
@@ -352,7 +348,6 @@ enum SubtitleForwardPrefetcher {
             // (split-set continuation chunks) never parks, its set's PCS anchor already did the
             // pacing.
             guard let position else { continue }
-            readPosition = position
             // #220 gauge: `position` is the read position on the source axis for both packet
             // kinds, a cue PTS for a harvested one and the monotone read DTS for a pacing one,
             // which is the same quantity the park decides on. Since #230 that means
