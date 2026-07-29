@@ -12,6 +12,18 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.0.0] - 2026-07-29
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.0.0))
+
+### Added
+
+- **visionOS is a supported build platform.** `Package.swift` declares `.visionOS(.v1)`, and the engine builds for visionOS device and simulator against FFmpegBuild 2.4.0 and LibDovi 1.1.0, which carry the `xros` slices. Three source sites learned about the platform: the AV1 supplemental-decoder registration in `VTCapabilityProbe` (a platform absent from `#available` counts as available, so visionOS reached an API introduced in 26.2), the AirPlay observation (`AVPlayer.isExternalPlaybackActive` is unavailable there, so the whole serve-the-loopback-over-the-LAN path is compiled out and inert), and `SampleBufferRenderer` (`preventsDisplaySleepDuringVideoPlayback` does not exist and `preferredDynamicRange` arrives in 26.0). The tvOS-only display-criteria layer needed nothing: visionOS has no HDMI mode handshake, so the criteria-free routing the iOS path already uses applies. Playback on real hardware is unverified. Requested by jihongboo (#161).
+
+### Changed
+
+- **BREAKING: the tvOS floor is 17.0, up from 16.0.** This is a correction rather than a new requirement. LibDovi compiles its tvOS slices with `-mtvos-version-min=17.0` and declares `.tvOS(.v17)`, so a consumer building this engine against tvOS 16 was already linking a binary that never supported it; the manifest simply claimed otherwise. It surfaces now because the LibDovi release carrying the visionOS slices also carries that correction. Nothing else in the public API changed, and no symbol was removed or renamed.
+
 ## [5.29.0] - 2026-07-29
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.29.0))
