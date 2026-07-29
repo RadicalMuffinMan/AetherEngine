@@ -343,8 +343,9 @@ Pin to `.upToNextMinor(from: "5.29.0")` for stricter teams that prefer to opt in
 | | Min |
 | --- | --- |
 | iOS | 16.0 |
-| tvOS | 16.0 |
+| tvOS | 17.0 |
 | macOS | 14.0 |
+| visionOS | 1.0 |
 | Swift | 6.0 |
 | Xcode | 16.0 |
 

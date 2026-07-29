@@ -3424,14 +3424,28 @@ public final class AetherEngine: ObservableObject {
     private(set) var airPlayActive = false
     private var externalPlaybackObservation: NSKeyValueObservation?
 
+    /// Current external-playback state, or false where the platform has no such route.
+    /// `AVPlayer.isExternalPlaybackActive` is unavailable on visionOS: video goes to the wearer's
+    /// displays, there is no receiver to hand the stream to, so the whole #86 / #227 serve-the-loopback-
+    /// over-the-LAN path is inert there.
+    private var isExternalPlaybackActiveNow: Bool {
+        #if os(visionOS)
+        return false
+        #else
+        return currentAVPlayer?.isExternalPlaybackActive ?? false
+        #endif
+    }
+
     private func observeExternalPlayback() {
         externalPlaybackObservation?.invalidate()
         externalPlaybackObservation = nil
+        #if !os(visionOS)
         guard let player = currentAVPlayer else { return }
         externalPlaybackObservation = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, change in
             let active = change.newValue ?? false
             Task { @MainActor in self?.handleExternalPlaybackChange(active: active) }
         }
+        #endif
     }
 
     /// #227: an external-playback edge arrived while the reload this observer started was still running, so
@@ -3597,9 +3611,9 @@ public final class AetherEngine: ObservableObject {
     func reconcileExternalPlaybackAfterReload() {
         guard externalPlaybackEdgeHeld else { return }
         externalPlaybackEdgeHeld = false
-        let active = (currentAVPlayer?.isExternalPlaybackActive ?? false) || Self.isWirelessAirPlayRoute()
+        let active = isExternalPlaybackActiveNow || Self.isWirelessAirPlayRoute()
         EngineLog.emit("[AirPlay] reconciling the held edge after the reload: active=\(active) "
-                       + "(player=\(currentAVPlayer?.isExternalPlaybackActive ?? false) "
+                       + "(player=\(isExternalPlaybackActiveNow) "
                        + "route=\(Self.isWirelessAirPlayRoute()))", category: .engine)
         handleExternalPlaybackChange(active: active)
     }
