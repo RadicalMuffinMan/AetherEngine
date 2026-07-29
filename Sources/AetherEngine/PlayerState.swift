@@ -725,6 +725,25 @@ public struct SubtitleCue: Identifiable, Sendable {
     }
 }
 
+extension SubtitleCue {
+    /// Copy of this cue with only the named fields changed; everything else is carried across.
+    ///
+    /// #233 follow-up (tresby): the store operations rebuild a cue to change one field, and every
+    /// one of them did it by calling the memberwise initializer with the fields it happened to know
+    /// about. `placement` is defaulted there for source compatibility, so each of those call sites
+    /// dropped it and still compiled, and `insertCueSorted` stamps every cue entering the retained
+    /// store, which meant no embedded track could ever deliver a placement to a host. Rebuilding
+    /// through here instead makes the carry-over the default and the drop impossible to write by
+    /// accident, including for whatever field is added to the cue next.
+    func with(id: Int? = nil, endTime: Double? = nil, body: Body? = nil) -> SubtitleCue {
+        SubtitleCue(id: id ?? self.id,
+                    startTime: startTime,
+                    endTime: endTime ?? self.endTime,
+                    body: body ?? self.body,
+                    placement: placement)
+    }
+}
+
 extension SubtitleCue: Equatable {
     public static func == (lhs: SubtitleCue, rhs: SubtitleCue) -> Bool {
         // ID monotonic per session; sufficient for SwiftUI diffing without comparing CGImage refs.
