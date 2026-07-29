@@ -12,6 +12,14 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.0.2] - 2026-07-29
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.0.2))
+
+### Added
+
+- **The subtitle path now states how far it has decoded display state, on the absolute source axis and fenced by generation.** After a far seek lands, nothing in the log could tell "the pipeline has determined the display state here" from "it has produced nothing yet"; on a PGS track with no acquisition point those are indistinguishable from outside, and that distinction is the whole adjudication for a conformance harness. One line per active drain target, at post-seek reconstruction, on the 30 s cadence, at prefetcher EOF, and whenever the frontier's source changes: `[AetherEngine] #250 subtitle-resolution loadGen= seekGen= stream= coveredFrom= resolvedThrough= via= decodedThrough= reason=`. `resolvedThrough` is the decode window clamped to a harvest frontier, never the window's own lead edge (which would claim determination over unread bytes) and never the drain cursor alone (which stands still through every dialogue pause on a sparse track), with `via=prefetch|eof|pump` stating which frontier bounds the claim and therefore what the number is worth. Requested by cmcpherson274. No published property, no behaviour change.
+
 ## [6.0.1] - 2026-07-29
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.0.1))
