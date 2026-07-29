@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [5.28.2] - 2026-07-29
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.28.2))
+
 ### Fixed
 
 - **A disc image leaked every byte it read.** `HTTPDiscIOReader` and `FileIOReader` are driven from FFmpeg's read callback, which runs on a demux pump thread that stays inside one dispatch block for the whole session and so never drains its autorelease pool, so every body they bridged out on that thread was stranded until playback ended. On a remote Blu-ray ISO that is up to 8 MB per range request, several a second, once per reader fork (main demuxer, subtitle side demuxer, forward prefetcher), which is the ~30 MB/s of `mallocMB` growth the reporter measured; RSS looks flat because the pages are never touched again and go to the compressor, and the process is eventually jetsammed. Both readers now drain per read, and the SMB reader got the same treatment. Measured against a local range origin, 480 MB fetched left +968 MB in use before and 0 MB after, and 128 MB read through the file reader left +134 MB before and 0 MB after. A per-request `URLSession` fixes nothing here (+973 MB), which also retires the older reading of the AVIOReader leak as URLSession retaining completed bodies until invalidation: the owner was always the caller thread's pool. Reported by bitxeno (#243).
