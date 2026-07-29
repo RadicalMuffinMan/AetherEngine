@@ -10,7 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A remote HLS VOD source died when the load-time probe failed for an unrelated reason.** The AE#154 reroute onto the native remote-HLS bypass keys on the reader's typed `hlsPlaylistOnVODPath` classification, but that classification only reaches it when the load-time probe is the open that reads the playlist body. If the probe failed transiently first, the load fell through to the loopback path with no preopened demuxer, `HLSVideoEngine.start()` reopened the URL, and that second open produced the classification, which was then interpolated into `openFailed(reason:)` and lost its domain. A playable source failed terminally with `HLS playlist supplied to the VOD loopback path`, while a manual retry (whose first probe happened to see the body) played natively. The fallback open now rethrows both HLS classifications verbatim, and a load that reaches one takes the same AE#154 reroute, preserving URL, headers and resume position. Reported by qoli (#246).
+- **The remote-HLS bypass ignored the resume position.** `LoadOptions.nativeRemoteHLS` routes before the probe, and that branch never forwarded `startPosition`, so a VOD playlist restarted at zero whether the host requested the bypass directly or arrived on it through a reroute. VOD now honors the anchor; live keeps its no-initial-seek contract even when a host passes one.
 
 ## [5.28.2] - 2026-07-29
 

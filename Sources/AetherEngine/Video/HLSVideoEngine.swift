@@ -709,6 +709,27 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     // MARK: - Public API
 
+    /// AE#246: map a failed fallback open onto the error the caller sees.
+    ///
+    /// The fallback open runs when the load-time probe did not hand over a demuxer, which includes
+    /// the case where that probe failed for a transient reason. It is then the FIRST open to read
+    /// the source body, so it is the one that produces the reader's HLS classification. Interpolating
+    /// that typed error into `openFailed(reason:)` erased its domain and made a reroutable remote-HLS
+    /// source terminal; the classification is rethrown verbatim so `load()` can still reach the AE#154
+    /// reroute (`hlsPlaylistOnVODPath`) or the AE#140 fail-closed rejection (`hlsPlaylistOnRawLivePath`).
+    /// Every other failure keeps the historical wrapped shape.
+    static func openFailure(from error: Error) -> Error {
+        if let readerError = error as? AVIOReaderError {
+            switch readerError {
+            case .hlsPlaylistOnVODPath, .hlsPlaylistOnRawLivePath:
+                return readerError
+            default:
+                break
+            }
+        }
+        return HLSVideoEngineError.openFailed(reason: "\(error)")
+    }
+
     public func start() throws -> URL {
         guard demuxer == nil else { throw HLSVideoEngineError.alreadyStarted }
 
@@ -722,7 +743,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             do {
                 try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: openProfile, isLive: isLiveSession)
             } catch {
-                throw HLSVideoEngineError.openFailed(reason: "\(error)")
+                throw Self.openFailure(from: error)
             }
         }
         demuxer = dem
