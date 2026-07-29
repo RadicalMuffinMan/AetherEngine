@@ -254,6 +254,7 @@ enum SubtitleForwardPrefetcher {
                 if yielded > 0 { SubtitlePrefetchTelemetry.recordLinkYield(false, seconds: yielded) }
                 if yielded >= link.maxYieldSeconds {
                     valveGrantedUntil = DispatchTime.now() + link.valveGrantSeconds
+                    SubtitlePrefetchTelemetry.recordLinkValveGrant()
                     EngineLog.emit(
                         "[AetherEngine] #151 forward prefetch yielded the link for "
                         + "\(Int(yielded))s; taking \(Int(link.valveGrantSeconds))s of it back "

@@ -1311,6 +1311,13 @@ extension AetherEngine {
                 }
                 if yielded >= link.maxYieldSeconds {
                     valveGrantedUntil = DispatchTime.now() + link.valveGrantSeconds
+                    // Same line the #151 prefetcher emits, because a grant that is not logged
+                    // reads from the outside like a reader taking the link without permission.
+                    EngineLog.emit(
+                        "[AetherEngine] native subtitle readers yielded the link for "
+                        + "\(Int(yielded))s; taking \(Int(link.valveGrantSeconds))s of it back "
+                        + "(the video path is not releasing it)",
+                        category: .engine)
                 }
             }
             guard let pkt = try? demuxer.readPacket() else { break }

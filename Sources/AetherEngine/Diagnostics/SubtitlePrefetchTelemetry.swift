@@ -29,10 +29,20 @@ enum SubtitlePrefetchTelemetry {
         var timeBaseFallbacks = 0
         /// #240: the reader is holding the link for the video path right now.
         var linkYield = false
-        /// #240: cumulative seconds spent yielding the link. On a link with room this stays near
-        /// zero; a number that tracks playback time says the source is barely faster than the
-        /// content and the lookahead is being paid for out of the video path's budget.
+        /// #240: cumulative seconds spent yielding the link, counting EVERY priority yield: a seek
+        /// in flight, a producer that is fetching, both. It is not the valve's counter, and the
+        /// two surfaces are meant to disagree. `#151 forward prefetch yielded the link for` is
+        /// logged once per valve grant, so a session can hold seconds of ordinary yield here with
+        /// no such line anywhere in the log. On a link with room this stays low but not at zero,
+        /// because a seek yields unconditionally; a number that tracks playback time says the
+        /// source is barely faster than the content and the lookahead is being paid for out of
+        /// the video path's budget.
         var linkYieldSeconds = 0.0
+        /// #240: times the continuous-yield cap fired and the reader took the link back anyway.
+        /// The escape hatch is the risky half of a strict priority, so it gets a number rather
+        /// than only a log line: non-zero says the video path claimed the link for a full
+        /// `maxYieldSeconds` without parking, which is a finding whether or not cues went missing.
+        var linkValveGrants = 0
         /// Why the loop stopped, nil while it runs. Reported instead of a bare `dead`, which
         /// could not tell the defect apart from the expected end of a session: the reader works
         /// `leadSeconds` ahead, so it reaches EOF a full lead before the playhead does and every
@@ -70,6 +80,11 @@ enum SubtitlePrefetchTelemetry {
 
     static func recordPark(_ parked: Bool) {
         state.withLock { $0.parked = parked }
+    }
+
+    /// #240: the continuous-yield cap fired and the reader is taking its grant window.
+    static func recordLinkValveGrant() {
+        state.withLock { $0.linkValveGrants &+= 1 }
     }
 
     /// #240: enter or leave a link yield. `seconds` is charged on the way out, so the cumulative
@@ -115,5 +130,6 @@ enum SubtitlePrefetchTelemetry {
             + "prefetchHarvested=\(s.harvested) "
             + "prefetchTbFallback=\(s.timeBaseFallbacks) "
             + "prefetchYielded=\(String(format: "%.0f", s.linkYieldSeconds))s "
+            + "prefetchValve=\(s.linkValveGrants) "
     }
 }

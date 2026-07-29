@@ -12,7 +12,21 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.0.1] - 2026-07-29
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.0.1))
+
+### Fixed
+
+- **Every 5.x tag stopped resolving, and 6.0.0 pinned the cause.** LibDovi published the visionOS slices and the tvOS floor correction together as 1.1.0. A raised platform floor is a breaking change, so it belonged in a major: SwiftPM resolved that new minor into every consumer pinning `from: "1.0.x"`, then failed the build on the floor mismatch instead of backing off to a version that fits. Any AetherEngine 5.x tag, all of which declare tvOS 16 and `LibDovi from: "1.0.2"`, became unbuildable on a fresh resolve within hours of that release. Reported by cmcpherson274 while retesting #240 on 5.28.0. The same content is now published as LibDovi 2.0.0 and the 1.1.0 tag is withdrawn, so the 5.x line resolves back to 1.0.2 and builds again; this engine pins `from: "2.0.0"`. 6.0.0 itself points at the withdrawn tag and no longer resolves, so it is superseded by this release rather than merely followed by it.
+
+### Changed
+
+- **The subtitle side readers no longer take the link without leaving a trace.** `prefetchYielded` counts every priority yield, a seek in flight as much as a producer that is fetching, while the `yielded the link for` line is emitted once per continuous-yield-cap grant, so a session can legitimately show seconds of yield with no such line anywhere. Reading the two as one number is a mistake this codebase invited and then made in an issue reply. The memprobe now carries `prefetchValve=N` next to `prefetchYielded=Ns` so the escape hatch has a figure of its own, and the native subtitle readers log their grants in the same shape the #151 prefetcher does instead of taking them silently.
+
 ## [6.0.0] - 2026-07-29
+
+**Superseded by 6.0.1: this tag pins the withdrawn LibDovi 1.1.0 and no longer resolves.**
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.0.0))
 
