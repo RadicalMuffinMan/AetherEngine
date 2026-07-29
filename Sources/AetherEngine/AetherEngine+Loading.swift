@@ -132,6 +132,31 @@ extension AetherEngine {
     /// Lean native-HLS live path: AVPlayerItem from the remote URL on the reused NativeAVPlayerHost. No Demuxer, no HLSVideoEngine, no loopback, no display-criteria handshake (AVKit drives match-content). Live-window surfaces come from `host.seekableEnd`.
     /// `startPosition` (AE#154): resume anchor for VOD playlists on the loopback reroute; nil keeps
     /// the historical no-initial-seek behavior every live caller relies on.
+    /// Build a native host carrying the current Now-Playing ownership choice. Read at creation only:
+    /// a host preserved across a native->native reload (issue #15) keeps what it was created with,
+    /// which is the point, since re-creating it is what breaks AVKit's MediaRemote registration.
+    func makeNativeHost() -> NativeAVPlayerHost {
+        #if os(tvOS) || os(iOS)
+        return NativeAVPlayerHost(ownsNowPlayingSession: ownsVideoNowPlayingSession)
+        #else
+        return NativeAVPlayerHost()
+        #endif
+    }
+
+    /// Replay the staged Now-Playing identity onto a host, and re-assert session ownership. The
+    /// re-assert mirrors the audio path: a preserved host never re-runs init, so a session another
+    /// app took over in the meantime would otherwise never be claimed back. Both no-op for a host
+    /// that owns no session.
+    func replayVideoNowPlayingInfo(to host: NativeAVPlayerHost) {
+        #if os(tvOS) || os(iOS)
+        guard host.ownsNowPlayingSession else { return }
+        if !pendingVideoNowPlayingInfo.isEmpty {
+            host.setNowPlayingInfo(pendingVideoNowPlayingInfo)
+        }
+        host.becomeActiveNowPlaying()
+        #endif
+    }
+
     func loadRemoteHLS(url: URL, options: LoadOptions, startPosition: Double? = nil) async throws {
         playbackBackend = .native
         // #168 follow-up: detect a superseding load()/stop() between the carriage verdict and the reroute.
@@ -141,12 +166,13 @@ extension AetherEngine {
         if let existing = nativeHost {
             host = existing
         } else {
-            host = NativeAVPlayerHost()
+            host = makeNativeHost()
         }
         host.playerLayer.videoGravity = _videoGravity
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
         }
+        replayVideoNowPlayingInfo(to: host)
         self.nativeHost = host
         // A surface bound BEFORE load ran presentCurrentLayer() while nativeHost was still nil
         // (no-op); without this re-present nothing ever attaches host.playerLayer and AVPlayer
@@ -742,13 +768,14 @@ extension AetherEngine {
         if let existing = nativeHost {
             host = existing
         } else {
-            host = NativeAVPlayerHost()
+            host = makeNativeHost()
         }
         host.playerLayer.videoGravity = _videoGravity
         // Forward pre-load externalMetadata so the AVPlayerItem picks it up before AVPlayer assigns it.
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
         }
+        replayVideoNowPlayingInfo(to: host)
         self.nativeHost = host
         applyDesiredVolume(to: host)
         // Publish before wiring mirrors so subscribers see the AVPlayer before the first time update. Only emit on change: re-publishing the same instance retriggers the AVKit re-registration this reuse path avoids.
