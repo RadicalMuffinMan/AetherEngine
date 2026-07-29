@@ -2008,7 +2008,12 @@ public final class AetherEngine: ObservableObject {
         // Routed before the probe because we never demux the m3u8.
         if options.nativeRemoteHLS {
             do {
-                try await loadRemoteHLS(url: url, options: options)
+                // AE#246: a VOD playlist honors the resume anchor here the same way the AE#154 reroute
+                // does; without it a rerouted (or directly requested) VOD bypass always restarted at 0.
+                // Live keeps the no-initial-seek contract every live caller relies on, so its anchor
+                // stays nil even when the host passes one.
+                try await loadRemoteHLS(url: url, options: options,
+                                        startPosition: options.isLive ? nil : startPosition)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -2120,7 +2125,7 @@ public final class AetherEngine: ObservableObject {
         // domain, so reroute this load onto the nativeRemoteHLS bypass instead of surfacing the
         // former bare AVERROR_INVALIDDATA. loadedOptions flips so every downstream consumer
         // (audio-tap reader selection, seek paths) sees a genuine remote-HLS session.
-        if RemoteHLSMediaSelection.shouldReroute(probeFailure: probeFailure, isCustomSource: isCustomSource),
+        if RemoteHLSMediaSelection.shouldReroute(failure: probeFailure, isCustomSource: isCustomSource),
            case .url(let hlsURL) = source {
             EngineLog.emit("[AetherEngine] AE#154: HLS playlist on the VOD loopback path; rerouting to the native remote-HLS bypass", category: .engine)
             loadedOptions.nativeRemoteHLS = true
@@ -2639,6 +2644,26 @@ public final class AetherEngine: ObservableObject {
             // Superseded.
             throw CancellationError()
         } catch {
+            // AE#246: the load-time probe failed for a reason that was not the HLS classification, so the
+            // AE#154 check above saw an inconclusive failure and this load fell through to the loopback
+            // path with no preopened demuxer. The session's own open is then the first one to read the
+            // body, and it has now classified the source as remote HLS after all. Take the same reroute
+            // rather than surfacing a terminal failure for a source AVPlayer can play. A full load()
+            // restart (the #168 reroute's shape) is what clears the half-built loopback session; the
+            // bypass runs no probe, so this cannot bounce back here a second time.
+            if RemoteHLSMediaSelection.shouldReroute(failure: error, isCustomSource: isCustomSource),
+               case .url(let hlsURL) = source,
+               loadGeneration == gen {
+                EngineLog.emit(
+                    "[AetherEngine] AE#246: the loopback session's own open classified the source as HLS; "
+                    + "taking the AE#154 reroute onto the native remote-HLS bypass",
+                    category: .engine
+                )
+                var rerouted = loadedOptions
+                rerouted.nativeRemoteHLS = true
+                _ = try await load(source: .url(hlsURL), startPosition: startPosition, options: rerouted)
+                return nil
+            }
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
         }
