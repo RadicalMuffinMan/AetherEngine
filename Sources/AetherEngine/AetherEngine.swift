@@ -238,6 +238,11 @@ public final class AetherEngine: ObservableObject {
     /// Chapters of the selected title. Empty until Blu-ray chapter parsing ships (Phase 2); declared
     /// now so hosts can bind the picker against a stable API.
     @Published public internal(set) var discChapters: [ChapterInfo] = []
+    /// Container (Matroska/MP4) chapters of the loaded source, from the probe demuxer at load. Empty
+    /// when the container declares none and for disc sources (whose chapters publish on `discChapters`
+    /// with title-relative seek semantics). `startSeconds` values are content timestamps a host passes
+    /// straight to `seek(to:)`.
+    @Published public internal(set) var mediaChapters: [ChapterInfo] = []
     /// The id of the title the disc demuxer should (re)open with. Mirrors `selectedDiscTitle?.id` but
     /// kept as plain state so it survives the stopInternal inside a reload and threads into audio-switch /
     /// background-resume reopens (a URL-disc reopen with no id would silently revert to the main title).
@@ -1982,6 +1987,7 @@ public final class AetherEngine: ObservableObject {
         discTitles = []
         selectedDiscTitle = nil
         discChapters = []
+        mediaChapters = []
         subtitleCueDiagnosticCount = 0
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
         // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
@@ -2002,7 +2008,12 @@ public final class AetherEngine: ObservableObject {
         // Routed before the probe because we never demux the m3u8.
         if options.nativeRemoteHLS {
             do {
-                try await loadRemoteHLS(url: url, options: options)
+                // AE#246: a VOD playlist honors the resume anchor here the same way the AE#154 reroute
+                // does; without it a rerouted (or directly requested) VOD bypass always restarted at 0.
+                // Live keeps the no-initial-seek contract every live caller relies on, so its anchor
+                // stays nil even when the host passes one.
+                try await loadRemoteHLS(url: url, options: options,
+                                        startPosition: options.isLive ? nil : startPosition)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -2114,7 +2125,7 @@ public final class AetherEngine: ObservableObject {
         // domain, so reroute this load onto the nativeRemoteHLS bypass instead of surfacing the
         // former bare AVERROR_INVALIDDATA. loadedOptions flips so every downstream consumer
         // (audio-tap reader selection, seek paths) sees a genuine remote-HLS session.
-        if RemoteHLSMediaSelection.shouldReroute(probeFailure: probeFailure, isCustomSource: isCustomSource),
+        if RemoteHLSMediaSelection.shouldReroute(failure: probeFailure, isCustomSource: isCustomSource),
            case .url(let hlsURL) = source {
             EngineLog.emit("[AetherEngine] AE#154: HLS playlist on the VOD loopback path; rerouting to the native remote-HLS bypass", category: .engine)
             loadedOptions.nativeRemoteHLS = true
@@ -2166,6 +2177,7 @@ public final class AetherEngine: ObservableObject {
         // clamped to an in-range id); non-disc sources report empty/nil (#67).
         discTitles = probeOpened ? probe.discTitleInfos() : []
         discChapters = probeOpened ? probe.discChapterInfos() : []
+        mediaChapters = (probeOpened && discTitles.isEmpty) ? probe.mediaChapterInfos() : []
         activeDiscTitleID = probeOpened ? probe.selectedDiscTitleID : nil
         selectedDiscTitle = activeDiscTitleID.flatMap { id in discTitles.first { $0.id == id } }
         // Content start PTS for the software-path chapter-seek base (see sourceStartSeconds). start_time is
@@ -2632,6 +2644,26 @@ public final class AetherEngine: ObservableObject {
             // Superseded.
             throw CancellationError()
         } catch {
+            // AE#246: the load-time probe failed for a reason that was not the HLS classification, so the
+            // AE#154 check above saw an inconclusive failure and this load fell through to the loopback
+            // path with no preopened demuxer. The session's own open is then the first one to read the
+            // body, and it has now classified the source as remote HLS after all. Take the same reroute
+            // rather than surfacing a terminal failure for a source AVPlayer can play. A full load()
+            // restart (the #168 reroute's shape) is what clears the half-built loopback session; the
+            // bypass runs no probe, so this cannot bounce back here a second time.
+            if RemoteHLSMediaSelection.shouldReroute(failure: error, isCustomSource: isCustomSource),
+               case .url(let hlsURL) = source,
+               loadGeneration == gen {
+                EngineLog.emit(
+                    "[AetherEngine] AE#246: the loopback session's own open classified the source as HLS; "
+                    + "taking the AE#154 reroute onto the native remote-HLS bypass",
+                    category: .engine
+                )
+                var rerouted = loadedOptions
+                rerouted.nativeRemoteHLS = true
+                _ = try await load(source: .url(hlsURL), startPosition: startPosition, options: rerouted)
+                return nil
+            }
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
         }
@@ -3351,6 +3383,12 @@ public final class AetherEngine: ObservableObject {
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
         fontAttachments = []
+        // Container chapters belong to the source URL, not to the pipeline, so they follow the same rule:
+        // every reopen of the same source (audio switch, iOS background return, #127 expiry) runs through
+        // stopInternal without re-probing, and a wipe there would strip them for the rest of the session.
+        // Disc chapters are NOT in this block: a title switch really does change them, and the reload path
+        // recaptures them from the reopened demuxer.
+        mediaChapters = []
         videoFormat = .sdr
         sourceVideoFormat = .sdr
         sourceDVProfile = nil

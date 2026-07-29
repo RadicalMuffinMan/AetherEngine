@@ -721,6 +721,75 @@ public final class Demuxer: @unchecked Sendable {
         )
     }
 
+    /// One container chapter as read off `AVChapter`, decoupled from the C struct so the mapping
+    /// below is a pure function.
+    struct RawContainerChapter: Equatable {
+        let start: Double
+        let end: Double
+        let title: String?
+    }
+
+    /// Map raw container chapters onto the public model: sorted by start, re-ided sequentially so ids
+    /// stay stable list indices for hosts, untitled entries numbered "Chapter N" (matching the disc
+    /// naming).
+    ///
+    /// A chapter's declared end is never trusted for its duration when a successor exists, because
+    /// real-world MKV muxes routinely write `end == start`; the duration runs to the next chapter's
+    /// start instead. The last entry has no successor, so it falls back to its declared end, and
+    /// then to the container duration when that end is degenerate too, which is the same mux bug
+    /// landing on the one chapter the next-start rule cannot cover.
+    static func chapterInfos(from raw: [RawContainerChapter], containerDuration: Double?) -> [ChapterInfo] {
+        let sorted = raw.sorted { $0.start < $1.start }
+        return sorted.enumerated().map { i, ch in
+            let end: Double
+            if i + 1 < sorted.count {
+                end = sorted[i + 1].start
+            } else if ch.end > ch.start {
+                end = ch.end
+            } else if let duration = containerDuration, duration > ch.start {
+                end = duration
+            } else {
+                end = ch.start
+            }
+            let trimmed = ch.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = (trimmed?.isEmpty == false) ? trimmed! : "Chapter \(i + 1)"
+            return ChapterInfo(id: i, name: name,
+                               startSeconds: ch.start,
+                               durationSeconds: Swift.max(0, end - ch.start))
+        }
+    }
+
+    /// Container (Matroska/MP4) chapters mapped to the public model. Empty when the container declares
+    /// none. Disc sources keep their playlist/IFO chapters via `discChapterInfos`; both can coexist and
+    /// the engine picks. See `chapterInfos(from:containerDuration:)` for the id, naming and duration rules.
+    func mediaChapterInfos() -> [ChapterInfo] {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext,
+              ctx.pointee.nb_chapters > 0,
+              let chapterList = ctx.pointee.chapters else { return [] }
+
+        var raw: [RawContainerChapter] = []
+        raw.reserveCapacity(Int(ctx.pointee.nb_chapters))
+        for i in 0..<Int(ctx.pointee.nb_chapters) {
+            guard let chapter = chapterList[i]?.pointee else { continue }
+            let tb = chapter.time_base
+            // num == 0 would scale every timestamp to zero, collapsing the whole list onto 0 s.
+            guard tb.den > 0, tb.num > 0, chapter.start != Int64.min else { continue }
+            let scale = Double(tb.num) / Double(tb.den)
+            let start = Swift.max(0, Double(chapter.start) * scale)
+            let end = chapter.end != Int64.min ? Double(chapter.end) * scale : start
+            raw.append(RawContainerChapter(
+                start: start,
+                end: end,
+                title: metadataValue(chapter.metadata, key: "title")
+            ))
+        }
+        let declared = ctx.pointee.duration
+        let containerDuration = declared > 0 ? Double(declared) / Double(AV_TIME_BASE) : nil
+        return Self.chapterInfos(from: raw, containerDuration: containerDuration)
+    }
+
     private func attachedPictureData() -> Data? {
         guard let ctx = formatContext else { return nil }
         for i in 0..<Int(ctx.pointee.nb_streams) {
