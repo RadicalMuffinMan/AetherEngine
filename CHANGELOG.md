@@ -12,6 +12,14 @@ the public-API contract.
 
 _Nothing yet._
 
+## [5.28.1] - 2026-07-29
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.28.1))
+
+### Fixed
+
+- **`SubtitleCue.placement` reached the host on sidecars but never on an embedded track.** 5.26.0 added the field and the decoders fill it correctly, but every operation on the retained cue store rebuilt the cue through the memberwise initializer to change one field, listing the fields it happened to know about. `placement` is defaulted there for source compatibility, so those call sites dropped it and still compiled. The decisive one stamps the session-monotonic id on every cue entering the store, so nothing arriving through the drained embedded path could carry a placement at all, and the #107 text trim would have dropped it a second time on each teletext page transition. That is the split the reporter saw: WebVTT placement worked because a sidecar's cues are published as decoded, teletext placement did not because it is an embedded track. Cue rebuilds now go through one copy helper that carries every field it is not asked to change. Reported by tresby (#233).
+
 ## [5.28.0] - 2026-07-28
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.28.0))
