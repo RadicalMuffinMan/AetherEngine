@@ -110,6 +110,10 @@ public final class AetherEngine: ObservableObject {
     /// preventing a superseded seek from clobbering a newer one.
     private var seekGeneration: UInt64 = 0
 
+    /// #250: read-only view of the seek fence for the subtitle-resolution statement. Read-only on
+    /// purpose: only `seek(to:)` may move the counter, and a diagnostic must not be able to.
+    var currentSeekGeneration: UInt64 { seekGeneration }
+
     /// Two independent seek-in-flight flags that isSeeking OR-s over. Programmatic and native scrub seeks
     /// are NOT mutually exclusive: a far programmatic seek triggers the same producer-restart as a scrub.
     /// Tracked separately so neither can drop isSeeking before the other settles. Routed through
@@ -476,6 +480,10 @@ public final class AetherEngine: ObservableObject {
     var softwareSubtitlePacketStore: SubtitlePacketStore?
     var subtitleDrainDecoders: [SubtitleChannel: EmbeddedSubtitleDecoder] = [:]
     var subtitleDrainCursors: [SubtitleChannel: SubtitleDrainCursor] = [:]
+    /// #250: the frontier source of the last statement emitted per channel, so a change of source
+    /// (the prefetcher dying, EOF landing) gets its own line instead of waiting for the 30 s
+    /// cadence. nil before the first statement of a session.
+    var subtitleResolutionLastFrontier: [SubtitleChannel: SubtitleResolutionStatement.Frontier] = [:]
     /// #151: subtitle-only forward side reader filling the session packet store up to
     /// playhead + subtitleDrainLeadSeconds independent of the producer's forward park, so the
     /// drainer's lead window holds cues for host-applied ADVANCE sync offsets (text and bitmap).
