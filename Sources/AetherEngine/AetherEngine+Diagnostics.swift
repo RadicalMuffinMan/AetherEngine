@@ -53,6 +53,9 @@ extension AetherEngine {
     func startMemoryProbe() {
         memoryProbeTask?.cancel()
         let sessionStart = Date()
+        // #243: the disc pull path's byte tally is session-scoped like `elapsed`, so it can be read
+        // as a rate off two probe lines.
+        HTTPDiscIOReader.resetLifetimeFetchedBytes()
         // #134: currentTime()/loadedTimeRanges are sync XPC reads; hop them off the main actor.
         let probeReadQueue = DispatchQueue(label: "engine.memprobe.avfread", qos: .utility)
         memoryProbeTask = Task { @MainActor [weak self] in
@@ -88,6 +91,7 @@ extension AetherEngine {
                 // Zero on SW path or pre-start; 30 s cadence makes non-atomic field drift irrelevant.
                 let stats = self.nativeVideoSession?.diagnosticStats()
                 let avioMB = (stats?.avioBytesFetched ?? 0) / 1024 / 1024
+                let discFetchedMB = HTTPDiscIOReader.lifetimeFetchedBytes / 1024 / 1024
                 let cacheMB = (stats?.segmentCacheBytes ?? 0) / 1024 / 1024
                 let cacheCount = stats?.segmentCacheCount ?? 0
                 let packetsWritten = stats?.producerPacketsWritten ?? 0
@@ -153,6 +157,11 @@ extension AetherEngine {
                     + MallocBlockCensus.probeFragment()
                     + (MallocBlockCensus.isEnabled ? "peakMB=\(MallocBlockCensus.peakSizeInUseMB) " : "")
                     + "avioFetchedMB=\(avioMB) "
+                    // #243: only the disc pull path fills this, and only then is it printed. On a
+                    // remote ISO every reader fork pulls through HTTPDiscIOReader, which
+                    // `avioFetchedMB` does not see at all, so without it the one path doing the
+                    // reading is the one path with no counter.
+                    + (discFetchedMB > 0 ? "discFetchedMB=\(discFetchedMB) " : "")
                     + "cacheCount=\(cacheCount) cacheMB=\(cacheMB) "
                     + "packetsWritten=\(packetsWritten) "
                     + "audioFifo=\(audioFifo) "
