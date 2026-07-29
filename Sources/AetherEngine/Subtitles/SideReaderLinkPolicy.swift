@@ -16,10 +16,10 @@ import Foundation
 /// The arbitration is a strict priority, not a share: playback is load-bearing, subtitle lookahead
 /// is not. The side reader fetches while the video path does not need the link, which on a fast link
 /// is nearly always (the producer parks as soon as its forward buffer is full) and on a starved link
-/// is the time between catch-up bursts. Two escapes keep it from being a mute switch: a lead floor,
-/// so a reader that has nothing ahead of the playhead may always fetch, and a continuous-yield cap,
-/// so a video path that never parks (a wedged pump, a host that never reports one) cannot silently
-/// disable subtitle lookahead for the rest of the session.
+/// is the time between catch-up bursts. Two escapes keep it from being a mute switch: a grace window
+/// after each anchor, so a freshly selected track fills even against a busy video path, and a
+/// continuous-yield cap, so a video path that never parks (a wedged pump, a host that never reports
+/// one) cannot silently disable subtitle lookahead for the rest of the session.
 enum SideReaderLinkPolicy {
 
     /// How long a side reader may fetch unconditionally after it anchors or re-anchors, so the cues
