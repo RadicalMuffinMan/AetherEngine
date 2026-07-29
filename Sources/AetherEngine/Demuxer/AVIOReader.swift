@@ -2123,8 +2123,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// Long-lived session for seekable-path chunk fetches paired with per-task
     /// ChunkFetchDelegate. Delegate-based incremental delivery (not completion-handler)
-    /// releases source dispatch_data per delivery, avoiding the task-pool accumulation
-    /// that drove the original leak (completion-handler style). No invalidation overhead.
+    /// releases source dispatch_data per delivery on the delegate queue, so the body never
+    /// reaches the demux thread's autorelease pool, which is what drove the original leak.
+    /// No invalidation overhead.
     private static let chunkSession: URLSession = {
         let config = makeSessionConfig()
         return URLSession(configuration: config, delegate: nil, delegateQueue: nil)
@@ -2134,9 +2135,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// `PersistentReadDelegate`. Bounded ranges end a connection every `persistentRangeBytes`,
     /// and a session per connection would make each of those a fresh TLS handshake against the
     /// origin. The delegate carries the connection generation, so per-task assignment is all
-    /// that was ever needed here. The per-request-session rule from the task-pool leak does not
-    /// apply: it was scoped to completion-handler tasks, and this path is delegate-based, which
-    /// is what removed the retention in the first place.
+    /// that was ever needed here. The old per-request-session rule does not apply, and #243
+    /// showed why it never could: measured against a range origin, a session per request leaks
+    /// exactly as much as a shared one (+973 MB vs +968 MB per 480 MB fetched). What retains a
+    /// completion-handler body is the never-draining autorelease pool of the demux thread that
+    /// bridges it out, not the session. This path is delegate-based, so the body is released on
+    /// the delegate queue and never reaches that pool.
     ///
     /// Never invalidated. Releasing a connection is `task.cancel()` now, not session teardown.
     private static let persistentSession: URLSession = {
