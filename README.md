@@ -112,8 +112,14 @@ player.$state          // .idle, .loading, .playing, .paused, .seeking, .ended, 
                        // .ended = played to completion (any backend); .idle = pre-load / stopped
 player.$duration
 player.$videoFormat    // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
-player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs)
+player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs, and
+                       // seeks stashed before the session can take them)
 player.$seekTarget     // in-flight seek destination (source-PTS), nil otherwise
+player.seekEvents      // AnyPublisher<SeekEvent, Never>: .began / .landed(renderedTime:) /
+                       // .stalled / .superseded / .rejected, each with the target it belongs to.
+                       // Use this where the FALLING edge of $isSeeking matters: the level cannot
+                       // say whether a seek landed, gave up, or was superseded, and a seek that
+                       // gave up can still land minutes later on a stalled source.
 player.$playbackPhase  // unified: .idle/.loading/.playing/.paused/.seeking/.rebuffering/
                        // .stalled(reconnecting:)/.ended/.error. One source of truth for a status
                        // spinner; derived from state + isBuffering + isSeeking + source reconnect.
