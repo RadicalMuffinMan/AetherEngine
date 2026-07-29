@@ -120,6 +120,14 @@ player.$playbackPhase  // unified: .idle/.loading/.playing/.paused/.seeking/.reb
                        // Prefer this over stitching the raw signals or matching EngineLog text.
 player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession)
 
+// System Now-Playing on the native video path (tvOS / iOS). Off by default: an
+// AVPlayerViewController host already gets this from AVKit and must NOT opt in.
+// Custom-transport hosts set it before load(), then register commands on the
+// session and stage identity through setVideoNowPlayingInfo.
+player.ownsVideoNowPlayingSession = true
+player.videoNowPlayingSession                  // MPNowPlayingSession?, nil unless opted in
+player.setVideoNowPlayingInfo([ /* MPMediaItemProperty… */ ])
+
 // Time lives on player.clock, a SEPARATE ObservableObject, so the ~10 Hz
 // ticks never fire objectWillChange on the engine (track lists / state views
 // don't re-render per tick; native tvOS Menu dropdowns stay stable).

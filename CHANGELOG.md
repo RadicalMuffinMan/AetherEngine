@@ -10,7 +10,9 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **System Now-Playing on the native video path, opt-in.** A host with a custom transport can now let the engine own an `MPNowPlayingSession` bound to the native player: set `ownsVideoNowPlayingSession` before `load()`, register transport commands on the published `videoNowPlayingSession`, and stage identity metadata with `setVideoNowPlayingInfo(_:)`, which is replayed onto every fresh `AVPlayerItem` (readiness-gate reloads, media fallback, in-place PiP swaps). The session lives on the native host, so it survives native->native reloads and keeps system Now-Playing ownership across a background pause, the same shape the audio path already had. It is off by default and must stay off under `AVPlayerViewController`, which owns Now-Playing itself; two owners leave an empty identity card and remote commands routed into a session with no handlers. Contributed by natedogg058 (#180).
 
 ## [5.28.2] - 2026-07-29
 

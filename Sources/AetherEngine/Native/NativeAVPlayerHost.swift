@@ -134,7 +134,7 @@ final class NativeAVPlayerHost {
     #if os(tvOS) || os(iOS)
     /// Now-Playing session bound to THIS player (same rationale as
     /// AudioAVPlayerHost): the shared MPRemoteCommandCenter /
-    /// MPNowPlayingInfoCenter aren't reliably bound to a bare AVPlayer — a
+    /// MPNowPlayingInfoCenter aren't reliably bound to a bare AVPlayer, a
     /// background pause (rate 0) drops the app as active Now-Playing and the
     /// shared center stops receiving commands. Owning the session keeps
     /// ownership across pause; it also persists with the host across
@@ -143,34 +143,63 @@ final class NativeAVPlayerHost {
     /// `nowPlayingSession.remoteCommandCenter` and stage per-item metadata
     /// via `setNowPlayingInfo`; auto-publish merges the player-derived
     /// elapsed/rate/duration, so nobody writes the shared info center.
-    let nowPlayingSession: MPNowPlayingSession
+    ///
+    /// nil unless the host opted in. The audio host can own its session
+    /// unconditionally because it is always a bare AVPlayer; this player is
+    /// also consumed by `AVPlayerViewController` hosts, where AVKit owns
+    /// Now-Playing through private MediaRemote and WWDC22's guidance is not to
+    /// bring a session of our own (the AudioAVPlayerHost comment quotes it).
+    /// Claiming one there costs the host AVKit's card, its `externalMetadata`
+    /// and its working transport commands.
+    private(set) var nowPlayingSession: MPNowPlayingSession?
     #endif
 
     /// Per-item Now-Playing dictionary (identity keys + a force-decoded,
     /// @Sendable-wrapped MPMediaItemArtwork) replayed onto every new item so
     /// readiness-gate master reloads, media fallbacks, and in-place swaps
-    /// keep the system card.
+    /// keep the system card. Staged even when no session is owned, so a host
+    /// that opts in on a later load does not lose what it set.
     private var pendingNowPlayingInfo: [String: Any] = [:]
 
-    init() {
+    /// Whether this host owns a Now-Playing session (see `nowPlayingSession`).
+    let ownsNowPlayingSession: Bool
+
+    init(ownsNowPlayingSession: Bool = false) {
         let player = AVPlayer()
         // Keep automaticallyWaitsToMinimizeStalling at default true: false caused permanent startup stall on 4K HEVC (rate dropped to 0 after asset.load and never resumed).
         self.avPlayer = player
         self.playerLayer = AVPlayerLayer(player: player)
         self.playerLayer.videoGravity = .resizeAspect
+        self.ownsNowPlayingSession = ownsNowPlayingSession
         #if os(tvOS) || os(iOS)
-        nowPlayingSession = MPNowPlayingSession(players: [player])
-        nowPlayingSession.automaticallyPublishesNowPlayingInfo = true
-        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        if ownsNowPlayingSession {
+            let session = MPNowPlayingSession(players: [player])
+            session.automaticallyPublishesNowPlayingInfo = true
+            session.becomeActiveIfPossible(completion: { _ in })
+            nowPlayingSession = session
+        }
+        #endif
+    }
+
+    /// Re-assert Now-Playing ownership. Mirrors `AudioAVPlayerHost`: a host preserved across a
+    /// native->native reload never re-runs init, so without this the session that another app (or
+    /// another engine path) took over in the meantime is never claimed back. No-op when no session
+    /// is owned.
+    func becomeActiveNowPlaying() {
+        #if os(tvOS) || os(iOS)
+        nowPlayingSession?.becomeActiveIfPossible(completion: { _ in })
         #endif
     }
 
     /// Stage (and immediately apply) the per-item system Now-Playing
-    /// dictionary. Identity keys only — the auto-publishing session owns
+    /// dictionary. Identity keys only, the auto-publishing session owns
     /// elapsed/rate/duration. Empty clears.
     func setNowPlayingInfo(_ info: [String: Any]) {
         pendingNowPlayingInfo = info
         #if os(tvOS) || os(iOS)
+        // Only when this host owns the session. Writing item.nowPlayingInfo under an AVKit host
+        // would feed AVKit's own Now-Playing publication a second, host-authored identity.
+        guard ownsNowPlayingSession else { return }
         playerItem?.nowPlayingInfo = info.isEmpty ? nil : info
         #endif
     }
@@ -240,7 +269,10 @@ final class NativeAVPlayerHost {
         #if os(tvOS) || os(iOS)
         // Replay staged Now-Playing identity onto the fresh item (gate
         // reloads / media fallback / in-place swaps keep the system card).
-        item.nowPlayingInfo = pendingNowPlayingInfo.isEmpty ? nil : pendingNowPlayingInfo
+        // Owned sessions only: see setNowPlayingInfo.
+        if ownsNowPlayingSession {
+            item.nowPlayingInfo = pendingNowPlayingInfo.isEmpty ? nil : pendingNowPlayingInfo
+        }
         #endif
         playerItem = item
         accessLogCount = 0
