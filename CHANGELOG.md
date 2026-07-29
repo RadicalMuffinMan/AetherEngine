@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **A seek now says what happened to it, not just that it stopped happening.** `isSeeking` / `seekTarget` are a level, and a level's falling edge cannot distinguish a landing from a give-up from a supersede, nor keep the target it belonged to (both properties clear in the same recompute, and any consumer that hops a queue sees them coalesced). `player.seekEvents` publishes `.began`, `.landed(renderedTime:)`, `.stalled`, `.superseded` and `.rejected`, each carrying its target and an id that pairs a seek with its outcome. The one asymmetry is the point of the stream: a seek that spent its recovery budget reports `.stalled` and drops out of `isSeeking`, but it stays alive inside AVPlayer, so its `.landed` can still arrive minutes later on a source that finally serves the target. Reported by rrgomes from production use of the signal in a synchronized-playback host, which had rebuilt all of this out of a landing grace, a retained last target and a 180 s unreached-target map.
+
+### Fixed
+
+- **A native scrub no longer reports a landing before the picture arrives.** The scrub's in-flight window ended when the coalesced producer restart drained, which means "the producer is producing at the new index", not "AVPlayer rendered it"; the picture follows a fetch and a decode later, measured at 1.4 s on a WAN source. The window now ends when the rendered frame reaches the restarted region, bounded at 8 s so a source that never serves it degrades to `.stalled` instead of latching the signal.
+- **A seek issued before the session can take it is visible instead of silently optimistic.** Seeks stashed during load or against a pre-ready item (#127/#178) publish their target on `currentTime` so scrub UI follows, but left `isSeeking` false, which is the worst combination for a consumer broadcasting that position: a place nothing has reached, with no in-flight flag to suppress it. The stash window now carries the seek signal and hands over to its replay without a gap.
+- **`seekTarget` no longer publishes a settled seek's destination.** It folded over the last non-nil target ever written, so a finished programmatic seek's target stayed published while a scrub was in flight toward a different one. Each source now owns its own target, and the published value follows the most authoritative one in flight.
+- **A stop landing mid-seek no longer leaves the subtitle side-reader link owned by the video path** for the whole next session (the #240 gate is per engine, not per session).
 
 ## [6.0.2] - 2026-07-29
 
