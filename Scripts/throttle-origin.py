@@ -14,6 +14,7 @@ client-independent ground truth: a healthy reader measures at media rate, and a 
 running above it is reading further ahead than the consumer is draining.
 
   python3 Scripts/throttle-origin.py <upstream> <port> <MB/s> [--lan] [--shared] [--head MB]
+                                     [--idle-timeout S]
 
 `upstream` takes two forms, picked automatically:
 
@@ -37,6 +38,13 @@ video pump on one link with ~1.4x headroom, where per-connection shaping shows n
 Binds loopback unless `--lan` is given. It forwards the upstream's credentials and has no
 auth of its own, so exposing it is opt-in even though testing a separate device (an Apple
 TV, a phone) needs exactly that.
+
+Every close names its reason, because a proxy that ends a body quietly is indistinguishable
+from a client-side stall and gets read as one. `[proxy TRUNCATED]` in particular means the
+UPSTREAM ended a body short of its own Content-Length: `HTTPResponse.read` returns b"" for
+that rather than raising, so a short body has to be detected by counting, and a client left
+waiting on the missing bytes learns nothing until its own stall timeout fires. `blocked=` on
+a close line is time the proxy spent inside sendall, which is the client not draining.
 """
 import re
 import socket
@@ -77,6 +85,22 @@ THROTTLE_AFTER_BYTES = 8 * 1024 * 1024
 for _i, _a in enumerate(sys.argv[1:]):
     if _a == "--head" and _i + 2 <= len(sys.argv) - 1:
         THROTTLE_AFTER_BYTES = int(float(sys.argv[_i + 2]) * 1024 * 1024)
+
+# Two different waits, so one of them cannot end the other's connection.
+#
+# IO_TIMEOUT covers a body in flight: the client has asked for bytes and is expected to take
+# them, so a socket that blocks this long is a client that stopped draining.
+#
+# IDLE_TIMEOUT covers the wait for the NEXT request on a kept-alive connection, and it has to
+# outlast a legitimate park. A reader that fetches in bounded ranges asks again only once its
+# consumer has drained, and a subtitle side reader that has filled its head start parks for
+# minutes by design. Both timeouts used to be the same 180 s, which quietly closed parked
+# connections and charged the reconnects to whatever was being measured.
+IO_TIMEOUT = 180
+IDLE_TIMEOUT = 900.0
+for _i, _a in enumerate(sys.argv[1:]):
+    if _a == "--idle-timeout" and _i + 2 <= len(sys.argv) - 1:
+        IDLE_TIMEOUT = float(sys.argv[_i + 2])
 
 conns = {}
 lock = threading.Lock()
@@ -184,17 +208,29 @@ def read_request(f):
 
 def handle(sock, cid):
     global shared_sent
-    sock.settimeout(180)
+    sock.settimeout(IDLE_TIMEOUT)
     f = sock.makefile("rb")
     up = None
+    opened = time.time()
+    served = 0
+    reason = ["client closed"]
+    print("[proxy OPEN ] conn#%d" % cid, flush=True)
     try:
         while True:
-            req = read_request(f)
+            sock.settimeout(IDLE_TIMEOUT)
+            try:
+                req = read_request(f)
+            except socket.timeout:
+                reason[0] = "idle %.0fs with no request (--idle-timeout)" % IDLE_TIMEOUT
+                return
+            sock.settimeout(IO_TIMEOUT)
             if req is None:
                 return
+            served += 1
             method, path, headers = req
             if method not in ("GET", "HEAD"):
                 sock.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                reason[0] = "405 %s" % method
                 return
 
             target = (UPSTREAM + path) if SERVER_MODE else UPSTREAM
@@ -206,6 +242,7 @@ def handle(sock, cid):
                 up = e
             except Exception:
                 sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                reason[0] = "upstream unreachable"
                 return
 
             status = up.status if hasattr(up, "status") else up.code
@@ -235,6 +272,8 @@ def handle(sock, cid):
             # waiting on a complete JSON body until the socket timed out.
             keep_alive = body_len is not None
             out.append("Connection: " + ("keep-alive" if keep_alive else "close"))
+            if keep_alive:
+                out.append("Keep-Alive: timeout=%d" % int(IDLE_TIMEOUT))
             sock.sendall(("\r\n".join(out) + "\r\n\r\n").encode())
 
             if method == "HEAD" or body_len == 0:
@@ -244,13 +283,26 @@ def handle(sock, cid):
 
             track = False
             sent = 0
+            blocked = 0.0
             began = time.time()
+            upstream_stall = False
             while body_len is None or sent < body_len:
                 want = 262144 if body_len is None else min(262144, body_len - sent)
-                chunk = up.read(want)
+                # Named separately from a client-side timeout: both are socket.timeout, and the
+                # upstream's is the 60 s from urlopen while the client's is IO_TIMEOUT. Reporting
+                # one as the other is how a shaping proxy gets blamed for its origin.
+                try:
+                    chunk = up.read(want)
+                except socket.timeout:
+                    upstream_stall = True
+                    break
                 if not chunk:
                     break
+                # Timed separately from the shaping sleep below: this is the client not taking
+                # bytes it asked for, which is the only way the proxy stops draining upstream.
+                _t = time.time()
                 sock.sendall(chunk)
+                blocked += time.time() - _t
                 sent += len(chunk)
                 if not track and sent >= THROTTLE_AFTER_BYTES:
                     # This is a media body. Start shaping and start accounting, rebasing the
@@ -273,21 +325,36 @@ def handle(sock, cid):
                             time.sleep(min(owed, 0.5))
             up.close()
             up = None
-            if not keep_alive:
+            with lock:
+                c = conns.pop(cid, None)
+            if c and c["sent"] > 0:
+                dur = time.time() - c["start"]
+                pos = c["range_start"] + c["sent"]
+                print("[proxy RANGE] conn#%d req#%d range=bytes=%d- %d bytes / %.2fs = %.2f MB/s "
+                      "blocked=%.1fs final pos=%.2fGB (%.1f%%)"
+                      % (cid, served, c["range_start"], c["sent"], dur,
+                         (c["sent"] / dur) / 1e6 if dur > 0 else 0.0, blocked, pos / 1e9,
+                         _pct(pos, c["total"])), flush=True)
+            # An upstream that ends a body early reaches us as a plain EOF: HTTPResponse.read
+            # returns b"" on a truncated body instead of raising IncompleteRead, so the only
+            # way to see it is to count. Continuing the keep-alive loop here would leave the
+            # client waiting on a Content-Length that can no longer arrive, on a socket nobody
+            # closes: silent to both sides until the client's own stall timeout fires, and then
+            # charged to the client. Close instead, so the drop costs one RTT.
+            if body_len is not None and sent < body_len:
+                print("[proxy TRUNCATED] conn#%d req#%d upstream %s %d bytes short of %d "
+                      "after %.1fs (blocked=%.1fs). Closing so the client sees the drop."
+                      % (cid, served, "stalled 60s" if upstream_stall else "ended",
+                         body_len - sent, body_len, time.time() - began, blocked), flush=True)
+                reason[0] = "upstream %s req#%d" % ("stalled" if upstream_stall else "truncated", served)
                 return
-            if track:
-                with lock:
-                    c = conns.pop(cid, None)
-                if c and c["sent"] > 0:
-                    dur = time.time() - c["start"]
-                    pos = c["range_start"] + c["sent"]
-                    print("[proxy CLOSE] conn#%d range=bytes=%d- %d bytes / %.2fs = %.2f MB/s "
-                          "final pos=%.2fGB (%.1f%%)"
-                          % (cid, c["range_start"], c["sent"], dur,
-                             (c["sent"] / dur) / 1e6 if dur > 0 else 0.0, pos / 1e9,
-                             _pct(pos, c["total"])), flush=True)
-    except (BrokenPipeError, ConnectionResetError, socket.timeout, OSError):
-        pass
+            if not keep_alive:
+                reason[0] = "no Content-Length, framing is the close"
+                return
+    except socket.timeout:
+        reason[0] = "no progress for %ds with a body in flight (client not draining)" % IO_TIMEOUT
+    except (BrokenPipeError, ConnectionResetError, OSError) as e:
+        reason[0] = "socket: %s" % e
     finally:
         if up is not None:
             try:
@@ -299,11 +366,14 @@ def handle(sock, cid):
         if c and c["sent"] > 0:
             dur = time.time() - c["start"]
             pos = c["range_start"] + c["sent"]
-            print("[proxy CLOSE] conn#%d range=bytes=%d- %d bytes / %.2fs = %.2f MB/s "
-                  "final pos=%.2fGB (%.1f%%) [client gone]"
-                  % (cid, c["range_start"], c["sent"], dur,
+            print("[proxy RANGE] conn#%d req#%d range=bytes=%d- %d bytes / %.2fs = %.2f MB/s "
+                  "final pos=%.2fGB (%.1f%%) [incomplete, connection ending]"
+                  % (cid, served, c["range_start"], c["sent"], dur,
                      (c["sent"] / dur) / 1e6 if dur > 0 else 0.0, pos / 1e9,
                      _pct(pos, c["total"])), flush=True)
+        # Connection-level, so a connection's lifetime is never read off a per-range line.
+        print("[proxy GONE ] conn#%d age=%.1fs requests=%d reason=%s"
+              % (cid, time.time() - opened, served, reason[0]), flush=True)
         try:
             sock.close()
         except OSError:
@@ -316,12 +386,12 @@ def main():
     srv.bind((BIND, PORT))
     srv.listen(16)
     if SERVER_MODE:
-        print("proxying server %s at %.1f MB/s on %s:%d (shaping after %d MB per body)"
-              % (UPSTREAM, RATE / 1e6, BIND, PORT, THROTTLE_AFTER_BYTES // (1024 * 1024)), flush=True)
+        print("proxying server %s at %.1f MB/s on %s:%d (shaping after %d MB per body, idle timeout %.0fs)"
+              % (UPSTREAM, RATE / 1e6, BIND, PORT, THROTTLE_AFTER_BYTES // (1024 * 1024), IDLE_TIMEOUT), flush=True)
     else:
-        print("proxying %.2f GB upstream at %.1f MB/s (%s) on %s:%d"
+        print("proxying %.2f GB upstream at %.1f MB/s (%s) on %s:%d (idle timeout %.0fs)"
               % (SIZE / 1e9, RATE / 1e6, "shared across connections" if SHARED else "per connection",
-                 BIND, PORT),
+                 BIND, PORT, IDLE_TIMEOUT),
               flush=True)
     threading.Thread(target=reporter, daemon=True).start()
     cid = 0
