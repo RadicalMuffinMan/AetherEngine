@@ -243,7 +243,7 @@ enum SubtitleDecoder {
                 // only survives for a final composition with no successor.
                 for idx in pendingImageCueIndices where cues[idx].startTime < pktPTS && cues[idx].endTime > pktPTS {
                     let open = cues[idx]
-                    cues[idx] = SubtitleCue(id: open.id, startTime: open.startTime, endTime: pktPTS, body: open.body)
+                    cues[idx] = open.with(endTime: pktPTS)
                 }
                 pendingImageCueIndices.removeAll()
 

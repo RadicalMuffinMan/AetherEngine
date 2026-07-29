@@ -657,12 +657,7 @@ extension AetherEngine {
                 guard case .image = cues[i].body else { continue }
                 let cue = cues[i]
                 if cue.startTime < trimAt && cue.endTime > trimAt {
-                    cues[i] = SubtitleCue(
-                        id: cue.id,
-                        startTime: cue.startTime,
-                        endTime: trimAt,
-                        body: cue.body
-                    )
+                    cues[i] = cue.with(endTime: trimAt)
                 }
             }
             // #100: this event is the held stale arrival's successor; its start closes the held
@@ -719,12 +714,7 @@ extension AetherEngine {
             if case .image = cues[i].body { continue }
             let cue = cues[i]
             if cue.startTime < trimAt && cue.endTime > trimAt {
-                cues[i] = SubtitleCue(
-                    id: cue.id,
-                    startTime: cue.startTime,
-                    endTime: trimAt,
-                    body: cue.body
-                )
+                cues[i] = cue.with(endTime: trimAt)
             }
         }
     }
@@ -761,7 +751,7 @@ extension AetherEngine {
             return
         }
 
-        let stamped = SubtitleCue(id: nextID, startTime: cue.startTime, endTime: cue.endTime, body: cue.body)
+        let stamped = cue.with(id: nextID)
         nextID += 1
 
         if case .image(let stampedImage) = stamped.body,
