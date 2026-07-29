@@ -63,11 +63,20 @@ enum SubtitleForwardPrefetcher {
     /// an in-place move cannot drift from the session-start rules (#234: a -1 seek elects the pacing
     /// stream by score and lands on a video keyframe in a different Matroska cluster).
     final class SideReaderReanchor: @unchecked Sendable {
+        /// A pending move plus the seek generation that asked for it (#250). The generation rides
+        /// along because the session survives the seek: a fence captured at session start goes
+        /// stale on the first in-place move, and it goes stale in exactly the superseded-seek case
+        /// the fence exists to resolve.
+        struct Anchor: Equatable, Sendable {
+            var seconds: Double
+            var seekGeneration: UInt64
+        }
+
         let anchorStreamIndex: Int32
         let fallbackDuration: Double
         let seekTimeout: TimeInterval
         private let lock = NSLock()
-        private var pending: Double?
+        private var pending: Anchor?
 
         init(anchorStreamIndex: Int32, fallbackDuration: Double, seekTimeout: TimeInterval) {
             self.anchorStreamIndex = anchorStreamIndex
@@ -76,13 +85,13 @@ enum SubtitleForwardPrefetcher {
         }
 
         /// Latest request wins: a seek burst leaves one move, not one per seek.
-        func request(_ seconds: Double) {
+        func request(_ seconds: Double, seekGeneration: UInt64 = 0) {
             lock.lock()
-            pending = seconds
+            pending = Anchor(seconds: seconds, seekGeneration: seekGeneration)
             lock.unlock()
         }
 
-        func take() -> Double? {
+        func take() -> Anchor? {
             lock.lock()
             defer { pending = nil; lock.unlock() }
             return pending
@@ -209,6 +218,7 @@ enum SubtitleForwardPrefetcher {
         parkPollNanoseconds: UInt64,
         link: SideReaderLinkArbiter? = nil,
         reanchor: SideReaderReanchor? = nil,
+        fence: SubtitleResolutionStatement.Fence = .init(),
         playhead: @Sendable () async -> Double?
     ) async -> Outcome {
         guard var playheadSnapshot = await playhead() else {
@@ -228,7 +238,7 @@ enum SubtitleForwardPrefetcher {
         /// wall time on purpose, see `SideReaderLinkPolicy.anchorGraceSeconds`.
         var anchorGraceUntil = DispatchTime.now()
             + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
-        let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted()
+        let telemetryGeneration = SubtitlePrefetchTelemetry.sessionStarted(fence: fence)
         // #220: the exit reason reaches the gauge, not just the fact that the loop stopped.
         // `defer` reads `exit` at unwind, so every break path reports the reason it set.
         defer { SubtitlePrefetchTelemetry.sessionEnded(generation: telemetryGeneration, exit: exit) }
@@ -268,14 +278,18 @@ enum SubtitleForwardPrefetcher {
             // and since the bounded ranges of #220 every one of those seeks costs a full 32 MiB
             // range off the link. A seek burst rebuilt the session once per jump.
             if let reanchor, let target = reanchor.take() {
-                let landed = reposition(demuxer: demuxer, to: target,
+                let landed = reposition(demuxer: demuxer, to: target.seconds,
                                         anchorStreamIndex: reanchor.anchorStreamIndex,
                                         fallbackDuration: reanchor.fallbackDuration,
                                         timeout: reanchor.seekTimeout)
                 EngineLog.emit(
                     "[AetherEngine] #151 forward prefetch re-anchored in place at "
-                    + "\(String(format: "%.2f", target))s (\(landed))",
+                    + "\(String(format: "%.2f", target.seconds))s (\(landed))",
                     category: .engine)
+                // #250: the banked position is now this seek's, and the pre-seek one is void.
+                // Stamped here rather than at request time so the window between the two reads
+                // as unresolved instead of validating a position the seek has not reached yet.
+                SubtitlePrefetchTelemetry.recordReanchor(seekGeneration: target.seekGeneration)
                 readPosition = nil
                 anchorGraceUntil = DispatchTime.now()
                     + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
