@@ -6,8 +6,9 @@ let package = Package(
     name: "AetherEngine",
     platforms: [
         .iOS(.v16),
-        .tvOS(.v16),
+        .tvOS(.v17),
         .macOS(.v14),
+        .visionOS(.v1),
     ],
     products: [
         .library(
@@ -29,7 +30,7 @@ let package = Package(
         // No network stack, we use custom AVIO + URLSession for HTTP streams.
         // Resolved over Git rather than a local path so consumers (and
         // Xcode Cloud) can build without a sibling FFmpegBuild checkout.
-        .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "2.3.0"),  // 2.3.0: webvtt demuxer (standalone .vtt sidecars, plus the cue settings as packet side data); 2.2.0: matroska TTS warn-only per RFC 9559 (#145 rework); 2.1.3: sup demuxer (raw PGS sidecars); 2.1.2: matroska TrackTimestampScale clamp (#145, dropped in 2.2.0); 2.1.1: pgssubdec Epoch-Continue retain (#142); 2.1.0: yadif_videotoolbox + hwupload (Metal GPU deinterlace); 2.0.0: dynamic frameworks (LGPL), zvbi GPL excision
+        .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "2.4.0"),  // 2.4.0: visionOS (xros) device + simulator slices; 2.3.0: webvtt demuxer (standalone .vtt sidecars, plus the cue settings as packet side data); 2.2.0: matroska TTS warn-only per RFC 9559 (#145 rework); 2.1.3: sup demuxer (raw PGS sidecars); 2.1.2: matroska TrackTimestampScale clamp (#145, dropped in 2.2.0); 2.1.1: pgssubdec Epoch-Continue retain (#142); 2.1.0: yadif_videotoolbox + hwupload (Metal GPU deinterlace); 2.0.0: dynamic frameworks (LGPL), zvbi GPL excision
         // Pure-Swift SMB2 client (MIT) that speaks the protocol over
         // NWConnection. Replaces AMSMB2/libsmb2, which EPERMs on tvOS/iOS.
         // Pinned to the 0.3.x minor: SMBClient is pre-1.0 with an actively
@@ -38,7 +39,7 @@ let package = Package(
         // libdovi (Dolby Vision RPU parser/converter). Resolved over Git like
         // FFmpegBuild so consumers (and Xcode Cloud) build without a sibling
         // LibDovi checkout; the prebuilt xcframework needs no Rust at build time.
-        .package(url: "https://github.com/superuser404notfound/LibDovi", from: "1.0.2"),  // 1.0.2: iOS slices + x86_64 (Intel Macs)
+        .package(url: "https://github.com/superuser404notfound/LibDovi", from: "1.1.0"),  // 1.1.0: visionOS (xros) device + simulator slices; 1.0.2: iOS slices + x86_64 (Intel Macs)
     ],
     targets: [
         .target(
