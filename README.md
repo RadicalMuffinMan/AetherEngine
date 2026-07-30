@@ -192,9 +192,23 @@ player.$mediaChapters                          // [ChapterInfo]; startSeconds ar
 
 // Info panel / Now Playing (iOS / tvOS)
 player.setExternalMetadata([ AVMetadataItem(/* title, artwork, etc. */) ])
+
+// Frame-accurate host rendering on the native path (#260). Cue times, chapters and sourceTime live on
+// the SOURCE axis; AVPlayerItem.currentTime() and its timebase read the ITEM axis. They differ by the
+// producer shift, which steps at every producer epoch (a seek restart, a live program boundary).
+player.presentationAxisMap                        // conversion both ways, readable off the main actor
+player.presentationAxisMap.itemSeconds(forSourceSeconds: cue.startTime)   // stamp an overlay sample
+player.presentationAxisMap.sourceSeconds(forItemSeconds: item.currentTime().seconds)
+player.$currentAVPlayerItem                       // items swap in place; this is the signal for it
+
+// Per muxed video frame, on both axes at once. Called on the producer's pump thread in DECODE order,
+// so `source` is not monotonic under B-frames; sort before using it as a frame-boundary list.
+player.setNativeVideoFrameTimeObserver { frame in
+    frame.source; frame.item; frame.segmentIndex; frame.isKeyframe; frame.epoch
+}
 ```
 
-Subtitle cues land in raw source PTS; render the overlay against `player.sourceTime` (see [docs/formats.md › Subtitles](docs/formats.md#subtitles)). The 1 Hz diagnostics snapshot lives on `player.diagnostics.liveTelemetry`, off-the-engine for the same render-stability reason. Frame extraction, authored-ASS styling, and the full published surface are documented in [docs/formats.md](docs/formats.md).
+Subtitle cues land in raw source PTS; render the overlay against `player.sourceTime` (see [docs/formats.md › Subtitles](docs/formats.md#subtitles)). A host compositing its own overlay onto the native path (libass and friends) needs the item axis too, since that is what the compositor pairs its samples against: `presentationAxisMap` converts arbitrary positions, `setNativeVideoFrameTimeObserver` reports the frames themselves. Both return nothing rather than a guess when no axis is established, because a defaulted shift is indistinguishable from a measured one at the call site. The 1 Hz diagnostics snapshot lives on `player.diagnostics.liveTelemetry`, off-the-engine for the same render-stability reason. Frame extraction, authored-ASS styling, and the full published surface are documented in [docs/formats.md](docs/formats.md).
 
 Install via Swift Package Manager:
 
