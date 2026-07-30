@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The native path now states the relation between its two time axes, instead of leaving a host to infer it.** Cue times, chapter marks and `sourceTime` are source PTS; `AVPlayerItem.currentTime()` and its timebase are the axis the producer muxes into the segments. They differ by the producer shift, and nothing published closed that gap for a host compositing its own overlay: adding `playlistShiftSeconds` is correct only until the next producer epoch, the clock ticks at ~10 Hz and a clock reading is not a frame boundary, and the per-segment pair is a genuine pair but six seconds apart. `player.presentationAxisMap` converts either way at any position and is readable off the main actor, and `setNativeVideoFrameTimeObserver` reports both axes for every muxed frame, with its segment index, keyframe flag and producer epoch. Frames arrive in decode order, so `source` is not monotonic under B-frames. Both surfaces answer nothing rather than zero when no axis has been established, since at the call site a defaulted shift is indistinguishable from a measured one, which is what #259 cost. `player.currentAVPlayerItem` publishes alongside, because items are swapped in place and a host holding a timebase otherwise gets no signal. Requested by edde746 for frame-accurate libass rendering, with the axis measurement that showed the gap.
+
+### Fixed
+
+- **A VOD producer restart no longer folds the whole timeline with its new shift.** Each producer computes its own shift when its video gate opens, and a restart lands wherever the source seek lands, so a restart can change it. The shift history was rebuilt from scratch on every VOD restart with one entry covering everything, so content muxed by the previous producer, which AVPlayer can still hold in its buffer and put on screen, was folded with the incoming shift: the published playhead then leads or trails the picture by the difference for as long as that buffer lasts. The history now records the item-axis position each producer starts writing at and keeps the entries below it, and a backward restart drops only the entries it actually rewrites. Live already worked this way for program boundaries; that path is unchanged. Note that the shift-fold hypotheses in #65 were refuted by measurement at the time: that burst ran with an invariant shift, so this mechanism was inactive there and is not a retroactive explanation for it.
 
 ## [6.1.4] - 2026-07-30
 
