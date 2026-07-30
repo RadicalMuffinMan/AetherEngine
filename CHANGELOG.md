@@ -12,6 +12,14 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.1.4] - 2026-07-30
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.4))
+
+### Fixed
+
+- **In-picture A/53 closed captions are timed against the source again, not against the playlist.** The extraction rides the segment producer's per-packet finalize step, which runs after the pump has rebased the packet onto the output timeline, so the timestamps handed to the caption tap carried the playlist shift while everything downstream reads them as source PTS: the decoded cues feed `subtitleCues`, and a host renders those against `currentTime`, which folds that same shift back in. Every A/53 caption was displaced by it, and because the shift is recomputed on each producer restart, the displacement changed after every seek. On a clip with B-frames it is two frames at head of stream; a restart landing off its planned keyframe has been measured in seconds; and a broadcast MPEG-TS source whose first DTS sits far from zero, which is the case this path exists for, carries it from the first packet. Only the producer path was affected: a demuxable `eia_608` / `c608` caption track is tapped before the rebase, and the software path reads its triplets out of decoded-frame side data, where no shift exists at all. Reported by edde746 from a read of the value flow plus a measurement of the shift magnitude, without a caption-bearing source on hand.
+
 ## [6.1.3] - 2026-07-30
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.3))
