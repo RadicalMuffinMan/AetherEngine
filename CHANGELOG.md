@@ -12,6 +12,14 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.1.2] - 2026-07-30
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.2))
+
+### Fixed
+
+- **Opening a large progressive HTTP source no longer dies in the allocator before the first frame.** The chunk-fetch delegate reserved whatever the response declared, and one of the requests that reaches that line is the HEAD size probe, which declares the entire source and delivers no body at all: opening a 12.4 GB MKV asked malloc for 12.4 GB in order to buffer nothing, and on a 6 GB device the NULL that came back was force-unwrapped inside `Data`'s storage, so it trapped on the URLSession delegate queue rather than throwing (a host app could neither catch it nor degrade). The HEAD fallback is launched 0.75 s after the range probes and runs whenever they have not resolved a size yet, so this was reachable on any non-prefetch open (still extraction, one-shot seekable) against a slow origin, not only against origins that reject Range outright. The reservation now comes from the request instead of the response: the span of a bounded `Range`, nothing at all for a HEAD, a flat 8 MB ceiling for an open-ended request. The body is bounded by that same span, so an origin that ignores `Range` and answers a bounded chunk request with `200` plus the whole source's length is hung up on after the requested prefix instead of having its entire file buffered and then rejected. Reported by dlev02 from a symbolicated crash report.
+
 ## [6.1.1] - 2026-07-30
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.1))
