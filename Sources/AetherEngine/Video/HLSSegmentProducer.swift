@@ -857,6 +857,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return baseIndex + Self.segmentOffset(forAbsolutePts: absolute, boundaries: segmentBoundaries)
     }
 
+    /// Source-axis value of a timestamp the pump has already rebased onto the output axis
+    /// (`pts -= videoShiftPts`). Anything the producer hands to a consumer that works in source
+    /// PTS has to come back through here (#259). NOPTS and an unresolved shift pass through.
+    static func foldingShiftBack(_ value: Int64, shift: Int64) -> Int64 {
+        guard value != Int64.min, shift != Int64.min else { return value }
+        return value &+ shift
+    }
+
     /// 0-based segment offset for `absolute` within the sorted-ascending `boundaries`: segment i spans
     /// [boundaries[i], boundaries[i+1]), clamped to [0, count-2]. Binary search, exactly equivalent to the
     /// former linear "first i where absolute < boundaries[i+1]" scan but O(log n) instead of O(n) per packet
@@ -2843,13 +2851,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         // #131: A53 caption extraction rides the same per-packet spot as the HDR10+ scan: decode
         // order, repaired DTS, timestamps still in the source time base (the rescale below).
+        // #259: the source time BASE, but no longer the source AXIS. The pump rebased this packet
+        // onto the output axis long before it got here, so the shift is folded back: the tap's cues
+        // are rendered against the source-PTS clock (as the c608 tap's and the SW path's are), and
+        // the shift is recomputed per producer session, so leaving it in would displace every
+        // caption by a different amount after each seek.
         if let kind = a53CodecKind, let observe = a53CaptionObserver,
            let data = packet.pointee.data, packet.pointee.pts != Int64.min {
             let size = Int(packet.pointee.size)
             if A53SEIParser.mayContainA53(data, size) {
                 let extracted = A53SEIParser.triplets(in: data, size: size, codec: kind, framing: a53NALFraming)
                 if !extracted.isEmpty {
-                    observe(extracted, packet.pointee.pts, packet.pointee.dts, sourceVideoTimeBase)
+                    observe(extracted,
+                            Self.foldingShiftBack(packet.pointee.pts, shift: videoShiftPts),
+                            Self.foldingShiftBack(packet.pointee.dts, shift: videoShiftPts),
+                            sourceVideoTimeBase)
                 }
             }
         }
