@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.1.0] - 2026-07-30
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.0))
+
 ### Added
 
 - **A seek now says what happened to it, not just that it stopped happening.** `isSeeking` / `seekTarget` are a level, and a level's falling edge cannot distinguish a landing from a give-up from a supersede, nor keep the target it belonged to (both properties clear in the same recompute, and any consumer that hops a queue sees them coalesced). `player.seekEvents` publishes `.began`, `.landed(renderedTime:)`, `.stalled`, `.superseded` and `.rejected`, each carrying its target and an id that pairs a seek with its outcome. The one asymmetry is the point of the stream: a seek that spent its recovery budget reports `.stalled` and drops out of `isSeeking`, but it stays alive inside AVPlayer, so its `.landed` can still arrive minutes later on a source that finally serves the target. Reported by rrgomes from production use of the signal in a synchronized-playback host, which had rebuilt all of this out of a landing grace, a retained last target and a 180 s unreached-target map.
