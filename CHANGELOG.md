@@ -12,6 +12,18 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.1.3] - 2026-07-30
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.3))
+
+### Fixed
+
+- **Teletext rows no longer arrive with the column padding still on them.** A page libzvbi does not classify as a subtitle page is written out as the raw grid, every row at full column width with a hard space per grid cell, and the engine's two whitespace passes both walked past the inside of a line break: one trims the outer edges of the whole cue, the other folds what sits between two newlines and never looks at the characters touching a single one. A two-row caption therefore reached the host as `row one<pad>` / `<pad>row two`, which puts the second row visibly off centre on a renderer that centres each line and draws the cue's background box wider than its text. Both passes are now gated on that same raw-grid case, which is exactly the page that arrives without an alignment override, so a page the decoder curates itself is passed through whole: there the surviving padding is the relative indentation carrying the alignment it picked, and the blank lines are its vertical fine-positioning inside the block, both of which the blank-line fold had been discarding since #107. Reported by tresby, who had solved it row-wise in a proxy implementation and supplied the failing sequence.
+
+### Changed
+
+- **FFmpegBuild and LibDovi are pinned to the minor rather than floating from a lower bound**, so a released engine tag's dependency set is a property of the tag instead of the registry at resolve time. Both classes of drift this guards against were live: LibDovi 1.1.0 raised its declared tvOS floor in a minor, which SwiftPM floats onto and then fails on instead of backing off, so every 5.x tag stopped resolving; and FFmpegBuild 2.4.0 replaced 2.3.0 under a fixed 5.28.0 checkout. Forward-looking only, already published tags keep what they declared. Consumers resolve to the same versions as before (FFmpegBuild 2.4.0, LibDovi 2.0.0).
+
 ## [6.1.2] - 2026-07-30
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.2))
