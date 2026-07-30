@@ -10,7 +10,9 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **An ASS track that declares its play resolution with CRLF line endings is no longer read as declaring none.** The header arrives as codec extradata byte for byte as the muxer stored it, and muxed ASS is conventionally CRLF, so the line is `PlayResX: 718\r`. The trim used `CharacterSet.whitespaces`, which is space and tab but not CR, so the CR survived and `Double("718\r")` returned nil. Both lookups failed, the header was reported as declaring nothing, and every `\pos` on the track normalized against libavcodec's 384x288 default instead of the declared space. On a 718x480 script `{\an1\pos(298,432)}` reached the host at (0.776, 1.500) rather than (0.415, 0.900), which is off-picture and indistinguishable from a cue that never arrived. Header lines now split on any newline (CRLF, LF or lone CR) and trim newline-inclusive. Tracks that declare no play resolution are unaffected, since 384x288 is then the correct basis. Reported by rrgomes, traced to the line. (#261)
 
 ## [6.2.0] - 2026-07-30
 
