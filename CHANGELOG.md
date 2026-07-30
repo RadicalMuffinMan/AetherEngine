@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.2.0] - 2026-07-30
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.2.0))
+
 ### Added
 
 - **The native path now states the relation between its two time axes, instead of leaving a host to infer it.** Cue times, chapter marks and `sourceTime` are source PTS; `AVPlayerItem.currentTime()` and its timebase are the axis the producer muxes into the segments. They differ by the producer shift, and nothing published closed that gap for a host compositing its own overlay: adding `playlistShiftSeconds` is correct only until the next producer epoch, the clock ticks at ~10 Hz and a clock reading is not a frame boundary, and the per-segment pair is a genuine pair but six seconds apart. `player.presentationAxisMap` converts either way at any position and is readable off the main actor, and `setNativeVideoFrameTimeObserver` reports both axes for every muxed frame, with its segment index, keyframe flag and producer epoch. Frames arrive in decode order, so `source` is not monotonic under B-frames. Both surfaces answer nothing rather than zero when no axis has been established, since at the call site a defaulted shift is indistinguishable from a measured one, which is what #259 cost. `player.currentAVPlayerItem` publishes alongside, because items are swapped in place and a host holding a timebase otherwise gets no signal. Requested by edde746 for frame-accurate libass rendering, with the axis measurement that showed the gap.
