@@ -31,8 +31,47 @@ jobs:
       - name: swift build
         run: swift build
 
+      # The test process has twice died mid-run without failing a test: no ✘, no backtrace, no
+      # swift-testing summary, just exit 1 while the three tests that drive a local HTTP origin were
+      # running (#255 head probe, two Issue240 side-reader tests). A time limit would not catch that,
+      # since nothing hangs. Record how the process actually left, and keep whatever macOS wrote about
+      # it, so the next occurrence names its own cause instead of leaving us between two hypotheses.
       - name: swift test
-        run: swift test
+        id: swift_test
+        run: |
+          set +e
+          date -u +"test start %H:%M:%SZ"
+          swift test
+          status=$?
+          date -u +"test end %H:%M:%SZ"
+          echo "swift test exited with $status"
+          # 128+N means a signal (137 = SIGKILL, typically the memory pressure killer).
+          if [ "$status" -gt 128 ]; then
+            echo "::warning::test process died on signal $((status - 128))"
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit $status
+
+      - name: Collect crash evidence
+        if: failure() && steps.swift_test.outcome == 'failure'
+        run: |
+          mkdir -p /tmp/test-death
+          cp ~/Library/Logs/DiagnosticReports/*.ips /tmp/test-death/ 2>/dev/null || true
+          sudo cp /Library/Logs/DiagnosticReports/*.ips /tmp/test-death/ 2>/dev/null || true
+          # A memory-pressure kill leaves no .ips, only a jetsam entry in the system log.
+          log show --last 10m --predicate 'eventMessage CONTAINS "jetsam" OR eventMessage CONTAINS "AetherEnginePackageTests"' \
+            > /tmp/test-death/system-log.txt 2>&1 || true
+          vm_stat > /tmp/test-death/vm_stat.txt 2>&1 || true
+          ls -la /tmp/test-death/
+
+      - name: Upload crash evidence
+        if: failure() && steps.swift_test.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-death-evidence
+          path: /tmp/test-death/
+          if-no-files-found: warn
+          retention-days: 14
 
   build-tvos:
     name: xcodebuild (tvOS Simulator)
