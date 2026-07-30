@@ -12,6 +12,14 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.1.1] - 2026-07-30
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.1))
+
+### Fixed
+
+- **A seek on the software path no longer blocks the main thread for the length of a network read.** `SoftwarePlaybackHost` is `@MainActor` and ran the demuxer reposition inline, so a seek issued while the demux loop sat in a slow remote read waited out that read on the main thread: two field App Hangs, "Fully Blocked", 4.4 s and 5.2 s, on a WAN source. The lock is held across the whole of `av_read_frame`, which is also why the existing deadline could not have prevented them, since it is armed on the far side of that lock. The reposition now runs off the main actor under an 8 s read deadline, and a burst of scrubs collapses onto its last target instead of paying one lock wait per seek. The same inline call sat in both hosts' `startPosition` resume, so this covers every resume into a remote source, not just scrubbing. A reposition that spends its budget reports `.stalled` on `seekEvents` rather than a landing it cannot back up. Reported by rrgomes from two production crash-reporter events.
+
 ## [6.1.0] - 2026-07-30
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.1.0))
