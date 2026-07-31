@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.3.0] - 2026-07-31
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.3.0))
+
 ### Added
 
 - **`ExternalSubtitleTrack.sourceStreamIndex`, so an external subtitle URL can be a container rather than a sidecar.** An external track's URL may hold several subtitle streams (an MKV with English, English SDH and Spanish), and a host would register one track per stream against that same URL. The sidecar decoder stopped at the container's first subtitle stream and the descriptor carried no index, so every such track decoded that same stream and the host got three selectable tracks rendering identical cues. The new field names the stream to decode as an absolute `AVStream` index inside the container, matching the convention that embedded track ids are stream indices; nil keeps decoding the first subtitle stream. An index that is out of range or names a non-subtitle stream fails the decode rather than falling back to the first subtitle stream, because a silent fallback is indistinguishable from the behaviour the index exists to escape. Reported by edde746. (#266)
