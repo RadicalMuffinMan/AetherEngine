@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Finite HEVC-in-MPEG-TS HLS VOD no longer reaches AVPlayer's audio-only,
+  black native path.** A bounded content probe now confirms the playlist is
+  finite, its segments are MPEG-TS, and its PMT declares HEVC before selecting
+  a seekable TS-to-fMP4 ingest. Direct media playlists and master playlists are
+  both covered; URL, HTTP headers, duration, resume position, and forward or
+  backward seek semantics are preserved. H.264, fMP4, live, audio-only, and
+  inconclusive HLS inputs keep their existing route. (#268)
 
 ## [6.3.0] - 2026-07-31
 

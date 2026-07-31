@@ -2397,6 +2397,26 @@ public final class AetherEngine: ObservableObject {
         // (audio-tap reader selection, seek paths) sees a genuine remote-HLS session.
         if RemoteHLSMediaSelection.shouldReroute(failure: probeFailure, isCustomSource: isCustomSource),
            case .url(let hlsURL) = source {
+            if let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+                playlistURL: hlsURL,
+                httpHeaders: loadedOptions.httpHeaders
+            ) {
+                try checkLoadCurrent(gen)
+                EngineLog.emit(
+                    "[AetherEngine] AE#268: finite HEVC-in-MPEG-TS HLS; "
+                        + "routing through seekable TS -> fMP4 ingest",
+                    category: .engine
+                )
+                var remuxOptions = loadedOptions
+                remuxOptions.nativeRemoteHLS = false
+                return try await load(
+                    source: .custom(reader, formatHint: "mpegts"),
+                    startPosition: startPosition,
+                    options: remuxOptions,
+                    audioSourceStreamIndex: audioSourceStreamIndex,
+                    discTitleID: discTitleID
+                )
+            }
             EngineLog.emit("[AetherEngine] AE#154: HLS playlist on the VOD loopback path; rerouting to the native remote-HLS bypass", category: .engine)
             loadedOptions.nativeRemoteHLS = true
             do {
@@ -2924,6 +2944,26 @@ public final class AetherEngine: ObservableObject {
             if RemoteHLSMediaSelection.shouldReroute(failure: error, isCustomSource: isCustomSource),
                case .url(let hlsURL) = source,
                loadGeneration == gen {
+                if let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+                    playlistURL: hlsURL,
+                    httpHeaders: loadedOptions.httpHeaders
+                ) {
+                    try checkLoadCurrent(gen)
+                    EngineLog.emit(
+                        "[AetherEngine] AE#268: second open confirmed finite HEVC-in-MPEG-TS HLS; "
+                            + "restarting through seekable TS -> fMP4 ingest",
+                        category: .engine
+                    )
+                    var remuxOptions = loadedOptions
+                    remuxOptions.nativeRemoteHLS = false
+                    return try await load(
+                        source: .custom(reader, formatHint: "mpegts"),
+                        startPosition: startPosition,
+                        options: remuxOptions,
+                        audioSourceStreamIndex: audioSourceStreamIndex,
+                        discTitleID: discTitleID
+                    )
+                }
                 EngineLog.emit(
                     "[AetherEngine] AE#246: the loopback session's own open classified the source as HLS; "
                     + "taking the AE#154 reroute onto the native remote-HLS bypass",
