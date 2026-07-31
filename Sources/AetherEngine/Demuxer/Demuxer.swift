@@ -549,6 +549,11 @@ public final class Demuxer: @unchecked Sendable {
     }
 
     var duration: Double {
+        if let duration = (avioProvider as? CustomIOReaderBridge)?
+            .timeSeekableReader?.mediaDuration,
+           duration > 0 {
+            return duration
+        }
         let container: Double = {
             guard let ctx = formatContext else { return 0 }
             let dur = ctx.pointee.duration
@@ -1071,6 +1076,11 @@ public final class Demuxer: @unchecked Sendable {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return }
+        if let reader = (avioProvider as? CustomIOReaderBridge)?.timeSeekableReader {
+            guard reader.seek(to: seconds) else { return }
+            resetAfterTimeSeek(ctx)
+            return
+        }
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
         let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
         if ret < 0 {
@@ -1090,6 +1100,16 @@ public final class Demuxer: @unchecked Sendable {
         guard let ctx = formatContext,
               streamIndex >= 0,
               streamIndex < Int32(ctx.pointee.nb_streams) else { return false }
+        if let reader = (avioProvider as? CustomIOReaderBridge)?.timeSeekableReader,
+           let stream = ctx.pointee.streams[Int(streamIndex)] {
+            let timeBase = stream.pointee.time_base
+            guard timeBase.num > 0, timeBase.den > 0 else { return false }
+            let seconds = Double(timestamp) * Double(timeBase.num)
+                / Double(timeBase.den)
+            guard reader.seek(to: max(0, seconds)) else { return false }
+            resetAfterTimeSeek(ctx)
+            return true
+        }
         let ret = avformat_seek_file(
             ctx,
             streamIndex,
@@ -1107,6 +1127,16 @@ public final class Demuxer: @unchecked Sendable {
         avformat_flush(ctx)
         lastReadClipIdx = -1
         return ret >= 0
+    }
+
+    private func resetAfterTimeSeek(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
+        if let pb = ctx.pointee.pb {
+            avio_flush(pb)
+            pb.pointee.eof_reached = 0
+            pb.pointee.error = 0
+        }
+        avformat_flush(ctx)
+        lastReadClipIdx = -1
     }
 
     /// #112 round 10: latched by the side reader once a timestamp positioning seek timed out or failed on this

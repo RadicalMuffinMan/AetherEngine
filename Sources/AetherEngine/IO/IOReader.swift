@@ -17,6 +17,13 @@ public protocol IOReader: AnyObject, Sendable {
     func makeIndependentReader() -> IOReader?
 }
 
+/// Internal seam for finite segmented sources whose natural seek axis is time,
+/// not a synthetic concatenated byte offset.
+protocol TimeSeekableIOReader: IOReader {
+    var mediaDuration: Double { get }
+    func seek(to seconds: Double) -> Bool
+}
+
 public extension IOReader {
     func cancel() {}
     func makeIndependentReader() -> IOReader? { nil }
