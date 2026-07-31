@@ -345,6 +345,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `playlistShiftSeconds` (updated dynamically per gate open).
     public private(set) var firstKeyframeSeconds: Double = 0
 
+    /// AE#270: source PTS the container's timeline starts at, clamped at 0. The published playhead folds
+    /// it out so it stays on the same 0-based axis as `duration`.
+    public private(set) var sourceStartSeconds: Double = 0
+
     /// Result of the stream-copy / FLAC-bridge / video-only cascade. Possible values:
     /// `"Stream-copy (EAC3+JOC Atmos)"`, `"Stream-copy (<CODEC>)"`, `"<CODEC> → FLAC bridge"`.
     /// nil when no audio pipeline is live.
@@ -823,6 +827,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if videoTimeBase.num > 0, videoTimeBase.den > 0 {
             sourceVideoTbSeconds = Double(videoTimeBase.num) / Double(videoTimeBase.den)
         }
+        // AE#270: the source PTS the container's own timeline starts at. `duration` is measured from here,
+        // so this is the PTS that maps to display-0 for the host (0 for an MP4, 1.4 s for anything ffmpeg
+        // wrote as MPEG-TS, hours for VOD carved out of a broadcast stream). A negative start time is an
+        // encoder-side reorder artifact rather than an origin, so it clamps to 0.
+        let formatStart = dem.formatStartTime
+        sourceStartSeconds = formatStart == Int64.min ? 0 : max(0, Double(formatStart) / Double(AV_TIME_BASE))
         let durationSeconds = dem.duration
         var plan: [Segment]
         if isLiveSession {

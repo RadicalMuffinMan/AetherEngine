@@ -22,6 +22,13 @@ the public-API contract.
   elapsed media time, so a source whose MPEG-TS PTS origin is not zero
   (broadcast-derived VOD routinely starts hours in) still lands where the host
   asked. (#268, PR #269, reported and implemented by @qoli)
+- **A VOD source whose container starts at a non-zero PTS now publishes its
+  playhead on the same 0-based axis as its duration.** The display origin was
+  anchored for disc titles only, so a transport stream muxed with a 60 s origin
+  opened its scrubber at 1:02 of a ten-minute item, and at broadcast scale a
+  seek target computed on that axis resolved outside the item and landed at the
+  start of the file. Sources that already start at 0, which is every MP4, are
+  unaffected. (#270)
 
 ## [6.3.0] - 2026-07-31
 

@@ -325,7 +325,9 @@ public final class AetherEngine: ObservableObject {
         guard !scrubRestartOwnedByProgrammaticSeek,
               let watchTarget = nativeScrubSeekTarget,
               let host = nativeHost else {
-            finishNativeScrubSeek(.landed(renderedTime: clock.sourceTime))
+            // AE#270: the event's `target` is on the display axis, so its landing has to be too.
+            finishNativeScrubSeek(.landed(renderedTime: PresentationAxis.display(
+                sourcePTS: clock.sourceTime, origin: sourcePresentationOrigin)))
             return
         }
         pendingScrubLanding = PendingScrubLanding(
@@ -1055,6 +1057,11 @@ public final class AetherEngine: ObservableObject {
     /// the producer already anchors `startPosition` on (`segmentIndexForPlaylistTime`), while `sourceTime`
     /// stays true source PTS for subtitle-cue alignment. Reset to 0 on load/stop; set in onPlaylistShiftChanged.
     var sourcePresentationOrigin: Double = 0
+
+    /// AE#270: the origin this session settled on, nil before the first publish. A non-disc VOD source
+    /// keeps its first one: later publishes fold producer drift into the shift, and re-reading them would
+    /// move the display axis under a picture that has not moved.
+    var latchedPresentationOrigin: Double?
 
     /// Diagnostics only. Reads HLSVideoEngine's videoShiftPts synchronously, bypassing the async
     /// onPlaylistShiftChanged relay. A persistent gap vs `playlistShiftSeconds` means the clock is folding
@@ -3602,10 +3609,14 @@ public final class AetherEngine: ObservableObject {
         }
         setProgrammaticSeek(inFlight: false, target: nil)
         // `sourceTime` is the on-screen frame (#49/#123): the honest landing position, which keyframe
-        // granularity or a still-draining chase can put a little off the target.
+        // granularity or a still-draining chase can put a little off the target. Folded onto the display
+        // axis because that is the axis the ticket's `target` is on (AE#270; identity off disc and off a
+        // PTS-origin source).
         closeSeekTicket(&programmaticSeekTicket,
-                        with: Self.seekTicketOutcome(hostReposition: hostReposition,
-                                                     renderedTime: clock.sourceTime))
+                        with: Self.seekTicketOutcome(
+                            hostReposition: hostReposition,
+                            renderedTime: PresentationAxis.display(sourcePTS: clock.sourceTime,
+                                                                   origin: sourcePresentationOrigin)))
     }
 
     /// #254: how a SW/audio-host reposition maps onto this seek's ticket. A reposition that spent its
@@ -3742,7 +3753,6 @@ public final class AetherEngine: ObservableObject {
         clock.currentTime = 0
         clock.bufferedPosition = 0
         clock.progress = 0
-        sourcePresentationOrigin = 0  // AE#105: clear disc display-origin so the next source starts on a clean axis.
         // Clear session state; without this, metadata/track lists/format/pendingExternalMetadata from the
         // previous session survive until the next load and bleed into unrelated sessions.
         duration = 0
@@ -4549,6 +4559,11 @@ public final class AetherEngine: ObservableObject {
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
         playlistShiftSeconds = 0
+        // AE#105 / AE#270: the display origin belongs to the session that published it. Clearing it here
+        // rather than only in stop() keeps a load that reuses the engine (the common path: load() runs
+        // stopInternal itself) from folding the previous source's PTS origin into the new one's clock.
+        sourcePresentationOrigin = 0
+        latchedPresentationOrigin = nil
         setPresentationAxis(PresentationAxisMap())
         nativeClockSeconds = 0
         clock.sourceTime = 0
