@@ -128,6 +128,147 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         XCTAssertNil(liveReader)
     }
 
+    func testUnreachableFirstSegmentKeepsTheNativeRoute() async throws {
+        let root = try XCTUnwrap(URL(string: "https://vod.test/dead-segment.m3u8"))
+        Issue268URLProtocol.bodyByURL[root.absoluteString] = mediaPlaylist("missing.ts")
+
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+            playlistURL: root,
+            httpHeaders: [:],
+            session: session
+        )
+        XCTAssertNil(reader, "an unreachable probe is inconclusive, and inconclusive never reroutes")
+    }
+
+    // MARK: - Seek axis
+
+    /// A seek restarts one segment ahead of the segment containing the target: playlists need not
+    /// declare EXT-X-INDEPENDENT-SEGMENTS, so the extra segment guarantees a random-access point in
+    /// front of the target. Landing early is the contract; the engine's packet gate trims the rest.
+    func testRestartSegmentIndexStartsOneSegmentAheadOfTheTarget() {
+        let starts: [Double] = [0, 6, 12, 18, 24]
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: 20, starts: starts), 2)
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: 12, starts: starts), 1)
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: 6.001, starts: starts), 0)
+    }
+
+    func testRestartSegmentIndexClampsAtBothEnds() {
+        let starts: [Double] = [0, 6, 12]
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: 0, starts: starts), 0)
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: -5, starts: starts), 0)
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: 9_999, starts: starts), 1)
+        XCTAssertEqual(HLSVODIngestReader.restartSegmentIndex(forElapsed: 3, starts: []), 0)
+    }
+
+    /// The reader's axis is elapsed media time, so a seek must resume with the bytes of the segment it
+    /// named, not the ones the previous producer had queued. Each segment carries its index as a marker
+    /// byte, which makes the first post-seek read the assertion.
+    func testSeekResumesWithThePrecedingSegmentsBytes() async throws {
+        let root = try XCTUnwrap(URL(string: "https://vod.test/multi.m3u8"))
+        let names = (0..<5).map { "seg\($0).ts" }
+        Issue268URLProtocol.bodyByURL[root.absoluteString] = mediaPlaylist(names)
+        for (index, name) in names.enumerated() {
+            Issue268URLProtocol.bodyByURL["https://vod.test/\(name)"] =
+                transportStream(streamType: 0x24, marker: UInt8(index))
+        }
+
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+            playlistURL: root,
+            httpHeaders: [:],
+            session: session
+        )
+        let reader = try XCTUnwrap(made)
+        defer { reader.close() }
+
+        XCTAssertEqual(reader.mediaDuration, 30, accuracy: 0.001)
+        XCTAssertTrue(reader.seek(to: 20))
+        var bytes = [UInt8](repeating: 0, count: 188)
+        let count = bytes.withUnsafeMutableBufferPointer {
+            reader.read($0.baseAddress, size: Int32($0.count))
+        }
+        XCTAssertEqual(count, 188)
+        XCTAssertEqual(bytes[0], 0x47)
+        XCTAssertEqual(bytes[Self.markerOffset], 2, "20s sits in segment 3, so the ingest restarts at 2")
+    }
+
+    /// Byte seeks stay refused: the concatenated segment stream has no address space, and answering a
+    /// rewind that never happened would let libavformat binary-search over HTTP.
+    func testByteSeekOnlyAcceptsANoOpReposition() async throws {
+        let root = try XCTUnwrap(URL(string: "https://vod.test/byteseek.m3u8"))
+        let segment = try XCTUnwrap(URL(string: "https://vod.test/byteseek.ts"))
+        Issue268URLProtocol.bodyByURL[root.absoluteString] = mediaPlaylist("byteseek.ts")
+        Issue268URLProtocol.bodyByURL[segment.absoluteString] = transportStream(streamType: 0x24)
+
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
+            playlistURL: root,
+            httpHeaders: [:],
+            session: session
+        )
+        let reader = try XCTUnwrap(made)
+        defer { reader.close() }
+
+        XCTAssertEqual(reader.seek(offset: 0, whence: SEEK_SET), 0, "capability handshake at position 0")
+        XCTAssertEqual(reader.seek(offset: 0, whence: SEEK_CUR), 0)
+        XCTAssertEqual(reader.seek(offset: 4096, whence: SEEK_SET), -1)
+        XCTAssertEqual(reader.seek(offset: 0, whence: 65536), -1, "AVSEEK_SIZE: no byte length exists")
+
+        var bytes = [UInt8](repeating: 0, count: 188)
+        _ = bytes.withUnsafeMutableBufferPointer {
+            reader.read($0.baseAddress, size: Int32($0.count))
+        }
+        XCTAssertEqual(reader.seek(offset: 0, whence: SEEK_SET), -1, "a real rewind is not available")
+    }
+
+    // MARK: - Prefetch bound
+
+    /// The window is bounded by bytes, not by segment count: four 4K VOD segments in flight would peak
+    /// near 100 MB on a device that also holds decode buffers (AE#255).
+    func testPrefetchWindowNarrowsWithSegmentSize() {
+        XCTAssertEqual(HLSVODIngestReader.prefetchWindow(forSegmentBytes: 2 * 1024 * 1024), 4)
+        XCTAssertEqual(HLSVODIngestReader.prefetchWindow(forSegmentBytes: 8 * 1024 * 1024), 3)
+        XCTAssertEqual(HLSVODIngestReader.prefetchWindow(forSegmentBytes: 25 * 1024 * 1024), 1)
+        XCTAssertEqual(HLSVODIngestReader.prefetchWindow(forSegmentBytes: 0), 4)
+    }
+
+    // MARK: - Carriage probe
+
+    func testCarriageProbeReadsTheVerdictFromThePMT() {
+        XCTAssertEqual(
+            MPEGTransportStreamCodecProbe.classify(transportStream(streamType: 0x24)),
+            .hevcInMPEGTS
+        )
+        XCTAssertEqual(
+            MPEGTransportStreamCodecProbe.classify(transportStream(streamType: 0x1B)),
+            .otherCarriage,
+            "H.264 in MPEG-TS is carriage AVPlayer builds itself"
+        )
+    }
+
+    func testCarriageProbeWithoutEvidenceStaysInconclusive() {
+        XCTAssertEqual(MPEGTransportStreamCodecProbe.classify(Data()), .inconclusive)
+        XCTAssertEqual(
+            MPEGTransportStreamCodecProbe.classify(Data([0x47, 0x40, 0x00])),
+            .inconclusive,
+            "TS sync but not a full packet yet"
+        )
+        var withoutPMT = transportStream(streamType: 0x24)
+        withoutPMT[5] = 0x00 // table_id PAT: no program map in this packet
+        XCTAssertEqual(MPEGTransportStreamCodecProbe.classify(withoutPMT), .inconclusive)
+    }
+
+    func testCarriageProbeRejectsNonTransportStreamCarriage() {
+        let fragmentedMP4 = Data([0x00, 0x00, 0x00, 0x1C, 0x66, 0x74, 0x79, 0x70])
+        XCTAssertEqual(MPEGTransportStreamCodecProbe.classify(fragmentedMP4), .otherCarriage)
+    }
+
+    private static let markerOffset = 30
+
     private func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [Issue268URLProtocol.self]
@@ -135,13 +276,23 @@ final class Issue268HLSVODIngestTests: XCTestCase {
     }
 
     private func mediaPlaylist(_ segment: String) -> Data {
-        Data("""
-        #EXTM3U
-        #EXT-X-TARGETDURATION:6
-        #EXTINF:6,
-        \(segment)
-        #EXT-X-ENDLIST
-        """.utf8)
+        mediaPlaylist([segment])
+    }
+
+    private func mediaPlaylist(_ segments: [String]) -> Data {
+        var text = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n"
+        for segment in segments {
+            text += "#EXTINF:6,\n\(segment)\n"
+        }
+        return Data((text + "#EXT-X-ENDLIST").utf8)
+    }
+
+    /// Marker byte sits past the PMT section and inside the first packet's filler, so it never
+    /// disturbs the parse it is shipped with.
+    private func transportStream(streamType: UInt8, marker: UInt8) -> Data {
+        var bytes = transportStream(streamType: streamType)
+        bytes[Self.markerOffset] = marker
+        return bytes
     }
 
     private func transportStream(streamType: UInt8) -> Data {

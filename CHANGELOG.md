@@ -18,7 +18,10 @@ the public-API contract.
   a seekable TS-to-fMP4 ingest. Direct media playlists and master playlists are
   both covered; URL, HTTP headers, duration, resume position, and forward or
   backward seek semantics are preserved. H.264, fMP4, live, audio-only, and
-  inconclusive HLS inputs keep their existing route. (#268)
+  inconclusive HLS inputs keep their existing route. The ingest is addressed on
+  elapsed media time, so a source whose MPEG-TS PTS origin is not zero
+  (broadcast-derived VOD routinely starts hours in) still lands where the host
+  asked. (#268, PR #269, reported and implemented by @qoli)
 
 ## [6.3.0] - 2026-07-31
 

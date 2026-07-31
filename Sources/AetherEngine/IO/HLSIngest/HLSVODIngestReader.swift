@@ -5,6 +5,9 @@ import Foundation
 /// as a blocking MPEG-TS stream. Unlike `HLSLiveIngestReader`, seeks restart the
 /// same source at the segment preceding the requested playlist time. Demuxer
 /// packet gating then discards frames before the exact target.
+///
+/// Its seek axis is ELAPSED MEDIA TIME (the EXTINF sum), not the container's PTS: an MPEG-TS VOD
+/// carries an arbitrary PTS origin, so `Demuxer` strips that origin before positioning the reader.
 final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     private struct ResolvedMedia {
         let url: URL
@@ -13,10 +16,20 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         let duration: Double
     }
 
-    private static let maximumBufferedBytes = 32 * 1024 * 1024
+    /// FIFO ceiling, matched to `HLSLiveIngestReader`: the producer parks here until the demuxer drains.
+    private static let maximumBufferedBytes = 16 * 1024 * 1024
     private static let maximumPlaylistBytes = 2 * 1024 * 1024
-    private static let maximumCarriageProbeBytes = 512 * 1024
+    /// Carriage-probe ceiling. A conforming muxer repeats PAT + PMT at the head of every segment and
+    /// the probe stops at its first definitive verdict, so this bound is only reached by a source that
+    /// hides its PMT; 128 KiB is ~700 TS packets deep and keeps the rejected (H.264) case cheap.
+    private static let maximumCarriageProbeBytes = 128 * 1024
+    /// Probe verdict granularity: re-inspect after this much fresh payload, packet-aligned.
+    private static let carriageProbeChunkBytes = 188 * 32
     private static let maxConcurrentSegmentFetches = 4
+    /// Segment bytes the prefetch window may hold in memory. 4K VOD segments run 15-25 MB, so a fixed
+    /// window of four would peak near 100 MB on a device that also holds decode buffers; the window
+    /// narrows once the first segment's real size is known (AE#255: bound by bytes, not by count).
+    private static let maximumInFlightBytes = 24 * 1024 * 1024
 
     private let playlistURL: URL
     private let httpHeaders: [String: String]
@@ -37,6 +50,9 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     private var failed = false
     private var closed = false
     private var producer: Task<Void, Never>?
+    /// Playlist index the running producer opened at; lets a reposition onto that same segment, before
+    /// any byte was consumed, resolve without refetching it.
+    private var producerStartIndex: Int?
 
     init(
         playlistURL: URL,
@@ -86,9 +102,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
                   ) else {
                 return nil
             }
-            let prefix = try await reader.fetchCarriageProbe(segmentURL)
-            guard LiveSegmentFormat.classify(prefix) == .mpegts,
-                  MPEGTransportStreamCodecProbe.containsHEVC(prefix) else {
+            guard try await reader.probeCarriage(segmentURL) == .hevcInMPEGTS else {
                 return nil
             }
             reader.condition.withLock {
@@ -144,15 +158,17 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         return Int32(count)
     }
 
-    /// Byte seeks are deliberately unsupported. SEEK_SET(0) is the capability
-    /// handshake used by `CustomIOReaderBridge`; real positioning crosses the
-    /// `TimeSeekableIOReader` seam in `Demuxer`.
+    /// Byte seeks are deliberately unsupported: the concatenated segment stream has no address space
+    /// the reader could honour, and claiming one would let libavformat binary-search over HTTP. Only a
+    /// no-op reposition succeeds, which is what `CustomIOReaderBridge.open`'s SEEK_SET(0) capability
+    /// handshake asks at position 0; answering 0 unconditionally would report a rewind that never
+    /// happened. Real positioning crosses the `TimeSeekableIOReader` seam in `Demuxer`.
     func seek(offset: Int64, whence: Int32) -> Int64 {
-        if whence == SEEK_SET, offset == 0 { return 0 }
-        if whence == SEEK_CUR, offset == 0 {
-            return condition.withLock { bytePosition }
+        condition.withLock {
+            if whence == SEEK_SET, offset == bytePosition { return bytePosition }
+            if whence == SEEK_CUR, offset == 0 { return bytePosition }
+            return -1
         }
-        return -1
     }
 
     func seek(to seconds: Double) -> Bool {
@@ -167,11 +183,14 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
             condition.unlock()
             return false
         }
-        let containing = resolved.starts.lastIndex(where: { $0 <= seconds }) ?? 0
-        // A playlist need not declare independent segments. Starting one GOP
-        // earlier supplies the decoder with a random-access point; the engine's
-        // existing target gate drops frames before the requested time.
-        let startIndex = max(0, containing - 1)
+        let startIndex = Self.restartSegmentIndex(forElapsed: seconds, starts: resolved.starts)
+        // A reposition onto the segment the running producer opened at, with nothing consumed since,
+        // is where the ingest already stands. Scrub churn lands here: consecutive targets inside one
+        // segment would otherwise cancel and refetch that segment per reposition.
+        if startIndex == producerStartIndex, bytePosition == 0, !finished {
+            condition.unlock()
+            return true
+        }
         let previous = producer
         generation &+= 1
         let currentGeneration = generation
@@ -181,6 +200,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         bytePosition = 0
         finished = false
         failed = false
+        producerStartIndex = startIndex
         producer = Task.detached(priority: .userInitiated) { [self] in
             await produce(
                 resolved: resolved,
@@ -193,13 +213,25 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         previous?.cancel()
 
         let targetText = String(format: "%.2f", seconds)
-        let originText = String(format: "%.2f", resolved.starts[startIndex])
+        let startText = String(format: "%.2f", resolved.starts[startIndex])
         EngineLog.emit(
-            "[HLSVODIngest] seek target=\(targetText)s "
-                + "segment=\(startIndex) origin=\(originText)s",
+            "[HLSVODIngest] seek elapsed=\(targetText)s "
+                + "segment=\(startIndex) segmentStart=\(startText)s",
             category: .engine
         )
         return true
+    }
+
+    /// Segment the ingest restarts at for `elapsed` seconds of media time: the segment containing the
+    /// target, minus one. A playlist need not declare EXT-X-INDEPENDENT-SEGMENTS, so the extra segment
+    /// buys the decoder a random-access point ahead of the target; landing early is the reader's
+    /// contract and the engine's packet gate drops what precedes the exact target. A target past the
+    /// end clamps to the last segment rather than failing, which keeps a rounding overshoot at the
+    /// final boundary playable.
+    static func restartSegmentIndex(forElapsed elapsed: Double, starts: [Double]) -> Int {
+        guard !starts.isEmpty else { return 0 }
+        let containing = starts.lastIndex(where: { $0 <= elapsed }) ?? 0
+        return max(0, containing - 1)
     }
 
     func cancel() {
@@ -231,9 +263,11 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         }
     }
 
-    func makeIndependentReader() -> IOReader? {
-        HLSVODIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders)
-    }
+    /// No independent cursor: a second reader would mean a second full HTTP ingest of the same VOD
+    /// (its own playlist resolve, its own segment fetches from wherever it is positioned), and the
+    /// features that ask for one, side-demuxed subtitles and scrub previews, are not worth that
+    /// bandwidth on a source the host is already streaming once. The engine skips them for nil.
+    func makeIndependentReader() -> IOReader? { nil }
 
     private func startIfNeeded() {
         condition.lock()
@@ -245,6 +279,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         generation &+= 1
         let currentGeneration = generation
         let preResolved = resolved
+        producerStartIndex = 0
         producer = Task.detached(priority: .userInitiated) { [self] in
             do {
                 let media: ResolvedMedia
@@ -308,6 +343,13 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         }
     }
 
+    /// Prefetch depth for an observed segment size: the count cap, narrowed so the segments held in
+    /// memory stay inside `maximumInFlightBytes`, never below one.
+    static func prefetchWindow(forSegmentBytes bytes: Int) -> Int {
+        guard bytes > 0 else { return maxConcurrentSegmentFetches }
+        return max(1, min(maxConcurrentSegmentFetches, maximumInFlightBytes / bytes))
+    }
+
     private func ingestSegmentBatch(
         _ segments: [HLSMediaSegment],
         mediaURL: URL,
@@ -337,8 +379,8 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
                 }
             }
 
-            while nextToSpawn < resolvedSegments.count,
-                  nextToSpawn < Self.maxConcurrentSegmentFetches {
+            var window = Self.maxConcurrentSegmentFetches
+            while nextToSpawn < resolvedSegments.count, nextToSpawn < window {
                 spawn(nextToSpawn)
                 nextToSpawn += 1
             }
@@ -347,9 +389,11 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
                 guard let (index, bytes) = try await group.next() else { break }
                 ready[index] = bytes
                 while let head = ready.removeValue(forKey: nextToCommit) {
-                    if nextToCommit == 0,
-                       LiveSegmentFormat.classify(head) != .mpegts {
-                        throw HLSIngestError.unsupportedSegmentFormat
+                    if nextToCommit == 0 {
+                        guard LiveSegmentFormat.classify(head) == .mpegts else {
+                            throw HLSIngestError.unsupportedSegmentFormat
+                        }
+                        window = Self.prefetchWindow(forSegmentBytes: head.count)
                     }
                     nextToCommit += 1
                     guard append(head, generation: generation) else {
@@ -357,7 +401,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
                         return
                     }
                     while nextToSpawn < resolvedSegments.count,
-                          nextToSpawn < nextToCommit + Self.maxConcurrentSegmentFetches {
+                          nextToSpawn < nextToCommit + window {
                         spawn(nextToSpawn)
                         nextToSpawn += 1
                     }
@@ -471,7 +515,11 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         return data
     }
 
-    private func fetchCarriageProbe(_ url: URL) async throws -> Data {
+    /// Reads the head of the first segment and classifies its carriage. The body is streamed and
+    /// abandoned at the first definitive verdict, so a conforming segment costs the two packets that
+    /// carry PAT and PMT rather than the full ceiling; an origin that ignores the Range request is
+    /// bounded the same way, by cancelling the task instead of buffering the segment.
+    private func probeCarriage(_ url: URL) async throws -> MPEGTransportStreamCodecProbe.Verdict {
         var request = makeRequest(url)
         request.setValue(
             "bytes=0-\(Self.maximumCarriageProbeBytes - 1)",
@@ -484,15 +532,23 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
             throw HLSIngestError.playlistUnreachable(status: status)
         }
         var data = Data()
-        data.reserveCapacity(Self.maximumCarriageProbeBytes)
+        data.reserveCapacity(Self.carriageProbeChunkBytes)
+        var nextVerdictAt = Self.carriageProbeChunkBytes
         for try await byte in bytes {
             data.append(byte)
-            if data.count == Self.maximumCarriageProbeBytes { break }
+            guard data.count >= nextVerdictAt else { continue }
+            let verdict = MPEGTransportStreamCodecProbe.classify(data)
+            if verdict != .inconclusive { return verdict }
+            guard data.count < Self.maximumCarriageProbeBytes else { break }
+            nextVerdictAt = min(
+                Self.maximumCarriageProbeBytes,
+                data.count + Self.carriageProbeChunkBytes
+            )
         }
         guard !data.isEmpty else {
             throw HLSIngestError.unsupportedSegmentFormat
         }
-        return data
+        return MPEGTransportStreamCodecProbe.classify(data)
     }
 
     private func decrypt(
@@ -529,52 +585,58 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
 /// response MIME type is treated as codec evidence.
 enum MPEGTransportStreamCodecProbe {
     private static let packetSize = 188
+    private static let hevcStreamType: UInt8 = 0x24
 
-    static func containsHEVC(_ data: Data) -> Bool {
+    enum Verdict: Equatable {
+        /// PMT declares HEVC: AVFoundation builds no video track for this carriage (HLS Authoring
+        /// Spec sanctions HEVC only in fMP4), so the source belongs on the ingest.
+        case hevcInMPEGTS
+        /// Not MPEG-TS at all, or a PMT that declares something AVPlayer carries itself.
+        case otherCarriage
+        /// Not enough evidence yet; read further or, at the ceiling, leave the source on its route.
+        case inconclusive
+    }
+
+    /// Definitive as soon as one complete PMT section has been read; `inconclusive` while the head
+    /// still parses as TS but no PMT has appeared. Callers treat a final `inconclusive` like
+    /// `otherCarriage`: the reroute needs positive evidence, never an absence of it.
+    static func classify(_ data: Data) -> Verdict {
+        guard !data.isEmpty else { return .inconclusive }
+        guard LiveSegmentFormat.classify(data) == .mpegts else { return .otherCarriage }
         let bytes = [UInt8](data)
-        guard let syncOffset = (0..<min(packetSize, bytes.count)).first(
-            where: { offset in
-                offset + packetSize * 2 < bytes.count
-                    && bytes[offset] == 0x47
-                    && bytes[offset + packetSize] == 0x47
-                    && bytes[offset + packetSize * 2] == 0x47
-            }
-        ) else {
-            return false
-        }
-
-        var packetStart = syncOffset
+        guard bytes.count >= packetSize else { return .inconclusive }
+        var packetStart = 0
+        var sawPMT = false
         while packetStart + packetSize <= bytes.count {
-            if packetContainsHEVC(bytes, packetStart: packetStart) {
-                return true
+            guard bytes[packetStart] == 0x47 else { return .otherCarriage } // lost packet alignment
+            switch programMapVerdict(bytes, packetStart: packetStart) {
+            case .hevcInMPEGTS: return .hevcInMPEGTS
+            case .otherCarriage: sawPMT = true
+            case .inconclusive: break
             }
             packetStart += packetSize
         }
-        return false
+        return sawPMT ? .otherCarriage : .inconclusive
     }
 
-    private static func packetContainsHEVC(
+    /// One packet's contribution: `inconclusive` unless it opens a PMT section, which is then read for
+    /// an HEVC elementary stream. A PMT split across packets is only judged on its first packet; a
+    /// declaration hiding past that boundary reads as `otherCarriage` and keeps the native route.
+    private static func programMapVerdict(
         _ bytes: [UInt8],
         packetStart: Int
-    ) -> Bool {
-        guard bytes[packetStart] == 0x47,
-              bytes[packetStart + 1] & 0x40 != 0 else {
-            return false
-        }
+    ) -> Verdict {
+        guard bytes[packetStart + 1] & 0x40 != 0 else { return .inconclusive } // payload_unit_start
         let adaptationControl = (bytes[packetStart + 3] >> 4) & 0x03
-        guard adaptationControl == 1 || adaptationControl == 3 else {
-            return false
-        }
+        guard adaptationControl == 1 || adaptationControl == 3 else { return .inconclusive }
         var payload = packetStart + 4
+        let packetEnd = packetStart + packetSize
         if adaptationControl == 3 {
             payload += 1 + Int(bytes[payload])
+            guard payload < packetEnd else { return .inconclusive }
         }
-        let packetEnd = packetStart + packetSize
-        guard payload < packetEnd else { return false }
-        payload += 1 + Int(bytes[payload])
-        guard payload + 12 <= packetEnd, bytes[payload] == 0x02 else {
-            return false
-        }
+        payload += 1 + Int(bytes[payload]) // pointer_field
+        guard payload + 12 <= packetEnd, bytes[payload] == 0x02 else { return .inconclusive }
 
         let sectionLength =
             (Int(bytes[payload + 1] & 0x0F) << 8)
@@ -585,13 +647,13 @@ enum MPEGTransportStreamCodecProbe {
                 | Int(bytes[payload + 11])
         var stream = payload + 12 + programInfoLength
         while stream + 5 <= sectionEnd {
-            if bytes[stream] == 0x24 { return true }
+            if bytes[stream] == hevcStreamType { return .hevcInMPEGTS }
             let infoLength =
                 (Int(bytes[stream + 3] & 0x0F) << 8)
                     | Int(bytes[stream + 4])
             stream += 5 + infoLength
         }
-        return false
+        return .otherCarriage
     }
 }
 

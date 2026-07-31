@@ -1076,8 +1076,8 @@ public final class Demuxer: @unchecked Sendable {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return }
-        if let reader = (avioProvider as? CustomIOReaderBridge)?.timeSeekableReader {
-            guard reader.seek(to: seconds) else { return }
+        if let reader = timeSeekableReader {
+            guard repositionTimeSeekable(reader, toSourceSeconds: seconds, streamIndex: -1) else { return }
             resetAfterTimeSeek(ctx)
             return
         }
@@ -1100,13 +1100,15 @@ public final class Demuxer: @unchecked Sendable {
         guard let ctx = formatContext,
               streamIndex >= 0,
               streamIndex < Int32(ctx.pointee.nb_streams) else { return false }
-        if let reader = (avioProvider as? CustomIOReaderBridge)?.timeSeekableReader,
+        if let reader = timeSeekableReader,
            let stream = ctx.pointee.streams[Int(streamIndex)] {
             let timeBase = stream.pointee.time_base
             guard timeBase.num > 0, timeBase.den > 0 else { return false }
             let seconds = Double(timestamp) * Double(timeBase.num)
                 / Double(timeBase.den)
-            guard reader.seek(to: max(0, seconds)) else { return false }
+            guard repositionTimeSeekable(reader, toSourceSeconds: seconds, streamIndex: streamIndex) else {
+                return false
+            }
             resetAfterTimeSeek(ctx)
             return true
         }
@@ -1137,6 +1139,43 @@ public final class Demuxer: @unchecked Sendable {
         }
         avformat_flush(ctx)
         lastReadClipIdx = -1
+    }
+
+    /// #268: the source reader repositions itself on segmented sources whose natural axis is time.
+    var timeSeekableReader: TimeSeekableIOReader? {
+        (avioProvider as? CustomIOReaderBridge)?.timeSeekableReader
+    }
+
+    /// Every engine seek target is an ABSOLUTE source PTS, while a `TimeSeekableIOReader` addresses
+    /// elapsed media time (for HLS: the EXTINF sum in front of a segment). MPEG-TS carries an
+    /// arbitrary PTS origin, so the two axes differ by that origin: ffmpeg writes 1.4 s by default and
+    /// broadcast-derived VOD routinely starts hours in. Handing the raw target to the reader sent a
+    /// seek to item second 5 of a 1000 s-origin source to the LAST segment of its playlist, and the
+    /// session clock left the item's own duration (measured on `hls-hevc-vod-long-offset`).
+    private func repositionTimeSeekable(
+        _ reader: TimeSeekableIOReader,
+        toSourceSeconds seconds: Double,
+        streamIndex: Int32
+    ) -> Bool {
+        reader.seek(to: max(0, seconds - sourcePTSOriginSeconds(streamIndex: streamIndex)))
+    }
+
+    /// PTS origin of the source axis in seconds: the anchoring stream's own `start_time` when it has
+    /// one (a stream-anchored seek is measured against exactly that stream), else the container's.
+    /// Unknown origins resolve to 0, which keeps the mapping identical to the pre-#268 behaviour.
+    private func sourcePTSOriginSeconds(streamIndex: Int32) -> Double {
+        guard let ctx = formatContext else { return 0 }
+        if streamIndex >= 0, streamIndex < Int32(ctx.pointee.nb_streams),
+           let stream = ctx.pointee.streams[Int(streamIndex)] {
+            let start = stream.pointee.start_time
+            let timeBase = stream.pointee.time_base
+            if start != Int64.min, timeBase.num > 0, timeBase.den > 0 {
+                return Double(start) * Double(timeBase.num) / Double(timeBase.den)
+            }
+        }
+        let start = ctx.pointee.start_time
+        guard start != Int64.min else { return 0 }
+        return Double(start) / Double(AV_TIME_BASE)
     }
 
     /// #112 round 10: latched by the side reader once a timestamp positioning seek timed out or failed on this
@@ -1181,6 +1220,17 @@ public final class Demuxer: @unchecked Sendable {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return false }
+        // #268: a time-seekable source repositions itself instead of paying libavformat's byte-space
+        // binary search, which on an index-less MPEG-TS is either wedged or broken (round 10 below) and
+        // over HTTP would additionally be a request storm. No read deadline is armed: the reader's
+        // reposition is a bookkeeping operation, the refetch happens behind the FIFO.
+        if let reader = timeSeekableReader {
+            guard repositionTimeSeekable(reader, toSourceSeconds: seconds, streamIndex: anchorStreamIndex) else {
+                return false
+            }
+            resetAfterTimeSeek(ctx)
+            return true
+        }
         // #112 round 9: the deadline lives on the provider protocol. Casting to AVIOReader here left a
         // disc-adapter source (CustomIOReaderBridge over HTTPDiscIOReader) unbounded: one positioning
         // seek on a remote ISO sat wedged ~230 s and every later re-arm queued behind it.
