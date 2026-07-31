@@ -1203,6 +1203,20 @@ public final class AetherEngine: ObservableObject {
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 
+    /// #266: one pass over one container, filling every native store whose external track points at
+    /// it. Tracks that share a URL and headers collapse into a single job, so a container holding
+    /// several subtitle streams is fetched once rather than once per registered track.
+    struct ExternalSubtitleFillJob: Sendable {
+        struct Target: Sendable {
+            /// Absolute AVStream index in this container, nil for its first subtitle stream.
+            let streamIndex: Int32?
+            let store: NativeSubtitleCueStore
+        }
+        let url: URL
+        let headers: [String: String]
+        let targets: [Target]
+    }
+
     /// Native WebVTT rendition store for the in-band CEA-608 track (#98). The CC tap feeds it (via
     /// `updateClosedCaptionCues`) so 608 captions ride a native AVKit-selectable rendition and
     /// survive PiP / AirPlay, not just the overlay. Nil when there is no 608 track or native

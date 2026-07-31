@@ -167,6 +167,9 @@ let track = player.addExternalSubtitleTrack(
 player.selectSubtitleTrack(index: track.id)
 // Declared at load instead, external tracks also join the native WebVTT renditions (PiP):
 // LoadOptions(prepareNativeSubtitles: true, externalSubtitles: [ExternalSubtitleTrack(url: srtURL, language: "en")])
+// When the URL is a container holding several subtitle streams, register one track per stream
+// with its absolute AVStream index; tracks sharing a URL are decoded in one pass (#266).
+ExternalSubtitleTrack(url: mkvURL, name: "Spanish", language: "es", sourceStreamIndex: 3)
 
 // Native WebVTT subtitle renditions (subtitles in PiP / AirPlay / external display; opt-in
 // via LoadOptions.prepareNativeSubtitles, details in docs/formats.md)

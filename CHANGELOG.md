@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`ExternalSubtitleTrack.sourceStreamIndex`, so an external subtitle URL can be a container rather than a sidecar.** An external track's URL may hold several subtitle streams (an MKV with English, English SDH and Spanish), and a host would register one track per stream against that same URL. The sidecar decoder stopped at the container's first subtitle stream and the descriptor carried no index, so every such track decoded that same stream and the host got three selectable tracks rendering identical cues. The new field names the stream to decode as an absolute `AVStream` index inside the container, matching the convention that embedded track ids are stream indices; nil keeps decoding the first subtitle stream. An index that is out of range or names a non-subtitle stream fails the decode rather than falling back to the first subtitle stream, because a silent fallback is indistinguishable from the behaviour the index exists to escape. Reported by edde746. (#266)
+
+### Changed
+
+- **External tracks sharing a container are now filled from a single pass over it.** Each load-declared external track used to be decoded by its own whole-file read, so three tracks pointing at one MKV meant three full downloads at load, and `AVDISCARD_ALL` cannot shorten them (a Matroska demuxer reads every discarded byte anyway). Tracks sharing a URL and headers are now decoded together in one pass, one stream decoder per requested stream. Since a pass covering several streams fails as a whole, a failure retries the targets individually, so one host-side index mistake cannot blank the container's other tracks; a store that still could not be filled stays unfinished rather than serving a complete but blank rendition.
 
 ## [6.2.1] - 2026-07-30
 
