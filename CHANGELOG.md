@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.4.0] - 2026-07-31
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.0))
+
+### Added
+
+- `HLSVideoEngine.sourceStartSeconds`, the source PTS the container's own
+  timeline starts at. The engine folds it out of the published playhead; a host
+  driving `HLSVideoEngine` directly can read it to do the same.
+
 ### Fixed
 
 - **Finite HEVC-in-MPEG-TS HLS VOD no longer reaches AVPlayer's audio-only,
