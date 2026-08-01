@@ -709,6 +709,12 @@ public final class AetherEngine: ObservableObject {
     var softwareSubtitlePacketStore: SubtitlePacketStore?
     var subtitleDrainDecoders: [SubtitleChannel: EmbeddedSubtitleDecoder] = [:]
     var subtitleDrainCursors: [SubtitleChannel: SubtitleDrainCursor] = [:]
+    /// #271: monotonic timestamp of the previous drain tick, so a tick that ran long is not read as
+    /// a seek by the next one (`SubtitleOverlayDrainer.drainPlan`). Per tick, not per channel: both
+    /// channels are planned in the same pass off the same playhead. nil before the first tick.
+    var subtitleDrainLastTickUptime: Double?
+    /// #271: the OCR worker's own tick timestamp; same rule, separate cadence.
+    var subtitleOCRLastTickUptime: Double?
     /// #250: the frontier source of the last statement emitted per channel, so a change of source
     /// (the prefetcher dying, EOF landing) gets its own line instead of waiting for the 30 s
     /// cadence. nil before the first statement of a session.
@@ -741,6 +747,13 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let subtitleDrainBackscanSeconds: Double = 15
     nonisolated static let subtitleDrainJumpThresholdSeconds: Double = 2.5
     nonisolated static let subtitleDrainTickNanoseconds: UInt64 = 500_000_000
+    /// #271: per-tick decode cap for the overlay drainer, extended to the next PTS boundary
+    /// (`SubtitleOverlayDrainer.batchEnd`). The drain window is bounded in seconds of content, so on
+    /// a dense typeset track one window is thousands of packets and the loop holds the main actor
+    /// for all of them. Generous on purpose: the backscan sits at the head of the window, so the
+    /// cues around the playhead still land in the first batch and the rest of the 60 s lead fills
+    /// over the following ticks.
+    nonisolated static let subtitleDrainMaxPacketsPerTick: Int = 256
     /// Phase D: the OCR worker decodes bitmap compositions to playhead + this lead so AVKit's
     /// ~240 s forward .vtt prefetch burst at selection is served populated, never cached empty.
     nonisolated static let subtitleOCRLeadSeconds: Double = 240
