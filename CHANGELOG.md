@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.4.1] - 2026-08-01
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.1))
+
 ### Changed
 
 - **`$subtitleCues` publishes once per drain tick instead of once per decoded
