@@ -10,7 +10,39 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **`$subtitleCues` publishes once per drain tick instead of once per decoded
+  subtitle packet.** Every publication carries the whole cumulative cue array,
+  and a snapshot cannot tell a consumer which of its elements are new, so each
+  one cost every subscriber a full walk: O(n) per packet, O(n²) per drain
+  window. On a typeset ASS track that was 104 publications and 608,608 cue
+  visits per second in a single consumer, none of which found new work. The
+  tick now binds the channel's array once, applies the whole batch of decoded
+  events to it, and publishes only when the batch actually changed something.
+  The retained-store insert also looks up same-start cues by binary search
+  rather than scanning the whole array. Reported and measured by @edde746
+  (#271).
+
+### Fixed
+
+- **One drain tick no longer decodes an unbounded number of subtitle packets.**
+  The drain window is bounded in seconds of content (backscan plus lead), never
+  in packets, so its size was set by the file's subtitle density while the
+  decode loop ran synchronously on the main actor with no suspension point. It
+  is now capped per tick, with the boundary extended to the end of the run
+  sharing the last packet's PTS: the drain cursor is a bare PTS advanced past
+  what it decoded, so a cut inside a same-PTS run would skip the remainder
+  rather than resume it on the next tick. Dense ASS deliberately keeps hundreds
+  of distinct payloads on one timestamp. The subtitle OCR worker's existing cap
+  gets the same PTS-boundary correction (#271).
+- **A slow drain tick no longer reads its own duration as a seek.** The plan
+  compared the live playhead against the playhead captured at the previous
+  tick's start, so a tick lasting longer than the 2.5 s jump threshold made the
+  next one reset onto a fresh, disjoint window: a positive feedback loop, since
+  the reset window is the expensive one. Forward drift is now forgiven up to
+  the wall time the previous tick consumed. Backward drift is not, because
+  playback never moves the playhead backwards (#271).
 
 ## [6.4.0] - 2026-07-31
 
