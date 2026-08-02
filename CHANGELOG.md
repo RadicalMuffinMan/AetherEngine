@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.5.2] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.2))
+
 ### Fixed
 
 - **A range that finished delivering is now read out of the window instead of
