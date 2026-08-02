@@ -10,7 +10,26 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A live DVR rewind deeper than about 40 s no longer asks for a segment the
+  cache has already deleted.** A live session resolved a segment retention
+  budget of 0, on the reasoning that the sliding playlist had already dropped
+  everything behind the window so retention would serve nothing. That had it
+  backwards: the playlist window is the looser bound (300 segments for a 600 s
+  DVR window at a 2 s cadence), while `pruneOutsideWindow` with a 0 budget
+  takes its hard-window branch and cuts at `currentTargetIndex -
+  backwardWindow`, i.e. 20 segments. Live therefore retained ~42 s no matter
+  what `dvrWindowSeconds` asked for, while the playlist and the published
+  `liveSeekableRange` advertised the whole window, and live has no
+  `restartHandler` to re-produce a segment that is gone. Measured on the
+  engine before the fix: `cacheCount` pinned at 21 for a whole 150 s session
+  with `dvrWindowSeconds: 600`. Live now resolves the same volume-aware budget
+  as VOD (2 GiB, clamped to a quarter of free space), which is the mechanism
+  built for exactly this, so the retained history tracks the advertised window
+  and stays bounded by it. `backwardWindow` keeps its own job as the
+  Continuous-Audio handover floor. The producer-side prefetch park the budget
+  also feeds is VOD-only, so live cannot park on it.
 
 ## [6.4.6] - 2026-08-02
 
