@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.5.1] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.1))
+
 ### Fixed
 
 - **The speculative tail fetch now removes the round trip it was added for.**
