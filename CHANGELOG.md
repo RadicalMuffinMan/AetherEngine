@@ -10,7 +10,39 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A range that finished delivering is now read out of the window instead of
+  fetched again.** A completed range clears `activeTask` exactly as a dropped
+  one does, and the no-connection branch reconnected at the READ position
+  regardless, which resets `winStart` and drops everything still resident. A
+  consumer slower than the transfer, which is what the parse pass is (one 256 KB
+  AVIO buffer at a time), therefore re-fetched what it had just been handed.
+  Measured with aetherctl against a Range-logging origin: a 764450 B trailing
+  `moov` cost three connections and 1506918 delivered bytes, 1.97x its own size.
+  It now costs one. Serving what is in hand first also lets the #220 frontier
+  refill run, which it could not while this branch preempted it on every
+  completed range.
+
+- **A read at the end of the file no longer opens a connection for it.** The EOF
+  decision sat below the reconnect, so a position at exactly `fileSize` first
+  issued `bytes=<fileSize>-` and took an empty 206 whose reconnect reset
+  `winStart` past the last byte, dropping a window the parse was still reading.
+  On the same trailing-`moov` measurement that was one of the three connections.
+
+- **The head of the file is retained across the open phase, so the return trip
+  after a parse excursion is a copy.** #281 parked the open window at seek time,
+  cut from `winStart`, on the reasoning that the demuxer returns to the window's
+  start. It returns to the FILE's start: landings of 48, 1161, 5752 and 265159
+  across four MP4 layouts and a field trace. Those coincide only when the parse
+  seeks away before reading anything. A fragmented MP4 reads 33 MB first, so
+  `winStart` has long left the head and the parked copy covers nothing that is
+  asked for. The head is now collected as the data connection delivers it, which
+  is the only point at which it can be, since `trimWindowLocked` drops it as the
+  parse moves forward. Measured with aetherctl against an origin with 300 ms of
+  latency per request: opening a fragmented fixture went from 1732 ms and four
+  requests to 1219 ms and three. The parked window is gone: across six container
+  layouts (four MP4, two MKV) it served no read that the retained head does not.
 
 ## [6.5.1] - 2026-08-02
 
