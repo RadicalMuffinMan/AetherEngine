@@ -31,10 +31,10 @@ struct LiveWindowSizing {
     /// Number of segments the playlist keeps visible (and the cache keeps
     /// resident). Clamped up to `minSafeSegments`.
     ///
-    /// `targetSegmentDurationSeconds` is the CUT TARGET — a lower bound on the real GOP-quantized
+    /// `targetSegmentDurationSeconds` is the CUT TARGET, a lower bound on the real GOP-quantized
     /// segment duration (fastZap: 0.5 s target vs ~2 s GOPs). Dividing the window seconds by it
     /// alone inflated the window 4x (120 segments ≈ 240 s), pinning MEDIA-SEQUENCE at 0 for minutes
-    /// and deferring evictBelow — the "sliding" window never slid. Callers that know the observed
+    /// and deferring evictBelow (the "sliding" window never slid). Callers that know the observed
     /// cadence (mean EXTINF of recent finalized segments) pass it so the window really holds
     /// `effectiveWindowSeconds` of content.
     func windowSegmentCount(observedSegmentDurationSeconds: Double?) -> Int {
@@ -266,6 +266,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Guarded by stateLock.
     private var _liveRecentDurations: [Double] = []
     private static let liveRecentDurationSampleCount = 20
+    /// One-shot latch for `noteWindowSlideRelativeToConsumer`. Guarded by stateLock.
+    private var _liveConsumerOutsideWindowLatched = false
 
     init(
         cache: SegmentCache,
@@ -395,13 +397,41 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 _liveFirstVisible = newFirst
                 let cutoff = newFirst
                 let cacheRef = cache
-                DispatchQueue.global(qos: .utility).async {
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    // Read the consumer's fetch point BEFORE evicting, and off stateLock (the cache has
+                    // its own lock; nesting the two here would invert the ordering evictBelow's async
+                    // hop exists to avoid).
+                    let consumerTarget = cacheRef.targetIndex
                     cacheRef.evictBelow(cutoff)
+                    self?.noteWindowSlideRelativeToConsumer(cutoff: cutoff, consumerTarget: consumerTarget)
                 }
             }
             return (total, _liveFirstVisible, refreshCounter, false, _discontinuitySequence)
         }
         return (segments.count, 0, refreshCounter, false, 0)
+    }
+
+    /// The sliding window overtaking the consumer's fetch point is the failure mode the removed advance
+    /// park used to make impossible (it capped the producer 10 segments ahead of that point). Live is
+    /// source-paced, so a real-time origin cannot get there; an origin that hands over more than one
+    /// window of backlog faster than the consumer drains it can, and the consumer then asks for a
+    /// segment `evictBelow` has already deleted. That surfaces downstream as a cache miss, a jump, or a
+    /// silent rejoin, none of which name this cause, so name it here. Latched: once out, every
+    /// subsequent build would repeat it.
+    private func noteWindowSlideRelativeToConsumer(cutoff: Int, consumerTarget: Int) {
+        guard consumerTarget >= 0 else { return }
+        stateLock.lock()
+        let outside = consumerTarget < cutoff
+        let shouldLog = outside && !_liveConsumerOutsideWindowLatched
+        _liveConsumerOutsideWindowLatched = outside
+        stateLock.unlock()
+        guard shouldLog else { return }
+        EngineLog.emit(
+            "[HLSVideoEngine] live window slid past the consumer: firstVisible=\(cutoff) "
+            + "consumerTarget=\(consumerTarget) (producer is running more than one window ahead; "
+            + "expect a cache miss or a live-edge jump)",
+            category: .session
+        )
     }
 
     var firstVisibleSegmentIndex: Int {
@@ -841,7 +871,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
 
     /// Blocking-reload hold bound: 3 x sealed TARGETDURATION (= the advertised HOLD-BACK depth).
-    /// The old hardcoded 18 s was 9 x TD under fastZap — a hold that outlives AVPlayer's ~4 s
+    /// The old hardcoded 18 s was 9 x TD under fastZap. A hold that outlives AVPlayer's ~4 s
     /// forward buffer guarantees the stall it exists to prevent. The seal is always resolved before
     /// the first playlist that can advertise CAN-BLOCK-RELOAD is served (every serve path runs
     /// waitForFirstLiveSegment first), so the TD=6 fallback (3 x 6 = legacy 18 s) only covers tests.

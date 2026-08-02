@@ -54,7 +54,7 @@ _Nothing yet._
 - **Live sessions no longer freeze 6-8 s at a time when the producer's
   backpressure park meets an LL-HLS blocking reload.** The advance park
   released only on a client segment GET, while the client's held
-  `?_HLS_msn=` reload was only satisfiable by a producer cut — and the held
+  `?_HLS_msn=` reload was only satisfiable by a producer cut, and the held
   reload occupies the serialized keep-alive connection, starving the very
   segment GET that would release the park. The 18 s hold then expired into
   `503 unsatisfiable` long after AVPlayer's ~4 s forward buffer had drained

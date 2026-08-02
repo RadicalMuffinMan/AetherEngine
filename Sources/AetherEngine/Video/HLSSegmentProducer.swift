@@ -467,7 +467,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Live disk runaway cap for awaitLiveWindowHeadroom. In healthy play resident count tracks the
     /// sliding window (~windowSegmentCount plus a few in flight) because every playlist build slides
     /// evictBelow. It can only approach this cap when the consumer stopped polling entirely (dead
-    /// item), at which point the engine's stall watchdogs reload the item within ~12 s — so a park
+    /// item), at which point the engine's stall watchdogs reload the item within ~12 s, so a park
     /// here is diagnostic, never steady state. ~6 min of 2 s GOP segments.
     private static let liveResidentSegmentCap = 180
 
@@ -1095,11 +1095,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Live replacement for the advance-path backpressure park (#65). Live production is source-paced,
     /// so overproduction is bounded by the origin's real-time delivery; the only unbounded case is a
-    /// consumer that stopped polling entirely, which this cap catches. Unlike the old park it releases
-    /// on eviction (window slide), not on a consumer fetch, so it cannot deadlock against a held
-    /// blocking reload. Logs from the first cycle — the old live park was silent below 12 s, which is
-    /// why consumer-facing 6-8 s freezes never showed a producer-side line. Returns true on release,
-    /// false when stop was requested.
+    /// consumer that stopped polling entirely, which this cap catches. Logs from the first cycle (the
+    /// old live park was silent below 12 s, which is why consumer-facing 6-8 s freezes never showed a
+    /// producer-side line). Returns true on release, false when stop was requested.
+    ///
+    /// What makes this safe against a held blocking reload is the HEIGHT of the cap, not the release
+    /// path. A parked pump finalizes no segment, so `segments.count` stops growing, so the playlist
+    /// window stops sliding and `notePlaylistBuild -> evictBelow` evicts nothing: while the park holds,
+    /// the only thing that lowers `cache.count` is `pruneOutsideWindow` off a consumer segment GET
+    /// (`declareTarget`), structurally the same release the #65 park waited on. The deadlock is out of
+    /// reach only because reaching `liveResidentSegmentCap` takes a consumer that is already dead, and
+    /// the engine's 12 s stall watchdogs reload the item (and thus issue a fresh GET) long before then.
+    /// Lowering the cap toward the steady-state window would put that deadlock back within reach.
     private func awaitLiveWindowHeadroom(head: Int) -> Bool {
         if cache.count < Self.liveResidentSegmentCap { return true }
         // #240: a parked pump is not using the link.
