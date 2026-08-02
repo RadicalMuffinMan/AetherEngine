@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`EngineTLS.allowUntrustedCertificates`: host opt-in to accept server
+  certificates that fail system trust evaluation.** Every engine fetch runs
+  over URLSession, which enforces system certificate trust that the
+  in-demuxer network stacks the engine replaces never did. A media server
+  fronted by a self-signed or private-CA certificate therefore keeps working
+  in a host whose own API layer bypasses trust, while the engine's open fails
+  its handshake before a byte is read and surfaces as bare
+  `AVERROR_INVALIDDATA`, invisible in any server log. The flag is read per
+  challenge, so a host settings toggle applies from the next connection.
+  Default off; while off, and for every non-server-trust challenge, handling
+  is unchanged. Covers all outbound sessions: the AVIOReader probe, chunk,
+  persistent and streaming paths, the disc reader, both HLS ingest readers,
+  and the audio tap fetcher.
 
 ## [6.5.6] - 2026-08-03
 
