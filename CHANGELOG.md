@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.4.7] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.7))
+
 ### Fixed
 
 - **A live DVR rewind deeper than about 40 s no longer asks for a segment the
