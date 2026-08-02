@@ -30,6 +30,19 @@ the public-API contract.
   `winStart` past the last byte, dropping a window the parse was still reading.
   On the same trailing-`moov` measurement that was one of the three connections.
 
+- **The head of the file is retained across the open phase, so the return trip
+  after a parse excursion is a copy.** #281 parked the open window at seek time,
+  cut from `winStart`, on the reasoning that the demuxer returns to the window's
+  start. It returns to the FILE's start: landings of 48, 1161, 5752 and 265159
+  across four MP4 layouts and a field trace. Those coincide only when the parse
+  seeks away before reading anything. A fragmented MP4 reads 33 MB first, so
+  `winStart` has long left the head and the parked copy covers nothing that is
+  asked for. The head is now collected as the data connection delivers it, which
+  is the only point at which it can be, since `trimWindowLocked` drops it as the
+  parse moves forward. Measured with aetherctl against an origin with 300 ms of
+  latency per request: opening a fragmented fixture went from 1732 ms and four
+  requests to 1219 ms and three.
+
 ## [6.5.1] - 2026-08-02
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.1))

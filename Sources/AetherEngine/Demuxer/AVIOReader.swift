@@ -394,6 +394,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// winCond-guarded (the window it is cut from is).
     private var parkedSpan: ResidentSpan?
 
+    /// The head of the FILE, retained for the open phase as the data connection delivers it.
+    ///
+    /// `parkedSpan` cuts from `winStart`, on the reasoning that the demuxer returns to the window's
+    /// start. Measured against four MP4 layouts, it returns to the FILE's start: observed landings
+    /// 48, 1161, 5752 and, in a field trace, 265159. Those coincide only while the demuxer seeks
+    /// away before reading anything, which is the moov-at-end case and not the fragmented one,
+    /// where `winStart` has advanced 33 MB by then and the parked window covers nothing that is
+    /// asked for. Collected incrementally rather than copied at seek time, because by seek time
+    /// `trimWindowLocked` has already dropped the head. winCond-guarded.
+    private var headSpan: Data = Data()
+
     /// Speculative tail bytes fetched alongside `open()`. winCond-guarded: the fetch completes on a
     /// URLSession queue while the demux thread reads.
     private var tailSpan: ResidentSpan?
@@ -410,6 +421,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var tailPrefetchStartedAt = DispatchTime.now()
 
     /// One log line per span per open, not per serve. winCond-guarded (set from the read loop).
+    private var headSpanServeLogged = false
     private var parkedSpanServeLogged = false
     private var tailSpanServeLogged = false
 
@@ -834,6 +846,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // #281: both spans hold real bytes (up to parkedSpanMaxBytes + tailPrefetchBytes), so they
         // are released with the window rather than living until the reader is deallocated.
         parkedSpan = nil
+        headSpan = Data()
         tailSpan = nil
         openPhaseActive = false
         let tailTask = tailPrefetchTask
@@ -1102,6 +1115,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // after the first says nothing new and would only make the log expensive.
                 var spanLine: String? = nil
                 switch served {
+                case .head where !headSpanServeLogged:
+                    headSpanServeLogged = true
+                    spanLine = "[AVIOReader] \(label) retained file head served the return to \(spanPos)"
+                        + "; no reconnect for it"
                 case .parked where !parkedSpanServeLogged:
                     parkedSpanServeLogged = true
                     spanLine = "[AVIOReader] \(label) parked window served the return to \(spanPos)"
@@ -1713,6 +1730,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         openPhaseActive = false
         parkedSpan = nil
+        headSpan = Data()
         winCond.unlock()
     }
 
@@ -1730,12 +1748,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Which cold-start span answered, so the log can name the round trip that did not happen
     /// rather than leaving its absence to be inferred.
     enum SpanServe {
+        case head(Int)
         case parked(Int)
         case tail(Int)
 
         var bytes: Int {
             switch self {
-            case .parked(let n), .tail(let n): return n
+            case .head(let n), .parked(let n), .tail(let n): return n
             }
         }
     }
@@ -1746,6 +1765,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// install, never mutate.
     private func serveFromResidentSpansLocked(into dst: UnsafeMutablePointer<UInt8>, maxLen: Int,
                                               at offset: Int64) -> SpanServe? {
+        if !headSpan.isEmpty,
+           let n = ResidentSpan(start: 0, data: headSpan).serve(into: dst, maxLen: maxLen, at: offset) {
+            return .head(n)
+        }
         if let n = parkedSpan?.serve(into: dst, maxLen: maxLen, at: offset) { return .parked(n) }
         if let n = tailSpan?.serve(into: dst, maxLen: maxLen, at: offset) { return .tail(n) }
         return nil
@@ -1877,6 +1900,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     (d + base).copyMemory(from: s, byteCount: count)
                 }
             }
+        }
+        // #281 retest: retain the head of the file for the open phase, as it arrives. It cannot be
+        // copied later out of the window, because `trimWindowLocked` drops it as the parse reads
+        // forward, which is why the seek-time park misses on every layout whose parse reads more
+        // than `winLookback` before its first excursion. Contiguity is checked rather than assumed:
+        // only the connection anchored at zero, and only while it is still the tail of what is held.
+        if openPhaseActive, winStart == 0, base == headSpan.count,
+           headSpan.count < Self.parkedSpanMaxBytes {
+            headSpan.append(data.prefix(Self.parkedSpanMaxBytes - headSpan.count))
         }
         addBytesFetched(count)
         // #220: the requested range has been delivered in full. That ends the connection on

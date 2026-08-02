@@ -162,6 +162,37 @@ struct Issue281ColdStartRoundTripTests {
                 "the return trip reconnected instead of using the parked window: \(server.requestedRanges)")
     }
 
+    /// The parked window is cut from `winStart`, which is only the head of the FILE while the parse
+    /// seeks away before reading anything. A parse that reads past `winLookback` first, which the
+    /// fragmented layout does by 33 MB, moves `winStart` off the head, and the return trip the park
+    /// exists for lands in front of everything parked. Retaining the head as it arrives is what
+    /// covers that, and it is measurable: with 300 ms of origin latency per request, aetherctl's
+    /// open of a fragmented fixture went from 1732 ms and four requests to 1219 ms and three.
+    @Test("the return to the head survives a parse that read past the window's start")
+    func headIsRetainedWhenTheWindowMovesOn() async throws {
+        let server = try #require(ThrottledOriginServer(totalSize: fileSize))
+        defer { server.stop() }
+        let reader = makeReader(server)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        // Past winLookback, so the window no longer starts at the head and a park taken now would
+        // begin megabytes into the file.
+        _ = read(reader, 20 * 1024 * 1024)
+
+        let farOffset = fileSize / 2
+        #expect(reader.seek(offset: farOffset, whence: SEEK_SET) == farOffset)
+        _ = read(reader, 64 * 1024)
+        let requestsAfterSeek = server.rangeRequestCount
+
+        #expect(reader.seek(offset: 4096, whence: SEEK_SET) == 4096)
+        let got = read(reader, 32 * 1024)
+
+        #expect(got == 32 * 1024, "return read returned \(got)")
+        #expect(server.rangeRequestCount == requestsAfterSeek,
+                "the return to the head reconnected: \(server.requestedRanges)")
+    }
+
     /// The parked window is an open-phase device. Once the demuxer is parsing no more, a far seek is
     /// a scrub, whose landing zone the old window cannot serve, and holding it would be pure cost.
     @Test("after the open phase the window is no longer parked")
