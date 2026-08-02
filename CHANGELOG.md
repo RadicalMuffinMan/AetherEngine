@@ -12,6 +12,34 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.4.2] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.2))
+
+### Fixed
+
+- **A seekable HEVC-in-MPEG-TS HLS VOD plans its segments on the playlist's own
+  boundaries.** MPEG-TS carries no upfront keyframe table, so the plan fell back
+  to a synthetic uniform 4 s grid. On a source that carries one I-frame per 10 s
+  segment only every fifth grid boundary is a random-access point, so a restart
+  at any other index made the producer's scan-forward gate open up to 8 s late.
+  That overshoot rode in the producer's timeline shift, where the video cutter
+  and the audio index mapping folded it back on two different axes, and AVPlayer
+  was left waiting on a segment that never arrived at the position it asked for
+  (`CoreMediaErrorDomain -12889`). A seekable source now plans on the boundaries
+  it declares, each backed off half a segment (0.5 s cap) so manifest-versus-PTS
+  rounding cannot put a boundary past its own IRAP. Measured over five scattered
+  seeks on a 10 s-GOP fixture, the per-restart gate overshoot goes from
+  0/4/0/2/6 s to a flat 0.5 s. Reported and device-tested by @qoli (#268).
+
+- **The VOD segment cutter compares on the item axis.** Packets reach it with the
+  producer's shift already subtracted, while the plan boundaries are source PTS,
+  so every cut landed one PTS origin late on any source that does not start at
+  zero, and against boundaries that are themselves the source's IRAPs it would
+  never have cut at all. The audio index mapping folds back the plan anchor
+  rather than the shift for the same reason, and a restart's first `tfdt` is the
+  segment's advertised start rather than its seek boundary (#268).
+
 ## [6.4.1] - 2026-08-01
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.1))
