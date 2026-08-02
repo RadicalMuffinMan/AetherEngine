@@ -41,7 +41,8 @@ the public-API contract.
   is the only point at which it can be, since `trimWindowLocked` drops it as the
   parse moves forward. Measured with aetherctl against an origin with 300 ms of
   latency per request: opening a fragmented fixture went from 1732 ms and four
-  requests to 1219 ms and three.
+  requests to 1219 ms and three. The parked window is gone: across six container
+  layouts (four MP4, two MKV) it served no read that the retained head does not.
 
 ## [6.5.1] - 2026-08-02
 

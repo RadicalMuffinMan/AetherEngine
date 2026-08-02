@@ -136,9 +136,9 @@ struct Issue281ColdStartRoundTripTests {
     }
 
     /// The other half: after a parse seek to the tail, coming back to the head is a copy out of the
-    /// parked window rather than a third connection.
+    /// retained head rather than a third connection.
     @Test("returning to the head after a parse seek costs no additional request")
-    func returnTripIsServedFromTheParkedWindow() async throws {
+    func returnTripIsServedFromTheRetainedHead() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
         let reader = makeReader(server)
@@ -147,7 +147,7 @@ struct Issue281ColdStartRoundTripTests {
         _ = read(reader, 1 * 1024 * 1024)   // fill the window at the head
 
         // A parse seek far enough forward to leave the window and force a reconnect, but NOT into
-        // the prefetched tail, so this exercises the parked window rather than the tail span.
+        // the prefetched tail, so this exercises the retained head rather than the tail span.
         let farOffset = fileSize / 2
         #expect(reader.seek(offset: farOffset, whence: SEEK_SET) == farOffset)
         _ = read(reader, 64 * 1024)
@@ -159,15 +159,16 @@ struct Issue281ColdStartRoundTripTests {
 
         #expect(got == 32 * 1024, "return read returned \(got)")
         #expect(server.rangeRequestCount == requestsAfterSeek,
-                "the return trip reconnected instead of using the parked window: \(server.requestedRanges)")
+                "the return trip reconnected instead of using the retained head: \(server.requestedRanges)")
     }
 
-    /// The parked window is cut from `winStart`, which is only the head of the FILE while the parse
-    /// seeks away before reading anything. A parse that reads past `winLookback` first, which the
-    /// fragmented layout does by 33 MB, moves `winStart` off the head, and the return trip the park
-    /// exists for lands in front of everything parked. Retaining the head as it arrives is what
-    /// covers that, and it is measurable: with 300 ms of origin latency per request, aetherctl's
-    /// open of a fragmented fixture went from 1732 ms and four requests to 1219 ms and three.
+    /// #281 parked the window at seek time, cut from `winStart`, which is the head of the FILE only
+    /// while the parse seeks away before reading anything. A parse that reads past `winLookback`
+    /// first, which the fragmented layout does by 33 MB, moves `winStart` off the head, and the
+    /// return trip the park existed for lands in front of everything parked. Retaining the head as
+    /// it arrives is what covers that, and it is measurable: with 300 ms of origin latency per
+    /// request, aetherctl's open of a fragmented fixture went from 1732 ms and four requests to
+    /// 1219 ms and three.
     @Test("the return to the head survives a parse that read past the window's start")
     func headIsRetainedWhenTheWindowMovesOn() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
@@ -193,9 +194,9 @@ struct Issue281ColdStartRoundTripTests {
                 "the return to the head reconnected: \(server.requestedRanges)")
     }
 
-    /// The parked window is an open-phase device. Once the demuxer is parsing no more, a far seek is
-    /// a scrub, whose landing zone the old window cannot serve, and holding it would be pure cost.
-    @Test("after the open phase the window is no longer parked")
+    /// The retained head is an open-phase device. Once the demuxer is parsing no more, a far seek is
+    /// a scrub, whose landing zone it cannot serve, and holding it would be pure cost.
+    @Test("after the open phase the head is no longer retained")
     func parkingStopsAfterTheOpenPhase() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
@@ -215,7 +216,7 @@ struct Issue281ColdStartRoundTripTests {
         _ = read(reader, 32 * 1024)
 
         #expect(server.rangeRequestCount > requestsAfterSeek,
-                "the window was still parked after the open phase ended")
+                "the head was still retained after the open phase ended")
     }
 
     /// Suffix ranges are not universally implemented. An origin that does not do them answers the
