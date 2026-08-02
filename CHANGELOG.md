@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.4.5] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.5))
+
 ### Fixed
 
 - **A non-faststart MP4 cold start no longer pays three sequential round trips
