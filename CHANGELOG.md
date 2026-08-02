@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A terminal error now says what went wrong instead of "The operation
+  couldn't be completed."** The engine publishes its terminal states as
+  `state = .error("Failed to load: \(error.localizedDescription)")`, and its own
+  error enums were only `CustomStringConvertible`. `localizedDescription` does
+  not reach `description`, so Foundation's generic bridge answered "The
+  operation couldn't be completed. (HLSIngestError error 0.)" and the HTTP
+  status the ingest reader had already resolved was dropped at that boundary:
+  an origin refusing a transcode with 500 was indistinguishable from a corrupt
+  file. Every error type the engine can throw now conforms to `LocalizedError`
+  with `errorDescription` returning the description it already computes, which
+  fixes the reload, audio-track-switch and mid-session playback boundaries in
+  the same move rather than the three load-path call sites alone.
+  `DemuxerError` is the most common failure at that boundary and carried no
+  description at all; it now renders its AVERROR code with libavutil's own
+  text, so `INVALIDDATA` reads as itself rather than as an error number 0.
+  Reported by @edde746, traced to the boundary (#283).
 
 ## [6.4.7] - 2026-08-02
 

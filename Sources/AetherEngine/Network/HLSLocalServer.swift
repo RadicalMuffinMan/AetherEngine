@@ -1344,7 +1344,7 @@ final class HLSLocalServer: @unchecked Sendable {
 
 // MARK: - Errors
 
-enum HLSLocalServerError: Error, CustomStringConvertible {
+enum HLSLocalServerError: Error, CustomStringConvertible, LocalizedError {
     case socketCreate(errno: Int32)
     case bind(errno: Int32)
     case listen(errno: Int32)
@@ -1358,4 +1358,6 @@ enum HLSLocalServerError: Error, CustomStringConvertible {
         case .getsockname(let e):  return "HLSLocalServer: getsockname() failed (errno=\(e))"
         }
     }
+
+    var errorDescription: String? { description }
 }

@@ -11,7 +11,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     // MARK: - Errors
 
-    enum ProducerError: Error, CustomStringConvertible {
+    enum ProducerError: Error, CustomStringConvertible, LocalizedError {
         case muxerAllocFailed(code: Int32)
         case streamCreationFailed
         case copyParametersFailed(code: Int32)
@@ -25,6 +25,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             case .writeHeaderFailed(let c):    return "HLSSegmentProducer: avformat_write_header failed (\(c))"
             }
         }
+
+        var errorDescription: String? { description }
     }
 
     /// Per-stream codec config carried from `HLSVideoEngine` into the muxer setup.

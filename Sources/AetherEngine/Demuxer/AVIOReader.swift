@@ -2876,7 +2876,7 @@ private func seekCallback(
 
 // MARK: - Errors
 
-enum AVIOReaderError: Error, CustomStringConvertible {
+enum AVIOReaderError: Error, CustomStringConvertible, LocalizedError {
     case allocationFailed
     case noResponse
     case requestTimeout
@@ -2897,4 +2897,6 @@ enum AVIOReaderError: Error, CustomStringConvertible {
         case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
         }
     }
+
+    var errorDescription: String? { description }
 }

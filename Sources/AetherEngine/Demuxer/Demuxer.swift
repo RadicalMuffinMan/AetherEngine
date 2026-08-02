@@ -1534,8 +1534,21 @@ public final class Demuxer: @unchecked Sendable {
     }
 }
 
-enum DemuxerError: Error {
+enum DemuxerError: Error, CustomStringConvertible, LocalizedError {
     case openFailed(code: Int32)
     case streamInfoFailed(code: Int32)
     case readFailed(code: Int32)
+
+    /// AE#283: this is the most common error at the load boundary, and the AVERROR code is the whole
+    /// diagnosis (INVALIDDATA vs a POSIX errno vs EOF). Rendering it keeps a refused transcode
+    /// distinguishable from a corrupt file.
+    var description: String {
+        switch self {
+        case .openFailed(let code): "Demuxer: open failed (\(FFmpegErr.text(for: code)))"
+        case .streamInfoFailed(let code): "Demuxer: stream info failed (\(FFmpegErr.text(for: code)))"
+        case .readFailed(let code): "Demuxer: read failed (\(FFmpegErr.text(for: code)))"
+        }
+    }
+
+    var errorDescription: String? { description }
 }
