@@ -71,6 +71,70 @@ struct Issue281ColdStartRoundTripTests {
                 "tail read opened a connection despite the prefetch: \(server.requestedRanges)")
     }
 
+    /// The retest shape. A loopback origin answers before the demuxer can get anywhere, so every
+    /// test above passes while the field trace stays unchanged: there, the data connection's first
+    /// byte costs a real round trip, the demuxer walks the box chain and seeks to the tail within
+    /// microseconds of it, and the speculative fetch, which pays the SAME round trip plus a body,
+    /// is still on the wire at that moment. A fetch nothing waits on therefore never once serves
+    /// the read it exists for, and the round trip it was meant to remove is paid in full.
+    ///
+    /// Both requests are delayed here because both cross the same origin; the suffix one is slower
+    /// only by the body it carries, which is the whole margin by which it loses.
+    @Test("a tail read waits for a fetch already on the wire instead of connecting past it")
+    func tailReadWaitsForTheInFlightPrefetch() async throws {
+        let delayed = ThrottledOriginServer(
+            totalSize: fileSize,
+            firstByteDelayUs: { isSuffix in isSuffix ? 550_000 : 400_000 })
+        let server = try #require(delayed)
+        defer { server.stop() }
+        let reader = makeReader(server)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        _ = read(reader, 64 * 1024)   // the box chain at the head
+
+        let tailStart = fileSize - Int64(AVIOReader.tailPrefetchBytes)
+        await waitForTailSpan(server, tailStart: tailStart)   // the REQUEST is out; its body is not
+        let requestsBefore = server.rangeRequestCount
+
+        #expect(reader.seek(offset: tailStart + 1024, whence: SEEK_SET) == tailStart + 1024)
+        let got = read(reader, 4096)
+
+        #expect(got == 4096, "tail read returned \(got)")
+        #expect(server.rangeRequestCount == requestsBefore,
+                "the tail read connected past a fetch already in flight: \(server.requestedRanges)")
+    }
+
+    /// The wait above has to be bounded by something, and the bound is what one round trip against
+    /// this origin was measured to cost: past that the fetch is not about to land and a fresh
+    /// connection is the better bet. An origin that sits on the suffix request must therefore cost a
+    /// reconnect, not an open that hangs on a speculative request nothing depends on.
+    @Test("a fetch that is not going to land does not hold the read")
+    func tailWaitIsBounded() async throws {
+        let stalling = ThrottledOriginServer(
+            totalSize: fileSize,
+            firstByteDelayUs: { isSuffix in isSuffix ? 3_000_000 : 0 })
+        let server = try #require(stalling)
+        defer { server.stop() }
+        let reader = makeReader(server)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        _ = read(reader, 64 * 1024)
+
+        let tailStart = fileSize - Int64(AVIOReader.tailPrefetchBytes)
+        await waitForTailSpan(server, tailStart: tailStart)
+        let requestsBefore = server.rangeRequestCount
+
+        let startedAt = Date()
+        #expect(reader.seek(offset: tailStart + 1024, whence: SEEK_SET) == tailStart + 1024)
+        let got = read(reader, 4096)
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        #expect(got == 4096, "tail read returned \(got)")
+        #expect(elapsed < 2.0, "the read waited \(elapsed)s on a fetch that had not landed")
+        #expect(server.rangeRequestCount > requestsBefore,
+                "the read never fell back to a connection: \(server.requestedRanges)")
+    }
+
     /// The other half: after a parse seek to the tail, coming back to the head is a copy out of the
     /// parked window rather than a third connection.
     @Test("returning to the head after a parse seek costs no additional request")

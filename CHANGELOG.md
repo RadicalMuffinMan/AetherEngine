@@ -10,7 +10,34 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The speculative tail fetch now removes the round trip it was added for.**
+  6.4.5 issued a 64 KB suffix range alongside the open and let nothing wait on
+  it, on the reasoning that a fetch landing late costs no more than the
+  reconnect it failed to save. That reasoning was wrong about the timing, and
+  the reporter's retest measured it: the demuxer reaches the trailing object
+  within microseconds of the data connection's first byte, and the speculative
+  fetch pays the same round trip plus a body, so on any origin whose first byte
+  costs anything it is still on the wire at that moment. It never once served
+  the read it exists for, it only added a request. A read landing in the
+  fetched range now waits for it, bounded by what a round trip against this
+  origin was measured to cost (the data connection's own time to first data),
+  so waiting can never be the more expensive choice, and an origin that
+  declines suffix ranges falls straight back to a reconnect. Only a loopback
+  origin, which answers before the race can be lost, made the first version
+  look like it worked, so the regression test models an origin whose first byte
+  costs something.
+
+### Changed
+
+- The cold-start paths now say what they did. `tail prefetch issued`, then
+  `installed` or `rejected` with the reason (status, disagreeing
+  `Content-Range`, short body), and one line per span when it serves a read
+  that would otherwise have reconnected. The advertised way to verify #281 was
+  to look for a `bytes=-65536` request, which the engine never printed, so its
+  absence from a log was not evidence of anything. Slow-read summaries gained
+  `tailWaits=`.
 
 ## [6.5.0] - 2026-08-02
 

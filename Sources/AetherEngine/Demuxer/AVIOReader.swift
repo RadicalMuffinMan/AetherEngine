@@ -392,6 +392,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// In-flight speculative tail fetch, cancelled by `close()`.
     private var tailPrefetchTask: URLSessionDataTask?
 
+    /// Whether that fetch is still outstanding, and when it went out. A read landing in its range
+    /// waits for it rather than connecting past bytes that are already on the wire, so this is the
+    /// difference between the fetch being an optimisation and being a wasted request. Cleared by
+    /// the fetch's own completion, by `markClosed` and by `close`, each of which broadcasts.
+    /// winCond-guarded.
+    private var tailPrefetchInFlight = false
+    private var tailPrefetchStartedAt = DispatchTime.now()
+
+    /// One log line per span per open, not per serve. winCond-guarded (set from the read loop).
+    private var parkedSpanServeLogged = false
+    private var tailSpanServeLogged = false
+
+    /// Measured time to first data of the most recent connection: what one round trip against this
+    /// origin actually costs, which is the only honest bound on how long waiting for in-flight bytes
+    /// can be worth. winCond-guarded (written by the delegate thread).
+    private var lastFirstDataMs: Double = 0
+
     /// True from `open()` until the demuxer reports its header/stream-info pass done. The parse
     /// seeks this fix targets all happen inside that window; a far seek afterwards is a real scrub,
     /// where the old window is worthless and parking it would only cost memory.
@@ -747,6 +764,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // cold read, which is the starvation this whole area keeps paying for.
         let tailTask = tailPrefetchTask
         tailPrefetchTask = nil
+        tailPrefetchInFlight = false
         openPhaseActive = false
         winCond.broadcast()
         winCond.unlock()
@@ -811,6 +829,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         openPhaseActive = false
         let tailTask = tailPrefetchTask
         tailPrefetchTask = nil
+        tailPrefetchInFlight = false
         winCond.broadcast()
         winCond.unlock()
         tailTask?.cancel()
@@ -1012,6 +1031,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // on completion when the whole call exceeded the threshold (see SlowReadDiagnostics).
         let readStart = DispatchTime.now()
         var diag = SlowReadDiagnostics()
+        // #281 retest: fixed once per read, so a loop that wakes repeatedly cannot keep extending
+        // its own patience for the speculative fetch.
+        var tailWaitDeadline: Date?
         func msSince(_ t: DispatchTime) -> Double {
             Double(DispatchTime.now().uptimeNanoseconds - t.uptimeNanoseconds) / 1_000_000
         }
@@ -1063,18 +1085,55 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let spanPos = position
             let windowCanServe = spanPos >= winStart && spanPos < winStart + Int64(window.count)
             if !windowCanServe, parkedSpan != nil || tailSpan != nil,
-               let n = serveFromResidentSpansLocked(into: buf.advanced(by: totalRead),
-                                                   maxLen: requestSize - totalRead,
-                                                   at: spanPos) {
+               let served = serveFromResidentSpansLocked(into: buf.advanced(by: totalRead),
+                                                        maxLen: requestSize - totalRead,
+                                                        at: spanPos) {
+                let n = served.bytes
+                // Once per span per open: the round trip that did not happen, named. Every serve
+                // after the first says nothing new and would only make the log expensive.
+                var spanLine: String? = nil
+                switch served {
+                case .parked where !parkedSpanServeLogged:
+                    parkedSpanServeLogged = true
+                    spanLine = "[AVIOReader] \(label) parked window served the return to \(spanPos)"
+                        + "; no reconnect for it"
+                case .tail where !tailSpanServeLogged:
+                    tailSpanServeLogged = true
+                    spanLine = "[AVIOReader] \(label) tail prefetch served the read at \(spanPos)"
+                        + "; no reconnect for it"
+                default:
+                    break
+                }
                 position = spanPos + Int64(n)
                 winCond.broadcast()
                 winCond.unlock()
+                if let spanLine { EngineLog.emit(spanLine, category: .demux) }
                 totalRead += n
                 diag.recordDetourServe(ms: 0, fetched: false)
                 unproductiveReconnects = 0
                 rateLimitStreak = 0
                 emitNetworkPhase(.flowing)
                 continue
+            }
+
+            // #281 retest: this read wants bytes the speculative fetch is on the wire for RIGHT NOW.
+            // Reconnecting here is what made that fetch pure cost in the field: the demuxer arrives
+            // microseconds after the data connection's first byte, so the fetch, which pays the same
+            // round trip plus a body, has never landed yet. Waiting is bounded by what a round trip
+            // against this origin was measured to cost, so it can never be the more expensive choice.
+            if !windowCanServe, tailPrefetchInFlight, isInTailPrefetchRangeLocked(spanPos) {
+                let deadline = tailWaitDeadline ?? Date(
+                    timeIntervalSinceNow: max(0, tailPrefetchWaitBudget()
+                        - Double(DispatchTime.now().uptimeNanoseconds
+                                 - tailPrefetchStartedAt.uptimeNanoseconds) / 1_000_000_000))
+                tailWaitDeadline = deadline
+                if Date() < deadline {
+                    let waitStart = DispatchTime.now()
+                    _ = winCond.wait(until: min(deadline, readDeadline))
+                    winCond.unlock()
+                    diag.recordTailWait(ms: msSince(waitStart))
+                    continue
+                }
             }
 
             // #220: `connEndedByBackpressure` is excluded on purpose. This reconnects at the
@@ -1510,9 +1569,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     ///
     /// `bytes=-n` is the one range form that needs no size, which is the whole point: at this
     /// moment the reader has not seen a single response header, so an explicit `bytes=a-b` is not
-    /// yet expressible. Nothing waits on this. If the demuxer reaches the tail before the bytes
-    /// land, it takes the ordinary reconnect and the fetch is wasted, which is the same cost as
-    /// today. VOD only: a live feed's tail is meaningless and its length non-authoritative.
+    /// yet expressible. VOD only: a live feed's tail is meaningless and its length non-authoritative.
+    ///
+    /// A read that lands in this range WAITS for the fetch (`awaitTailPrefetchLocked`) instead of
+    /// connecting past it. The first cut of this let nothing wait, on the reasoning that a late
+    /// fetch costs no more than the reconnect it failed to save. That reasoning was wrong about the
+    /// timing, and the #281 retest measured it: the demuxer reaches the tail within microseconds of
+    /// the data connection's first byte, and the speculative fetch pays the SAME round trip plus a
+    /// body, so it is ALWAYS still in flight at that moment on any origin whose first byte costs
+    /// anything. It never once served the read it exists for; it only added a request. Only a
+    /// loopback origin, which answers before the race can be lost, made it look like it worked.
     private func startTailPrefetch() {
         guard !isLive, !isClosed else { return }
         var request = URLRequest(url: requestURL())
@@ -1530,22 +1596,65 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             expectedLength: Self.tailPrefetchBytes,
             extraHeaders: extraHeaders
         )
-        delegate.onSpan = { [weak self] start, data in
+        // #281 retest: one line per open, and the line the field needs. The advertised way to check
+        // this fix was "does a bytes=-65536 request show up", which the engine never printed, so a
+        // reporter reading the log could only report its absence. Names the outcome, not the intent.
+        delegate.onOutcome = { [weak self] outcome in
             guard let self else { return }
+            let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds
+                                   - self.tailPrefetchStartedAt.uptimeNanoseconds) / 1_000_000
             self.winCond.lock()
-            if !self.isFullyClosed, self.tailSpan == nil {
+            self.tailPrefetchInFlight = false
+            var installed = false
+            if case .span(let start, let data) = outcome, !self.isFullyClosed, self.tailSpan == nil {
                 self.tailSpan = ResidentSpan(start: start, data: data)
+                installed = true
             }
             self.winCond.broadcast()
             self.winCond.unlock()
-            self.addBytesFetched(data.count)
+            if case .span(let start, let data) = outcome {
+                self.addBytesFetched(data.count)
+                EngineLog.emit(
+                    "[AVIOReader] \(self.label) tail prefetch \(installed ? "installed" : "dropped") "
+                    + "\(data.count)B at \(start) after \(Int(elapsedMs))ms",
+                    category: .demux)
+            } else if case .rejected(let reason) = outcome {
+                EngineLog.emit(
+                    "[AVIOReader] \(self.label) tail prefetch rejected after \(Int(elapsedMs))ms: \(reason)",
+                    category: .demux)
+            }
         }
         let task = Self.chunkSession.dataTask(with: request)
         task.delegate = delegate
         winCond.lock()
         tailPrefetchTask = task
+        tailPrefetchInFlight = true
+        tailPrefetchStartedAt = DispatchTime.now()
         winCond.unlock()
         task.resume()
+        // Issue AND outcome, because "no outcome line" and "never issued" are different findings and
+        // one line cannot carry both. A fetch that hangs to teardown prints this one and no other.
+        EngineLog.emit("[AVIOReader] \(label) tail prefetch issued bytes=-\(Self.tailPrefetchBytes)",
+                       category: .demux)
+    }
+
+    /// Whether `offset` lies in the range the speculative fetch asked for. Caller holds `winCond`.
+    private func isInTailPrefetchRangeLocked(_ offset: Int64) -> Bool {
+        guard fileSize > 0 else { return false }
+        return offset >= fileSize - Int64(Self.tailPrefetchBytes) && offset < fileSize
+    }
+
+    /// How long a read may wait for the speculative fetch before giving up and reconnecting.
+    ///
+    /// Both requests left at the same instant against the same origin, so the fetch's first byte
+    /// costs what the data connection's did: once it has been outstanding for materially longer
+    /// than that, it is not about to land and a fresh connection is the better bet. Waiting up to
+    /// that point can never cost more than the reconnect it replaces, which is what makes this
+    /// bound the honest one rather than a tuned constant. The floor covers an origin that answered
+    /// the first connection out of a warm cache; the cap keeps a hung fetch from owning the open.
+    /// Caller holds `winCond`.
+    private func tailPrefetchWaitBudget() -> TimeInterval {
+        min(5.0, max(0.25, (lastFirstDataMs / 1000) * 2))
     }
 
     /// Start offset of the bytes a 206 actually carries, from `Content-Range: bytes a-b/total`.
@@ -1587,14 +1696,27 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         parkedSpan = ResidentSpan(start: winStart, data: window.prefix(keep))
     }
 
+    /// Which cold-start span answered, so the log can name the round trip that did not happen
+    /// rather than leaving its absence to be inferred.
+    enum SpanServe {
+        case parked(Int)
+        case tail(Int)
+
+        var bytes: Int {
+            switch self {
+            case .parked(let n), .tail(let n): return n
+            }
+        }
+    }
+
     /// Serve `offset` from either cold-start span. Caller holds `winCond` (the read loop already
     /// does, and `winCond` is an NSCondition, so re-acquiring here would deadlock). The copy runs
     /// under the lock on purpose: it is a memcpy out of a `Data` the delegate threads only ever
     /// install, never mutate.
     private func serveFromResidentSpansLocked(into dst: UnsafeMutablePointer<UInt8>, maxLen: Int,
-                                              at offset: Int64) -> Int? {
-        if let n = parkedSpan?.serve(into: dst, maxLen: maxLen, at: offset) { return n }
-        if let n = tailSpan?.serve(into: dst, maxLen: maxLen, at: offset) { return n }
+                                              at offset: Int64) -> SpanServe? {
+        if let n = parkedSpan?.serve(into: dst, maxLen: maxLen, at: offset) { return .parked(n) }
+        if let n = tailSpan?.serve(into: dst, maxLen: maxLen, at: offset) { return .tail(n) }
         return nil
     }
 
@@ -1708,6 +1830,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if !connFirstDataSeen {
             connFirstDataSeen = true
             firstDataMs = Double(DispatchTime.now().uptimeNanoseconds - connStartedAt.uptimeNanoseconds) / 1_000_000
+            // #281 retest: the price of one round trip against this origin, which is what bounds
+            // how long a read may wait for bytes that are already on the wire.
+            lastFirstDataMs = firstDataMs ?? 0
         }
         let count = data.count
         // #220: delivery that lands with the suspend flag already set. Counted before the
@@ -2791,13 +2916,22 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
 /// whole file. That body is rejected at the header, before a byte of it is accepted, and the
 /// collected length is capped besides, so a lying `Content-Range` cannot grow this either.
 private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    enum Outcome {
+        case span(Int64, Data)
+        /// Named so the log says WHICH way an origin declined, since "no suffix ranges", "a 200 with
+        /// the whole file" and "a short body" are three different origins to talk to a reporter about.
+        case rejected(String)
+    }
+
     private let expectedLength: Int
     private let extraHeaders: [String: String]
     private var buffer = Data()
     private var spanStart: Int64?
+    private var rejection: String?
 
-    /// Called once, on completion, only when a well-formed suffix response arrived in full.
-    var onSpan: ((Int64, Data) -> Void)?
+    /// Called exactly once, on completion, whatever happened. A caller waits on this fetch, so a
+    /// silent failure would be a caller waiting out its whole budget for bytes that are never coming.
+    var onOutcome: ((Outcome) -> Void)?
 
     init(expectedLength: Int, extraHeaders: [String: String]) {
         self.expectedLength = expectedLength
@@ -2823,9 +2957,19 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        guard let http = response as? HTTPURLResponse,
-              http.statusCode == 206,
-              let start = AVIOReader.suffixRangeStart(http, expectedLength: expectedLength) else {
+        guard let http = response as? HTTPURLResponse else {
+            rejection = "no HTTP response"
+            completionHandler(.cancel)
+            return
+        }
+        guard http.statusCode == 206 else {
+            rejection = "status=\(http.statusCode) (no suffix range support)"
+            completionHandler(.cancel)
+            return
+        }
+        guard let start = AVIOReader.suffixRangeStart(http, expectedLength: expectedLength) else {
+            let cr = http.value(forHTTPHeaderField: "Content-Range") ?? "absent"
+            rejection = "Content-Range: \(cr) does not describe the \(expectedLength)B asked for"
             completionHandler(.cancel)
             return
         }
@@ -2839,12 +2983,22 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        defer { onSpan = nil }
+        let outcome = self.outcome(error: error)
+        onOutcome?(outcome)
+        onOutcome = nil
+    }
+
+    private func outcome(error: Error?) -> Outcome {
+        if let rejection { return .rejected(rejection) }
+        if let error { return .rejected("transport: \(error.localizedDescription)") }
+        guard let start = spanStart else { return .rejected("no usable response header") }
         // A short body would put later offsets in the span at the wrong place, so a partial
         // delivery is dropped rather than trimmed: this is an optimisation, and a wrong
         // optimisation is worse than none.
-        guard error == nil, let start = spanStart, buffer.count == expectedLength else { return }
-        onSpan?(start, buffer)
+        guard buffer.count == expectedLength else {
+            return .rejected("short body: \(buffer.count)B of \(expectedLength)B")
+        }
+        return .span(start, buffer)
     }
 }
 
