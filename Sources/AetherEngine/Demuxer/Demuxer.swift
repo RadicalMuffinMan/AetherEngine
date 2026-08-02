@@ -435,6 +435,10 @@ public final class Demuxer: @unchecked Sendable {
         formatContext = ctxPtr  // avformat_open_input may reallocate
 
         try probeStreams(ctxPtr!)
+        // #281: every parse seek this open performs has happened by now, so the provider can drop
+        // the cold-start state that only exists to serve them. Deliberately after probeStreams:
+        // find_stream_info is where the trailing-index ping-pong lives, not avformat_open_input.
+        avioProvider?.markOpenPhaseFinished()
     }
 
     /// Default 5 MB/5s budgets miss sparse PGS/DVB tracks on 10-20 GB Blu-ray rips.
