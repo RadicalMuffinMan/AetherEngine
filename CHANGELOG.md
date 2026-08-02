@@ -10,7 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The post-load play-gate only pays the Dolby Vision cold-start budget when a
+  dynamic-range switch can still reach the session.** The gate blind-polls up to
+  1000 ms for a panel switch to *start*, a budget sized for the one case that
+  needs it: a sole-writer host (`LoadOptions.suppressDisplayCriteria`) whose
+  criteria write lands during the load, from AVKit's auto path. Every other
+  session paid the same wait for a switch that could not arrive. Sessions where
+  the engine wrote the criteria itself (synchronously, before the item loads, and
+  already settled in the pre-flight for an HDR write) and sessions on SDR content,
+  which no dynamic-range write can follow, now take a 200 ms budget instead, the
+  value that was in place before the AVKit-sole-writer architecture raised it. A
+  switch that has genuinely started still settles in Stage 2 unchanged, and a
+  failed probe keeps the full budget because the source range is then unknown.
+  Reported and measured by @digilearn-dev (#274).
+
+- **A panel switch the engine did not initiate is no longer logged as a failed
+  HDR handshake.** When a sole-writer host's own criteria write settled with EDR
+  headroom at 1.0, the settle classification read `didApply == false` as the HDR
+  branch and emitted `WARN ... panel stayed SDR despite HDR criteria` for what
+  was a correct SDR rate-only switch. The engine has no target range to compare
+  against for a write it never made, and now says so (#274).
 
 ## [6.4.2] - 2026-08-02
 
