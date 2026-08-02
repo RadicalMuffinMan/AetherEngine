@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.4.3] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.3))
+
 ### Fixed
 
 - **The post-load play-gate only pays the Dolby Vision cold-start budget when a
