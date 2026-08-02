@@ -395,8 +395,14 @@ final class DisplayCriteriaController {
                     // SDR rate-only criteria: refresh-rate switch settled, panel correctly stayed SDR.
                     EngineLog.emit("[DisplayCriteria] rate-only switch settled (\(timing()), SDR, EDR headroom 1.0 as expected)", category: .engine)
                 case .engineHDR:
-                    // HDR was requested but panel ended in SDR: real dynamic-range handshake failure.
-                    EngineLog.emit("[DisplayCriteria] WARN switch ended (\(timing())) but EDR headroom still 1.0 (panel stayed SDR despite HDR criteria)", category: .engine)
+                    // Headroom 1.0 after an HDR write is NOT evidence of a refusal. The value is only raised
+                    // by a dynamic-range transition, so a panel that was already in HDR reads identically to
+                    // one that refused. The proof is the tie-breaker this line used to lack, and without it
+                    // it accused a panel that was demonstrably showing HDR at that moment.
+                    EngineLog.emit(panelProvenToEngageHDR
+                        ? "[DisplayCriteria] switch ended (\(timing())) at EDR headroom 1.0; this panel is proven to engage HDR, so it was already in the target mode and no transition raised the headroom"
+                        : "[DisplayCriteria] WARN switch ended (\(timing())) at EDR headroom 1.0 and this panel has never been observed engaging HDR: rate-only matching, or a real dynamic-range handshake failure",
+                        category: .engine)
                 case .hostDriven:
                     // #274: sole-writer host. The engine wrote nothing, so it has no target range to compare
                     // the SDR end state against; a host SDR rate write ending SDR is correct and used to be
@@ -415,7 +421,13 @@ final class DisplayCriteriaController {
         case .engineRateOnly:
             EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; EDR headroom \(headroom))", category: .engine)
         case .engineHDR:
-            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine HDR criteria, switch not observable, likely DV; EDR headroom \(headroom))", category: .engine)
+            // "Unobservable DV panel" was the blanket reading here, but a panel that was already in HDR
+            // when the criteria were re-written produces the same silence: no transition, so no headroom
+            // rise and no end within the cap. The proof separates the two.
+            EngineLog.emit(panelProvenToEngageHDR
+                ? "[DisplayCriteria] proceed after cap (\(timing()); engine HDR criteria on a panel proven to engage HDR, so most likely already in the target mode; EDR headroom \(headroom))"
+                : "[DisplayCriteria] proceed after cap (\(timing()); engine HDR criteria, switch not observable, likely DV; EDR headroom \(headroom))",
+                category: .engine)
         case .hostDriven:
             EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine wrote no criteria this session, switch not observable; EDR headroom \(headroom))", category: .engine)
         }
