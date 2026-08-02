@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.4.4] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.4))
+
+### Added
+
+- **The `#250 subtitle-resolution` statement now states the determination span
+  it retains across a seek, as `retainedFrom=`.** `coveredFrom` is the last
+  reset's window start, so after a far seek it reads `target - 15` and can
+  neither affirm nor refute that determination still reaches back to track
+  start. That left one truth class inexpressible: "empty because nothing was
+  ever authored before this point", which needs coverage back to the earliest
+  point that could change the answer. The pre-seek line does carry the bound,
+  but under the previous `seekGen`, and combining across the fence is what the
+  fence exists to forbid. The engine now reconciles the runs itself: a
+  post-seek reset folds its window into the retained run instead of
+  overwriting it, and the line states that run's floor alongside the reset
+  window. `coveredFrom` is unchanged; the two are separate claims. The runs
+  join only when the new window opens inside the retained span, so a forward
+  seek past the determined end and a backward seek starting below the floor
+  both restart the run rather than span the hole. Requested by @cmcpherson274
+  (#276).
+
 ## [6.4.3] - 2026-08-02
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.3))
