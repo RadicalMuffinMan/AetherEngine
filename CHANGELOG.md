@@ -12,6 +12,45 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.4.6] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.6))
+
+### Fixed
+
+- **Live sessions no longer freeze 6-8 s at a time when the producer's
+  backpressure park meets an LL-HLS blocking reload.** The advance park
+  released only on a client segment GET, while the client's held
+  `?_HLS_msn=` reload was only satisfiable by a producer cut, and the held
+  reload occupies the serialized keep-alive connection, starving the very
+  segment GET that would release the park. The 18 s hold then expired into
+  `503 unsatisfiable` long after AVPlayer's ~4 s forward buffer had drained
+  into `playbackStalled`. Live production is source-paced now: the advance
+  and versioned-init parks are VOD-only, replaced on live by a logged
+  resident-segment runaway guard set far above the steady-state window, so
+  only a consumer that has already stopped polling can reach it (a live park
+  is a diagnostic, never steady state). Three aggravators fixed alongside:
+  the sliding window is sized by the observed segment cadence instead of the
+  cut target (fastZap's 0.5 s target vs ~2 s GOPs inflated the window 4x,
+  pinning MEDIA-SEQUENCE at 0 and deferring `evictBelow` for minutes), the
+  stall-recovery item reload now honors `LiveReloadPolicy` (live rejoin: no
+  stale-clock resume, no zero-tolerance initial seek), and the
+  blocking-reload hold is bounded by `3 x` the sealed TARGETDURATION
+  (= the advertised HOLD-BACK) instead of a hardcoded 18 s. VOD paths are
+  byte-identical. Reported and fixed by @tschuegy in #280.
+
+### Changed
+
+- **A live playlist whose sliding window overtakes the consumer's fetch point
+  now says so.** The removed advance park capped the producer 10 segments
+  ahead of that point, so the window could never pass it. Source-paced live
+  cannot get there, but an origin handing over more than one window of
+  backlog faster than the consumer drains it can, and the consumer then asks
+  for a segment `evictBelow` has already deleted. That reads downstream as a
+  cache miss or a live-edge jump with nothing naming the cause, so the
+  playlist builder logs `live window slid past the consumer` once per
+  excursion.
+
 ## [6.4.5] - 2026-08-02
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.4.5))
@@ -51,24 +90,6 @@ _Nothing yet._
   to an unobservable DV panel: it reads the same attribution the settle branch
   got in #274, so an engine rate-only write that never reports an end says so
   rather than claiming DV. Measured from the logs on Sodalite#49.
-- **Live sessions no longer freeze 6-8 s at a time when the producer's
-  backpressure park meets an LL-HLS blocking reload.** The advance park
-  released only on a client segment GET, while the client's held
-  `?_HLS_msn=` reload was only satisfiable by a producer cut, and the held
-  reload occupies the serialized keep-alive connection, starving the very
-  segment GET that would release the park. The 18 s hold then expired into
-  `503 unsatisfiable` long after AVPlayer's ~4 s forward buffer had drained
-  into `playbackStalled`. Live production is source-paced now: the advance
-  and versioned-init parks are VOD-only, replaced on live by a logged
-  resident-segment runaway guard that releases on window eviction instead of
-  consumer fetches. Three aggravators fixed alongside: the sliding window is
-  sized by the observed segment cadence instead of the cut target (fastZap's
-  0.5 s target vs ~2 s GOPs inflated the window 4x, pinning MEDIA-SEQUENCE
-  at 0 and deferring `evictBelow` for minutes), the stall-recovery item
-  reload now honors `LiveReloadPolicy` (live rejoin: no stale-clock resume,
-  no zero-tolerance initial seek), and the blocking-reload hold is bounded
-  by `3 x` the sealed TARGETDURATION (= the advertised HOLD-BACK) instead of
-  a hardcoded 18 s. VOD paths are byte-identical.
 
 ## [6.4.4] - 2026-08-02
 
