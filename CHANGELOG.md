@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.5.0] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.0))
+
 ### Fixed
 
 - **A terminal error now says what went wrong instead of "The operation
@@ -28,6 +34,16 @@ the public-API contract.
   description at all; it now renders its AVERROR code with libavutil's own
   text, so `INVALIDDATA` reads as itself rather than as an error number 0.
   Reported by @edde746, traced to the boundary (#283).
+
+### Added
+
+- **`LocalizedError` conformance on the public error types.** A minor rather
+  than a patch: `HLSIngestError`, `PacketTimingProbe.ProbeError`,
+  `AudioTapProbe.ProbeError` and the two `AetherEngineSMB` error structs gain
+  public conformance and an `errorDescription`, and an adopter that renders a
+  caught error with `localizedDescription` sees different text on this version
+  than it did on 6.4.x. The text is the `description` those types already
+  published, so anything already logging `"\(error)"` is unchanged.
 
 ## [6.4.7] - 2026-08-02
 
