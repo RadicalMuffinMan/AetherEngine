@@ -12,6 +12,23 @@ the public-API contract.
 
 ### Fixed
 
+- **A non-faststart MP4 cold start no longer pays three sequential round trips
+  before the frame rate is known.** Opening one costs a data connection from
+  byte zero, a seek to the trailing `moov`, and a return to the first sample.
+  The third was self-inflicted: the seek to the tail discarded the window that
+  already held the bytes the return trip went back for, so the reader
+  re-fetched what it had just thrown away. That window is now kept for the
+  duration of the demuxer's open pass and serves the return trip as a copy.
+  Alongside it, `open()` issues one speculative 64 KB suffix range (`bytes=-n`,
+  which needs no size and therefore runs in parallel with the very first
+  request), covering the small trailing objects an open actually reads: `mfra`
+  on fragmented MP4, and a trailing `moov` whose sample tables fit. On a 51 MB
+  moov-at-end file the open goes from three sequential requests to two
+  concurrent ones. A feature-length file's `moov` is far larger than 64 KB and
+  still costs its own request, by design: fetching megabytes on a guess would
+  compete with playback bytes on exactly the slow links this helps. Reported
+  with before/after traces in #281.
+
 - **Display-criteria settle times in the log are measured now, instead of
   having the Stage 1 budget added back in.** Stage 2 reported
   `startGrace.ticks * 10 + stage2Ticks * 50`, which counts Stage 1's entire
