@@ -12,6 +12,31 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.5.3] - 2026-08-02
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.3))
+
+### Fixed
+
+- **A session that starts on a panel already in HDR is no longer routed as SDR.**
+  `UIScreen.currentEDRHeadroom` is not a readout of the panel's HDMI mode. It is
+  raised around a dynamic-range transition and decays back to 1.0 while the panel
+  keeps presenting HDR, measured on an HDR10+ panel as a fall from 1.20 to 1.00
+  thirteen seconds into a confirmed HDR10 session with no mode switch in progress.
+  A replay that begins before the TV has dropped back to SDR therefore makes no
+  transition at all, so the single read taken after `waitForSwitch` concluded that
+  the panel was SDR. On tvOS that one boolean is the whole master-vs-media routing
+  gate, so every such session was served media-direct with no HDR signaling and
+  labelled SDR while the TV itself reported HDR. The reading now counts only as a
+  positive; its absence is answered by whether a criteria write has ever
+  demonstrably driven this display into HDR.
+
+- **The settle diagnostics stop accusing a panel that was already in HDR.** Both
+  the Stage 2 WARN and the cap line read headroom 1.0 after an HDR write as a
+  refusal, which is indistinguishable from a panel that needed no transition.
+  They now separate the two, and an unproven panel still names the real
+  candidates.
+
 ## [6.5.2] - 2026-08-02
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.2))
