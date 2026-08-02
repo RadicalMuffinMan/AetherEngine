@@ -315,6 +315,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return unproductiveReconnects
     }
 
+    /// Whether a transfer is still installed. A test that needs a range to have COMPLETED, rather
+    /// than merely to have delivered, waits on this instead of on a sleep: the completion callback
+    /// is what clears `activeTask`, and that clearing is the state the behaviour turns on.
+    var hasLiveConnectionForTesting: Bool {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return activeTask != nil
+    }
+
     var persistentTaskIsSuspendedForTesting: Bool {
         winCond.lock()
         defer { winCond.unlock() }
@@ -1136,12 +1145,32 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 }
             }
 
+            // Genuine EOF: the only path that returns AVERROR_EOF, and it is decided BEFORE any
+            // reconnect, because a position at or past the last byte has nothing to connect for.
+            // It used to sit below the reconnect, so a read at exactly `fileSize` opened
+            // `bytes=<fileSize>-` first: an empty 206 whose reconnect reset `winStart` past the
+            // end and dropped a window the parse was still reading. Skipped for live, where the
+            // length is not authoritative.
+            if !isLive, fileSize > 0, position >= fileSize {
+                winCond.unlock()
+                return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eof
+            }
+
             // #220: `connEndedByBackpressure` is excluded on purpose. This reconnects at the
             // READ position, which resets winStart and drops the window, so a hard-cap end
             // would re-fetch up to winHardCap of already-resident bytes on every cycle. That
             // case falls through to the drained-window path below, which re-requests at the
             // frontier and keeps every delivered byte.
-            if activeTask == nil, !connEndedByBackpressure {
+            //
+            // `windowCanServe` is excluded for exactly the same reason, and the omission was
+            // measurable: a range delivered IN FULL also clears `activeTask`, so a consumer
+            // slower than the transfer (the parse pass, which reads one 256 KB AVIO buffer at a
+            // time) reached this branch with the rest of the range still resident and re-fetched
+            // it. Measured against a Range-logging origin, a 764450 B trailing `moov` cost three
+            // connections and 1506918 delivered bytes, 1.97x what was read. Serving what is in
+            // hand first also lets the #220 frontier refill below run, which it could not while
+            // this branch preempted it on every completed range.
+            if activeTask == nil, !connEndedByBackpressure, !windowCanServe {
                 let target = position
                 winCond.unlock()
                 timedReconnect(seek: true, at: target)
@@ -1237,8 +1266,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // frontier rather than at the read position keeps every delivered byte, and
                 // doing it here rather than on an empty window is what stops a range boundary
                 // from becoming a stall.
-                if connEndedAtRangeEnd, activeTask == nil, undrained <= Self.winLowWater {
-                    refillFrom = winStart + Int64(window.count)
+                // A frontier AT the end of the file is not a frontier. The range that ended was the
+                // last one, and requesting `bytes=<fileSize>-` asks for nothing: origins answer it
+                // with an empty 206, the reconnect resets `winStart` past the last byte, and the
+                // window that was about to be read is dropped for it. On a trailing `moov` that
+                // turned one connection into three, since the parse then had to re-fetch what it
+                // had just been handed. Live keeps the old behaviour: its length is not
+                // authoritative and its end moves.
+                let frontier = winStart + Int64(window.count)
+                if connEndedAtRangeEnd, activeTask == nil, undrained <= Self.winLowWater,
+                   isLive || fileSize <= 0 || frontier < fileSize {
+                    refillFrom = frontier
                 }
                 winCond.broadcast()
                 winCond.unlock()
@@ -1253,13 +1291,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let endedByRangeEnd = connEndedAtRangeEnd
             let status = connStatus
             let retryAfter = connRetryAfter
-
-            // Genuine EOF: only path that returns AVERROR_EOF. Skip for live
-            // (fileSize non-authoritative on live feeds).
-            if !isLive && fileSize > 0 && curPosition >= fileSize {
-                winCond.unlock()
-                return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eof
-            }
 
             if curPosition > frontier + Int64(Self.seekKeepForwardLimit) {
                 winCond.unlock()

@@ -10,7 +10,25 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A range that finished delivering is now read out of the window instead of
+  fetched again.** A completed range clears `activeTask` exactly as a dropped
+  one does, and the no-connection branch reconnected at the READ position
+  regardless, which resets `winStart` and drops everything still resident. A
+  consumer slower than the transfer, which is what the parse pass is (one 256 KB
+  AVIO buffer at a time), therefore re-fetched what it had just been handed.
+  Measured with aetherctl against a Range-logging origin: a 764450 B trailing
+  `moov` cost three connections and 1506918 delivered bytes, 1.97x its own size.
+  It now costs one. Serving what is in hand first also lets the #220 frontier
+  refill run, which it could not while this branch preempted it on every
+  completed range.
+
+- **A read at the end of the file no longer opens a connection for it.** The EOF
+  decision sat below the reconnect, so a position at exactly `fileSize` first
+  issued `bytes=<fileSize>-` and took an empty 206 whose reconnect reset
+  `winStart` past the last byte, dropping a window the parse was still reading.
+  On the same trailing-`moov` measurement that was one of the three connections.
 
 ## [6.5.1] - 2026-08-02
 
