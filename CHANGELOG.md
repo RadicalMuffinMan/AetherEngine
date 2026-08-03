@@ -10,7 +10,27 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The HLS segment pump runs at the efficiency QoS whenever nothing is waiting
+  on it.** Its queue was pinned to `.userInitiated` for the whole session, which
+  is right for the windows where AVPlayer is blocked on a segment that has not
+  been cut yet and wrong for the steady state, where the producer is minutes of
+  content ahead and parked on backpressure. It cannot simply be demoted either:
+  `HLSLocalServer` answers segment requests from a `.userInitiated` work queue
+  and a cache miss parks that thread in `cache.fetch` until the pump produces the
+  segment, a dependency dispatch has no way to see. Pinned to `.utility` on a
+  fully saturated M1, filling the forward window took 1.21 s against 0.16 s and
+  time to first frame rose from 0.14 s to 0.24 s; on an idle box the two are
+  indistinguishable, which is why a single measurement on a device with thermal
+  headroom cannot settle it. The pump therefore owns its thread now and retunes
+  its own class as it runs: responsive until the consumer has started rendering
+  and while the consumer sits within 16 s of content of what this pump has
+  produced, `.utility` beyond that. Over a 120 s steady-state window that leaves
+  it in the efficiency class for 416 ms of CPU against 419 ms for a build pinned
+  to `.utility`. Live is unchanged, its production is source-paced and the
+  blocking reload holds an AVPlayer request open on the very next segment.
+  Reported and measured on iOS by edde746 (#286).
 
 ## [6.5.3] - 2026-08-02
 

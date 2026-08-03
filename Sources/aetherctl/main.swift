@@ -461,7 +461,14 @@ if first == "play" {
     let playForceSW = takeFlag("--sw", from: &rest)
     let censusThresholdMB = takeIntFlag("--census-threshold-mb", from: &rest)
     let censusHz = takeDoubleFlag("--census-hz", from: &rest)
+    // Slow-CDN simulation, same hook as `serve` / `seektest`: a local file lets the producer race
+    // minutes ahead, which is the one regime where producer scheduling cannot matter (AE#286).
+    let playThrottleKbps = takeIntFlag("--throttle-kbps", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
+    if let playThrottleKbps {
+        AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
+        print("[aetherctl] source throttle: \(playThrottleKbps) kbit/s (slow-CDN simulation)")
+    }
     guard let urlArg = rest.first else {
         print("ERROR: play requires a <url> argument")
         print("")
