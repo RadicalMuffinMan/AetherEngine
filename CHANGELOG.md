@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **A live HEVC-in-MPEG-TS channel reaches the ingest without paying for a
+  doomed native mount first.** The carriage verdict used to come only from the
+  #168 watchdog, which needs a full mount, readyToPlay and a 4 s grace before it
+  can conclude that AVPlayer will never build a video track, so every first open
+  of such a channel spent that grace as audio over black, in every process. The
+  same question is now answered from the source itself, the playlist plus the
+  head of one segment (the evidence chain #268 already uses for finite VOD),
+  read concurrently with the mount so nothing is serialized in front of first
+  frame. A master that advertises H.264 never reaches the network for it, and a
+  live media playlist URL with no master to judge is covered for the first time:
+  its carriage was previously unjudgeable, which left it audio-only
+  indefinitely. A video track that does build still wins at any point, so no
+  working session is taken off the native path (#293).
 
 ## [6.5.6] - 2026-08-03
 
