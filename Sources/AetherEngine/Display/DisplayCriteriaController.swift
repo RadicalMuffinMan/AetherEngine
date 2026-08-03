@@ -87,6 +87,23 @@ final class DisplayCriteriaController {
             case .full:  100
             }
         }
+
+        /// The budget as the log lines report it: one tick is a 10 ms poll. Latency fixes are verified off
+        /// the number they moved, so both the spent-time line and the #289 skip line name it (#274).
+        var budgetMs: Int { ticks * 10 }
+    }
+
+    /// #289: with Match Content off, nothing can start a switch, so waiting for one is pure startup latency
+    /// on the path that gates `play()`. `apply()` already declines to write criteria in that state, but it
+    /// returns `.applied`, which is neither of the two outcomes the play-gate short-circuits on, and a
+    /// sole-writer host never reaches `apply()` at all: tvOS ignores `preferredDisplayCriteria` for AVKit's
+    /// write just the same, so that path can only be caught here.
+    ///
+    /// Read live from the display manager rather than from `LoadOptions.matchContentEnabled`: the host flag
+    /// is a snapshot that can be stale in the dangerous direction (reporting off while matching is on would
+    /// skip a wait a DV cold start needs).
+    nonisolated static func shouldWait(startGrace: StartGrace, matchingEnabled: Bool) -> Bool {
+        startGrace != .skip && matchingEnabled
     }
 
     /// Who wrote the criteria a switch belongs to, and what range they asked for. Only the engine's own HDR
@@ -311,6 +328,15 @@ final class DisplayCriteriaController {
         let screen = window.screen
         let entry = DispatchTime.now()
 
+        // #289: Match Content off means no writer can start a switch, so every millisecond of the budget is
+        // dead startup time. The headroom fast-exit below cannot cover it: the panel never transitioned, so
+        // the headroom sits at 1.0 and the wait runs its full Stage 1.
+        guard Self.shouldWait(startGrace: startGrace,
+                              matchingEnabled: displayManager.isDisplayCriteriaMatchingEnabled) else {
+            EngineLog.emit("[DisplayCriteria] no wait: Match Content disabled, nothing can start a switch (skipped \(startGrace.budgetMs)ms Stage 1 budget)", category: .engine)
+            return
+        }
+
         // Fast exit: panel already in HDR (headroom already raised, e.g. a prior
         // HDR/DV session left it there).
         if observeHeadroom(screen) {
@@ -360,7 +386,7 @@ final class DisplayCriteriaController {
         // Time spent, not the budget: the polls carry scheduler overhead, and everything downstream is
         // reported relative to this (#49).
         let stage1Ms = Self.elapsedMs(since: entry)
-        let startBudgetMs = startGrace.ticks * 10
+        let startBudgetMs = startGrace.budgetMs
         if startSignal == .none {
             // No switch started within the grace: panel already satisfies the criteria
             // or the setter was a no-op. Don't block; AVPlayer tonemaps or errors for real.
