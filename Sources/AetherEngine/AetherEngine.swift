@@ -528,6 +528,18 @@ public final class AetherEngine: ObservableObject {
     /// SW-PiP bridge, the software-path analog of `currentAVPlayer`: set when a SW session has its
     /// display layer, nil on teardown. Hosts build their sample-buffer PiP ContentSource from it.
     @Published public internal(set) var softwarePiPSource: SoftwarePiPSource?
+
+    /// #288: the native-path counterpart of `softwarePiPSource.layer`. `AVPictureInPictureController`
+    /// wants the layer, not the player, so a host presenting its own PiP on the native path (tvOS has
+    /// no reachable AVKit affordance behind suppressed chrome) cannot get there from `currentAVPlayer`.
+    /// nil while no native session exists, which is also the honest signal for hiding a PiP button:
+    /// a software session has no AVPlayerLayer, it has `softwarePiPSource`.
+    ///
+    /// Read it per session rather than caching it. The layer survives item swaps and the PiP
+    /// next-episode handover (AE#158), but `stop()` tears the host down and the next `load()` builds
+    /// a fresh layer. A host driving PiP must still set `pictureInPictureActive`, which arms both the
+    /// keepalive policy and that in-place handover.
+    public var nativePlayerLayer: AVPlayerLayer? { nativeHost?.playerLayer }
     #if os(iOS) || os(tvOS)
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
