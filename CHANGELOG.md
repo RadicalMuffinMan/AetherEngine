@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Ordinary remote custom readers can skip ISO/UDF disc-image recognition.**
+  `IOReader.discImageProbeEnabled` defaults to `true`, preserving automatic DVD
+  and Blu-ray image support. Readers that already know they expose a regular
+  media file can return `false`, avoiding the sparse remote seeks used only for
+  ISO9660 and UDF signature checks. The policy travels with independent readers,
+  so subtitle side demuxers, reloads, and frame extraction do not repeat those
+  unnecessary network reads.
 
 ## [6.6.3] - 2026-08-04
 
