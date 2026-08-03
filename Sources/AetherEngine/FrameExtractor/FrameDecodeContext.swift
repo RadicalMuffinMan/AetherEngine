@@ -278,10 +278,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                 ? targetWidth
                 : Self.clampedWidth(frame: f, maxSize: maxSize)
             if isDolbyVisionNoBaseLayer {
-                let frameSAR = f.pointee.sample_aspect_ratio
-                let sar = (streamSAR.num > 1 || streamSAR.den > 1)
-                    ? streamSAR
-                    : (frameSAR.num > 0 && frameSAR.den > 0 ? frameSAR : AVRational(num: 1, den: 1))
+                let sar = resolvedSAR(frame: f)
                 if let img = DolbyVisionStillConverter.makeImage(frame: f, targetWidth: width, sar: sar) {
                     return img
                 }
@@ -406,6 +403,24 @@ final class FrameDecodeContext: @unchecked Sendable {
                        provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 
+    /// Stream SAR (read at open) is authoritative, per-frame is fallback, square pixels are the
+    /// floor. #290: each candidate is judged against the frame it applies to, so a declared ratio
+    /// that would smear the picture into a band (a live channel claiming 3:1 on 1920x1080) drops
+    /// through instead of scaling a thumbnail to it. See `PixelAspectPolicy`.
+    private func resolvedSAR(frame: UnsafeMutablePointer<AVFrame>) -> AVRational {
+        let width = frame.pointee.width
+        let height = frame.pointee.height
+        if streamSAR.num > 1 || streamSAR.den > 1,
+           let sane = PixelAspectPolicy.saneSAR(streamSAR, width: width, height: height) {
+            return sane
+        }
+        if let sane = PixelAspectPolicy.saneSAR(
+            frame.pointee.sample_aspect_ratio, width: width, height: height) {
+            return sane
+        }
+        return AVRational(num: 1, den: 1)
+    }
+
     /// sws_scale the frame to RGBA at `targetWidth` (height from source aspect) into an
     /// owned-buffer CGImage. Mirrors the sws tuple-pointer dance in SoftwareVideoDecoder.
     private func convertToCGImage(frame: UnsafeMutablePointer<AVFrame>, targetWidth: Int) -> CGImage? {
@@ -413,11 +428,7 @@ final class FrameDecodeContext: @unchecked Sendable {
         let srcH = Int(frame.pointee.height)
         guard srcW > 0, srcH > 0, targetWidth > 0 else { return nil }
 
-        // Resolve SAR: stream value (read at open) is authoritative, per-frame is fallback.
-        let frameSAR = frame.pointee.sample_aspect_ratio
-        let sar = (streamSAR.num > 1 || streamSAR.den > 1)
-            ? streamSAR
-            : (frameSAR.num > 0 && frameSAR.den > 0 ? frameSAR : AVRational(num: 1, den: 1))
+        let sar = resolvedSAR(frame: frame)
 
         // Display height from coded aspect scaled by SAR so anamorphic draws true,
         // e.g. NTSC DVD 720x480 SAR 8:9 -> 4:3 not stretched 3:2.

@@ -34,6 +34,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// in the field) must never flicker the display geometry. Guarded by `lock` (set inside emit).
     private var latchedSAR: AVRational?
     private var loggedSARLatch = false
+    /// #290: one line per stream when a declared SAR is dropped for the aspect it produces, so a
+    /// smeared picture names its own cause instead of looking like a renderer bug.
+    private var loggedSARReject = false
 
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth = 0
@@ -553,18 +556,19 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     // MARK: - Pixel Aspect Ratio (anamorphic SD)
 
-    /// #177 sanity gate: reject unset (0:x), negative, and garbage SARs. AVCodecContext has been
-    /// seen carrying 1088:1 on live TS; no legitimate pixel aspect ratio needs values above 256.
-    static func saneSAR(_ sar: AVRational) -> AVRational? {
-        guard sar.num > 0, sar.den > 0, sar.num <= 256, sar.den <= 256 else { return nil }
-        return sar
-    }
-
     /// #177 resolution order: frame -> codec context -> stream, first sane wins. The frame usually
     /// carries its own (MPEG-2 seq header from frame 1); the codec context covers codecs that only
     /// populate it there; the container-declared stream SAR is the last resort.
-    static func resolveSAR(frame: AVRational, codecCtx: AVRational, stream: AVRational) -> AVRational? {
-        saneSAR(frame) ?? saneSAR(codecCtx) ?? saneSAR(stream)
+    ///
+    /// #290: sanity is judged against the coded dimensions, so a SAR whose numbers are plausible
+    /// but whose display aspect is not (a live 1080p channel declaring 3:1) drops through to the
+    /// next source, and to square pixels when no source survives. See `PixelAspectPolicy`.
+    static func resolveSAR(
+        frame: AVRational, codecCtx: AVRational, stream: AVRational, width: Int32, height: Int32
+    ) -> AVRational? {
+        PixelAspectPolicy.saneSAR(frame, width: width, height: height)
+            ?? PixelAspectPolicy.saneSAR(codecCtx, width: width, height: height)
+            ?? PixelAspectPolicy.saneSAR(stream, width: width, height: height)
     }
 
     /// #177 per-stream latch: the first sane non-square SAR wins for the rest of the stream, so
@@ -582,11 +586,18 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// its CMVideoFormatDescription cache on this attachment (#177), so it must be stable per stream.
     private func attachPixelAspectRatio(from frame: UnsafeMutablePointer<AVFrame>, to pb: CVPixelBuffer) {
         let ctxSAR = codecContext?.pointee.sample_aspect_ratio ?? AVRational(num: 0, den: 1)
+        let width = frame.pointee.width
+        let height = frame.pointee.height
         let resolved = Self.resolveSAR(
             frame: frame.pointee.sample_aspect_ratio,
             codecCtx: ctxSAR,
-            stream: streamSAR
+            stream: streamSAR,
+            width: width,
+            height: height
         )
+        if resolved == nil, !loggedSARReject, latchedSAR == nil {
+            logRejectedSAR(frame: frame.pointee.sample_aspect_ratio, ctx: ctxSAR, width: width, height: height)
+        }
         let (attach, latch) = Self.sarForAttachment(resolved: resolved, latched: latchedSAR)
         latchedSAR = latch
         guard let sar = attach else {
@@ -610,5 +621,22 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             kCVImageBufferPixelAspectRatioVerticalSpacingKey: Int(sar.den),
         ]
         CVBufferSetAttachment(pb, kCVImageBufferPixelAspectRatioKey, aspect, .shouldPropagate)
+    }
+
+    /// #290: name the dropped ratio and the aspect it would have produced, once per stream. Only a
+    /// SAR that cleared the component gate and failed on the display aspect reaches this; an unset
+    /// or square SAR is the ordinary case and stays silent.
+    private func logRejectedSAR(frame: AVRational, ctx: AVRational, width: Int32, height: Int32) {
+        let candidates = [frame, ctx, streamSAR]
+        guard let rejected = candidates.first(where: { PixelAspectPolicy.saneSAR($0) != nil }) else { return }
+        loggedSARReject = true
+        let aspect = PixelAspectPolicy.displayAspect(sar: rejected, width: width, height: height)
+        EngineLog.emit(
+            "[SWDecoder] SAR \(rejected.num):\(rejected.den) rejected on \(width)x\(height): "
+            + String(format: "display aspect %.2f outside %.2f...%.2f",
+                     aspect, PixelAspectPolicy.minDisplayAspect, PixelAspectPolicy.maxDisplayAspect)
+            + ", using square pixels",
+            category: .swPlayback
+        )
     }
 }
