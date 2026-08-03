@@ -10,6 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.6.0] - 2026-08-03
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.0))
+
+### Added
+
+- **`nativePlayerLayer` and `softwareHostFramesEnqueued`,** two read-only
+  properties with no behaviour attached. `AVPictureInPictureController` wants an
+  `AVPlayerLayer` rather than an `AVPlayer`, and the software path has published
+  its layer since 5.13.0, so a host rendering through `bind(view:)` had no route
+  to the native layer already on screen and had to mount a second one. It reads
+  nil outside a native session, which is also the honest signal for hiding a PiP
+  button. `softwareHostFramesEnqueued` was already the engine's own answer to
+  "are frames reaching the display layer" and simply was not public in a Release
+  build: a host watchdog can ask `AVPlayerItemVideoOutput.hasNewPixelBuffer` on
+  the native path and had nothing to ask on the software one, so it read every
+  dav1d / libavcodec session as picture-less. Monotonic within a session and
+  restarting at zero when a `load()` builds a new host. Requested by
+  @kskchaitanya1993, who had been carrying both as downstream patches (#288).
+
 ### Changed
 
 - **A live HEVC-in-MPEG-TS channel reaches the ingest without paying for a
@@ -18,13 +40,44 @@ the public-API contract.
   can conclude that AVPlayer will never build a video track, so every first open
   of such a channel spent that grace as audio over black, in every process. The
   same question is now answered from the source itself, the playlist plus the
-  head of one segment (the evidence chain #268 already uses for finite VOD),
-  read concurrently with the mount so nothing is serialized in front of first
-  frame. A master that advertises H.264 never reaches the network for it, and a
-  live media playlist URL with no master to judge is covered for the first time:
-  its carriage was previously unjudgeable, which left it audio-only
-  indefinitely. A video track that does build still wins at any point, so no
-  working session is taken off the native path (#293).
+  head of one segment (the evidence chain #268 already uses for finite VOD), read
+  concurrently with the mount so nothing is serialized in front of first frame. A
+  master that advertises H.264 never reaches the network for it, and a live media
+  playlist URL with no master to judge is covered for the first time: its carriage
+  was previously unjudgeable, which left it audio-only indefinitely. A video track
+  that does build still wins at any point, so no working session is taken off the
+  native path (#293).
+
+### Fixed
+
+- **No play-gate wait for a display switch Match Content cannot start.** With
+  Match Content off, `waitForSwitch()` still ran its poll on the path that gates
+  `play()`, and nothing in that state can start a switch: `apply()` declines to
+  write the criteria, and tvOS ignores a sole-writer host's AVKit write just the
+  same. The budget was dead startup time on every load, 200 ms for an
+  engine-writer host and 1000 ms for a sole-writer host on HDR / DV. The guard
+  reads the toggle live off the display manager rather than the host's
+  `LoadOptions` snapshot, which can be stale in the direction that matters, and
+  the skip line names the budget it dropped. Sessions with Match Content on are
+  untouched. Reported by @kskchaitanya1993 (#289).
+- **A pixel aspect ratio is judged by the picture it produces, not by its own
+  magnitude.** `saneSAR` bounded each component to 256, which catches the
+  pathological values and admits small-but-wrong ones: a live 1080p H.264 channel
+  declaring 3:1 cleared it and smeared 1920x1080 into a 5.33:1 band. No bound on
+  the ratio itself can work, since 2:1 is a standard VUI value and exactly right
+  on a 960x1080 broadcast frame while being the reported defect on 1920x1080. The
+  display aspect the ratio resolves to on this frame is now bounded to 1:3 ... 3:1,
+  a rejected candidate falls through frame to codec context to stream rather than
+  ending resolution, and the FrameExtractor resolves through the same policy.
+  Reported by @kskchaitanya1993 (#290).
+- **A container-declared pixel aspect ratio reaches the decoder.** The software
+  path's container-SAR fallback read `codecpar->sample_aspect_ratio` alone, which
+  is the one place a container ratio never lands: Matroska writes its DisplayWidth
+  quotient to `st->sample_aspect_ratio` and MP4 does the same with `pasp`. The
+  fallback was dead in exactly the case it was written for, and MPEG-2 sources hid
+  it because their ratio arrives per frame from the sequence header. A 960x1080
+  VP9 MKV declaring 2:1 drew at coded dimensions and now draws 16:9. A container
+  ratio still runs the gates above like any other.
 
 ## [6.5.6] - 2026-08-03
 
