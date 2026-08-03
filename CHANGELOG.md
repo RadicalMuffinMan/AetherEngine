@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.5.5] - 2026-08-03
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.5))
+
+### Fixed
+
+- **The retained file head now survives to serve playback's first read.** It was
+  released when the demuxer finished parsing, on the reasoning that a far seek
+  from there on is a scrub. After a trailing-index parse the anchored connection
+  sits at the END of the file, so playback's first read is a backward one, and it
+  lands at the head: measured landings of 48 and 263303 under `aetherctl` and
+  5752 in a field trace, where it cost a fresh connection whose first byte took
+  865 ms. No `probe`-based measurement could see it, because `probe` exits at
+  exactly that call. Against a 300 ms origin on a fragmented fixture, playback's
+  first read becomes a copy out of the head and the next connection is deferred
+  by 3.93 MB of already-resident bytes. The head is released instead by the first
+  post-open read it cannot answer.
+- **An origin that declines suffix ranges is asked once per session, not once per
+  open.** Some origins answer `bytes=-65536` with a 200 and the whole file. That
+  body was already refused at the response header, but the request itself was
+  re-issued on every open: a second connection opened at the same instant as the
+  data connection whose first byte is the cold start, sharing the same uplink,
+  against a server that had already shown it cannot serve it. Its answer is now
+  remembered per origin. Only the origin's own answer latches immediately; a
+  transport failure takes two, since a link bad enough to lose this request loses
+  others.
+
 ## [6.5.4] - 2026-08-03
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.4))
