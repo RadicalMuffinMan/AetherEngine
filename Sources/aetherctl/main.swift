@@ -71,6 +71,7 @@ func printUsage() {
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>]
+                 [--start-position S]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback] <url>
                      (full load+play session smoke test; --subs activates the first
                       matching embedded subtitle track and logs overlay cues;
@@ -464,6 +465,9 @@ if first == "play" {
     // Slow-CDN simulation, same hook as `serve` / `seektest`: a local file lets the producer race
     // minutes ahead, which is the one regime where producer scheduling cannot matter (AE#286).
     let playThrottleKbps = takeIntFlag("--throttle-kbps", from: &rest)
+    // Resume anchor, the same one load(startPosition:) takes. AE#287 needs it: the reporter's hard
+    // park only reproduces when a rebuilt session opens exactly at the video-exhaustion boundary.
+    let playStartPosition = takeDoubleFlag("--start-position", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -475,7 +479,7 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, mallocCensus: mallocCensus, forceSoftware: playForceSW,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz))
 }
 
