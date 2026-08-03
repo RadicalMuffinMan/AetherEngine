@@ -12,6 +12,26 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.5.6] - 2026-08-03
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.6))
+
+### Fixed
+
+- **A VOD whose audio track outlives its video no longer ends when the picture
+  runs out.** AVPlayer fires `didPlayToEndTime` the moment its video renderer
+  runs dry, and the engine forwarded that as an organic finish. On a dual-audio
+  BDRip whose selected English AAC runs 53 s past the last video sample, the item
+  stopped 53 s early, and because `.ended` is terminal the tail was unreachable
+  for the rest of the session. Reproduced deterministically on a 60 s-video /
+  113 s-audio MKV, and identically with an 8 s and a 2 s tail, so the trigger is
+  the video exhaustion rather than the length of the tail. An end that lands more
+  than a second inside the range AVPlayer itself still reports as seekable is now
+  refused, and the item is re-seeked in place and resumed: the tail plays out to
+  an organic end at the real duration with no audio dropped. Bounded to three
+  recoveries per item, each requiring the playhead to have moved, so a source
+  that genuinely cannot continue costs one re-seek and then completes as before.
+
 ## [6.5.5] - 2026-08-03
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.5))
