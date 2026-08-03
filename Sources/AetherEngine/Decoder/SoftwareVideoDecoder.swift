@@ -96,7 +96,18 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         timeBase = stream.pointee.time_base
 
         // Container SAR fallback; see streamSAR. Frames usually carry their own (MPEG-2 seq header, from frame 1).
-        streamSAR = codecpar.pointee.sample_aspect_ratio
+        //
+        // Both fields, because they carry different sources and only one of them is the container's.
+        // `codecpar` holds what the bitstream declared (mpegts/mpeg-ps fill it from the parser), while
+        // a container-declared ratio reaches AVStream alone: Matroska writes its DisplayWidth quotient
+        // to `st->sample_aspect_ratio` (matroskadec.c) and MP4 does the same with `pasp` (mov.c),
+        // leaving codecpar at 0:1. Reading codecpar alone left this fallback dead in exactly the case
+        // it exists for, an anamorphic source whose ratio lives in the container rather than in the
+        // stream, which is every DVD remuxed to MKV in a codec whose bitstream cannot carry SAR.
+        streamSAR = Self.declaredStreamSAR(
+            bitstream: codecpar.pointee.sample_aspect_ratio,
+            container: stream.pointee.sample_aspect_ratio
+        )
 
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
@@ -555,6 +566,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
 
     // MARK: - Pixel Aspect Ratio (anamorphic SD)
+
+    /// The stream's declared SAR, bitstream first. Neither field alone is the whole answer: codecpar
+    /// carries what the bitstream said (the mpegts / mpeg-ps parsers fill it), while a
+    /// container-declared ratio reaches AVStream alone. Sanity is not judged here; the caller runs
+    /// both gates against the frame.
+    static func declaredStreamSAR(bitstream: AVRational, container: AVRational) -> AVRational {
+        (bitstream.num > 0 && bitstream.den > 0) ? bitstream : container
+    }
 
     /// #177 resolution order: frame -> codec context -> stream, first sane wins. The frame usually
     /// carries its own (MPEG-2 seq header from frame 1); the codec context covers codecs that only

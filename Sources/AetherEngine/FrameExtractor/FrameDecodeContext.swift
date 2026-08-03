@@ -171,9 +171,16 @@ final class FrameDecodeContext: @unchecked Sendable {
         }
         // Prefer container/stream SAR; the SW decoder does not reliably attach SAR
         // to output frames (see SoftwareVideoDecoder), so per-frame is fallback-only.
+        // Both fields: codecpar holds the bitstream-declared ratio, while a container-declared one
+        // (Matroska DisplayWidth, MP4 pasp) reaches AVStream alone.
         let parSAR = codecpar.pointee.sample_aspect_ratio
         if parSAR.num > 0, parSAR.den > 0 {
             streamSAR = parSAR
+        } else {
+            let containerSAR = stream.pointee.sample_aspect_ratio
+            if containerSAR.num > 0, containerSAR.den > 0 {
+                streamSAR = containerSAR
+            }
         }
         isHDR = Self.isHDRTransfer(codecpar.pointee.color_trc)
         isDolbyVisionNoBaseLayer = Self.isDVNoBaseLayer(codecpar: codecpar)
