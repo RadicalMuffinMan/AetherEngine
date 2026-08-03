@@ -27,6 +27,17 @@ final class NativeAVPlayerHost {
     /// #50: latched on first .playing; discriminates startup failures (never played) from mid-playback transients. .failed and timeControlStatus KVOs are unsynchronized, so instantaneous status is unreliable. Reset with the item on a reused host.
     private var hasEverPlayed = false
     @Published private(set) var didReachEnd: Bool = false
+
+    /// Set per load; gates the AE#287 premature-end recovery, which only makes sense for a fixed-length
+    /// presentation. A live session has no advertised end to fall short of.
+    private var isLiveSession: Bool = false
+    /// AE#287 bookkeeping, cleared with the item in `unloadCurrentItem`.
+    private var prematureEndRecoveryAttempts: Int = 0
+    private var lastPrematureEndRecoveryPlayhead: Double?
+    /// True across the re-seek of a premature-end recovery. AVPlayer drops to `.paused` for its
+    /// duration, and publishing that transient would bounce the engine through `.paused` and back for
+    /// what the viewer must not even notice; the real status is republished when the recovery settles.
+    private var prematureEndRecoveryInFlight = false
     /// Mirrors avPlayer.timeControlStatus so the engine can reconcile when AVKit's transport bar, Control Center, or hardware buttons toggle the player externally (without this, engine state goes stale and play/pause presses are swallowed).
     @Published private(set) var timeControlStatus: AVPlayer.TimeControlStatus = .paused
     /// Monotonic count of AVPlayerItem playbackStalled notifications (#93 residual): the engine
@@ -227,11 +238,12 @@ final class NativeAVPlayerHost {
     /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
     /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
     /// AVPlayer the fresh one.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armVideoCarriageWatchdog: Bool = false) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armVideoCarriageWatchdog: Bool = false, isLive: Bool = false) {
         unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
         self.surfaceEndFailures = surfaceEndFailures
         self.carriageWatchdogArmed = armVideoCarriageWatchdog
+        self.isLiveSession = isLive
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
@@ -406,6 +418,8 @@ final class NativeAVPlayerHost {
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) timeControlStatus=\(statusStr) reason=\(reason) t+\(String(format: "%.2f", elapsed))s", category: .engine)
             Task { @MainActor in
                 guard let self = self else { return }
+                // AE#287: swallow the pause AVPlayer takes while a premature-end recovery re-seeks.
+                if status == .paused, self.prematureEndRecoveryInFlight { return }
                 self.timeControlStatus = status
                 // First .playing: re-sample route after 2.5s settle -- AVKit only negotiates HDMI format on playback start (issue #24).
                 if status == .playing { self.hasEverPlayed = true }
@@ -520,7 +534,11 @@ final class NativeAVPlayerHost {
         ) { [weak self] _ in
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) didPlayToEndTime", category: .engine)
             Task { @MainActor in
-                self?.didReachEnd = true
+                guard let self else { return }
+                // AE#287: AVPlayer ends a VOD the moment its video renderer runs dry, even with the
+                // audio-only tail still ahead. Recover before `.ended` latches; it is terminal.
+                if await self.recoverFromPrematureEnd() { return }
+                self.didReachEnd = true
             }
         }
         notificationObservers.append(didEndObs)
@@ -845,6 +863,75 @@ final class NativeAVPlayerHost {
         didReachEnd = true
     }
 
+    /// The mirror of `markEndOfMediaReached` (AetherEngine#287): suppress an end-of-item event that
+    /// AVPlayer's own seekable range contradicts, and resume instead of completing.
+    ///
+    /// A VOD whose selected audio track outruns its video track makes AVPlayer fire didPlayToEndTime
+    /// the moment the video renderer runs dry, tens of seconds short of the advertised duration and
+    /// well inside the range it still reports as seekable. Forwarding that as `didReachEnd` latches the terminal
+    /// `.ended` (#63/#164), after which the tail is unreachable for the rest of the session. Re-seeking
+    /// to the SAME position re-arms the renderers and the tail plays out to an organic end at the real
+    /// duration, dropping nothing (measured; `play()` alone leaves the clock frozen at the boundary).
+    ///
+    /// Returns true when the end was suppressed and playback resumed, false when the caller should
+    /// complete the item as usual. Both the attempt cap and the forward-progress rule live in
+    /// `AetherEngine.prematureEndRecoveryQualifies`, so a recovery that cannot work costs one re-seek
+    /// and then completes exactly as it does today.
+    private func recoverFromPrematureEnd() async -> Bool {
+        // Only resume what the viewer was playing: an item that ends while the transport is parked
+        // must stay parked.
+        guard playIntent, !didReachEnd else { return false }
+        let playhead = avPlayer.currentTime().seconds
+        let seekEnd = seekableRangeEndSeconds
+        guard AetherEngine.prematureEndRecoveryQualifies(
+            isLive: isLiveSession,
+            duration: duration,
+            playhead: playhead,
+            seekableEnd: seekEnd,
+            attemptsUsed: prematureEndRecoveryAttempts,
+            lastAttemptPlayhead: lastPrematureEndRecoveryPlayhead
+        ) else { return false }
+
+        prematureEndRecoveryAttempts += 1
+        lastPrematureEndRecoveryPlayhead = playhead
+        prematureEndRecoveryInFlight = true
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sessionID) AE#287 premature end: playhead="
+            + "\(String(format: "%.3f", playhead))s duration=\(String(format: "%.3f", duration))s "
+            + "seekableEnd=\(String(format: "%.3f", seekEnd ?? -1))s "
+            + "loadedEnd=\(String(format: "%.3f", loadedRangeEndSeconds ?? -1))s; "
+            + "\(String(format: "%.1f", duration - playhead))s of the presentation lies past the end "
+            + "AVPlayer reported, re-seeking in place (attempt \(prematureEndRecoveryAttempts))",
+            category: .engine)
+        await seek(to: playhead)
+        avPlayer.play()
+        prematureEndRecoveryInFlight = false
+        timeControlStatus = avPlayer.timeControlStatus
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sessionID) AE#287 resumed: rate=\(avPlayer.rate) "
+            + "t=\(String(format: "%.3f", avPlayer.currentTime().seconds))s",
+            category: .engine)
+        return true
+    }
+
+    /// End of AVPlayer's last seekable time range, in item seconds: the extent of the presentation it
+    /// parsed from the playlist. Read from the item rather than the `seekableEnd` KVO mirror, which
+    /// exists to keep the LIVE edge off a tick-cadence read (#134); this is one read at a rare event.
+    private var seekableRangeEndSeconds: Double? {
+        guard let last = playerItem?.seekableTimeRanges.last?.timeRangeValue else { return nil }
+        let end = CMTimeGetSeconds(CMTimeAdd(last.start, last.duration))
+        return end.isFinite ? end : nil
+    }
+
+    /// Raw end of AVPlayer's last loaded time range, in item seconds; diagnostics only. It is NOT the
+    /// #287 witness: measured at a premature end, AVPlayer has already trimmed this range back to the
+    /// exhaustion point, so it corroborates the mistake instead of refuting it.
+    private var loadedRangeEndSeconds: Double? {
+        guard let last = playerItem?.loadedTimeRanges.last?.timeRangeValue else { return nil }
+        let end = CMTimeGetSeconds(CMTimeAdd(last.start, last.duration))
+        return end.isFinite ? end : nil
+    }
+
     /// Resolve only when the seek physically lands (loopback source lands seeks seconds after the call; issue #37).
     /// seekInFlight suppresses the periodic observer across the wait; only the latest seekGeneration clears it.
     func seek(to seconds: Double) async {
@@ -1032,6 +1119,10 @@ final class NativeAVPlayerHost {
         // Clear terminal flags: keepNativeHost reload reuses the host and @Published replays on subscribe; stale failureMessage/didReachEnd corrupt the new session (issue #15).
         failureMessage = nil
         didReachEnd = false
+        // AE#287: the recovery budget is per item, not per host.
+        prematureEndRecoveryAttempts = 0
+        lastPrematureEndRecoveryPlayhead = nil
+        prematureEndRecoveryInFlight = false
         didSampleSettledRoute = false
         // #168: a reused host must not report the prior session's dynamic range before the new item resolves.
         detectedVideoFormat = nil
