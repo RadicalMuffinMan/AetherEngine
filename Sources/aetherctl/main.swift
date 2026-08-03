@@ -450,6 +450,9 @@ if first == "play" {
     var rest = Array(args.dropFirst(2))
     let seconds = takeDoubleFlag("--seconds", from: &rest) ?? 30.0
     let live = takeFlag("--live", from: &rest)
+    // AE#293: the nativeRemoteHLS bypass, the path the #168 carriage watchdog and the carriage probe
+    // live on. Pair with --live; without it the m3u8 goes to the raw live path, which rejects it.
+    let nativeHLS = takeFlag("--native-hls", from: &rest)
     let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
     let subsPick = takeStringFlag("--subs", from: &rest)
     let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
@@ -479,7 +482,7 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz))
 }
 
