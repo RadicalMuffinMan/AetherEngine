@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.5.4] - 2026-08-03
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.5.4))
+
 ### Changed
 
 - **The HLS segment pump runs at the efficiency QoS whenever nothing is waiting
