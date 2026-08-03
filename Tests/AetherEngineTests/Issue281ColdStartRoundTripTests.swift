@@ -194,8 +194,41 @@ struct Issue281ColdStartRoundTripTests {
                 "the return to the head reconnected: \(server.requestedRanges)")
     }
 
-    /// The retained head is an open-phase device. Once the demuxer is parsing no more, a far seek is
-    /// a scrub, whose landing zone it cannot serve, and holding it would be pure cost.
+    /// #281 second retest: releasing the head when the parse ended was one read too early.
+    ///
+    /// After a trailing-index parse the anchored connection sits at the END of the file, so the
+    /// first read of playback is a backward one, and it lands at the head: measured landings of 48
+    /// and 263303 in aetherctl, 5752 in the field trace, where it cost a fresh connection whose
+    /// first byte took 865 ms. No `probe`-based measurement could see this, because `probe` exits at
+    /// exactly the call this tests past.
+    @Test("the head survives the open phase to serve playback's first read")
+    func headServesPlaybacksFirstRead() async throws {
+        let server = try #require(ThrottledOriginServer(totalSize: fileSize))
+        defer { server.stop() }
+        let reader = makeReader(server)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        _ = read(reader, 1 * 1024 * 1024)
+
+        // The parse excursion to a trailing object, which is what leaves the anchor off the head.
+        let farOffset = fileSize / 2
+        #expect(reader.seek(offset: farOffset, whence: SEEK_SET) == farOffset)
+        _ = read(reader, 64 * 1024)
+
+        reader.markOpenPhaseFinished()
+        let requestsAfterParse = server.rangeRequestCount
+
+        // Playback's first read: back at the head, with the connection anchored elsewhere.
+        #expect(reader.seek(offset: 4096, whence: SEEK_SET) == 4096)
+        let got = read(reader, 32 * 1024)
+
+        #expect(got == 32 * 1024, "playback's first read returned \(got)")
+        #expect(server.rangeRequestCount == requestsAfterParse,
+                "playback's first read reconnected instead of using the retained head: \(server.requestedRanges)")
+    }
+
+    /// The head is kept for one read, not forever. Once playback has moved past what it holds, it is
+    /// megabytes with nothing left to serve.
     @Test("after the open phase the head is no longer retained")
     func parkingStopsAfterTheOpenPhase() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
@@ -253,6 +286,86 @@ struct Issue281ColdStartRoundTripTests {
         // being taken. Anything near bodyOnOffer means the response was accepted.
         #expect(server.bodyBytesWritten < 4 * 1024 * 1024,
                 "the 200 body was being downloaded: \(server.bodyBytesWritten) bytes written")
+    }
+
+    /// #281 second retest, the reporter's origin: it answers `bytes=-65536` with a 200 and the whole
+    /// file, on EVERY open. Hanging up at the header keeps the body off the wire, but the request
+    /// itself is still a second connection opened at the same instant as the data connection whose
+    /// first byte IS the cold start, and paid again on every open, against a server that has already
+    /// shown it cannot serve it.
+    @Test("an origin that declined a suffix range is not asked again")
+    func declinedSuffixRangesAreNotRetried() async throws {
+        let declared: Int64 = 4 * 1024 * 1024 * 1024
+        let server = try #require(ScriptedOriginServer { recorded in
+            if recorded.range?.contains("bytes=-") == true {
+                return .init(status: 200, declaredLength: declared, bodyBytes: 1024)
+            }
+            return .init(status: 206,
+                         declaredLength: Int64(1024 * 1024),
+                         contentRange: "bytes 0-1048575/\(declared)",
+                         bodyBytes: 1024 * 1024)
+        })
+        defer { server.stop() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/big.mp4")!
+
+        let first = AVIOReader(url: url)
+        try first.open()
+        for _ in 0..<100 where SuffixRangeSupport.shared.denialReason(for: url) == nil {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        first.markClosed(); first.close()
+
+        let reason = try #require(SuffixRangeSupport.shared.denialReason(for: url),
+                                  "the 200 answer was never recorded, so this proves nothing")
+        #expect(reason.contains("200"))
+
+        let second = AVIOReader(url: url)
+        defer { second.markClosed(); second.close() }
+        try second.open()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let suffixRequests = server.requests.filter { $0.range?.contains("bytes=-") == true }
+        #expect(suffixRequests.count == 1,
+                "the second open asked an origin that had already declined: \(suffixRequests.count) suffix requests")
+    }
+
+    /// What latches, and what does not. A 200 is the server's answer and will repeat; a timeout is
+    /// the network's, and a link bad enough to lose this request loses others, so it takes two
+    /// before the origin is judged by it.
+    @Test("only the origin's own answer latches on the first occurrence")
+    func onlyOriginAnswersLatchImmediately() throws {
+        let support = SuffixRangeSupport()
+        let refusing = URL(string: "http://refusing.invalid:8080/a.mp4")!
+        let flaky = URL(string: "http://flaky.invalid:8080/a.mp4")!
+
+        support.noteDeclined(refusing, reason: "status=200 (no suffix range support)")
+        #expect(support.denialReason(for: refusing) != nil)
+
+        #expect(support.noteTransportFailure(flaky, reason: "transport: timed out") == false)
+        #expect(support.denialReason(for: flaky) == nil, "one timeout condemned the origin")
+        #expect(support.noteTransportFailure(flaky, reason: "transport: timed out") == true)
+        #expect(support.denialReason(for: flaky) != nil)
+
+        // A fetch that lands says those failures were not this origin refusing the form.
+        let recovering = URL(string: "http://recovering.invalid:8080/a.mp4")!
+        #expect(support.noteTransportFailure(recovering, reason: "transport: timed out") == false)
+        support.noteServed(recovering)
+        #expect(support.noteTransportFailure(recovering, reason: "transport: timed out") == false)
+        #expect(support.denialReason(for: recovering) == nil,
+                "the tally survived a fetch that was served")
+    }
+
+    /// Suffix-range support is a property of the server, not of one file on it.
+    @Test("the origin key is scheme, host and port")
+    func originKeyIgnoresPath() throws {
+        let a = try #require(SuffixRangeSupport.originKey(
+            for: URL(string: "https://cdn.invalid:8443/a/one.mp4")!))
+        let b = try #require(SuffixRangeSupport.originKey(
+            for: URL(string: "https://cdn.invalid:8443/b/two.mkv?token=x")!))
+        let other = try #require(SuffixRangeSupport.originKey(
+            for: URL(string: "https://cdn.invalid:9443/a/one.mp4")!))
+        #expect(a == b)
+        #expect(a != other)
     }
 
     /// A 206 that answers with some region other than the one asked for must not be installed at the

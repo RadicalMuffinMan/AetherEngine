@@ -417,6 +417,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// One log line per span per open, not per serve. winCond-guarded (set from the read loop).
     private var headSpanServeLogged = false
+    private var headSpanPlaybackServeLogged = false
     private var tailSpanServeLogged = false
 
     /// Measured time to first data of the most recent connection: what one round trip against this
@@ -1099,6 +1100,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // and stays first.
             let spanPos = position
             let windowCanServe = spanPos >= winStart && spanPos < winStart + Int64(window.count)
+
+            // #281 retest: the head has now done the job it was kept past the parse for. This read
+            // is not at the head, so playback has either moved beyond it or started nowhere near it,
+            // and holding megabytes for a return that is not coming is just footprint.
+            if !openPhaseActive, !headSpan.isEmpty, spanPos < 0 || spanPos >= Int64(headSpan.count) {
+                headSpan = Data()
+            }
             if !windowCanServe, !headSpan.isEmpty || tailSpan != nil,
                let served = serveFromResidentSpansLocked(into: buf.advanced(by: totalRead),
                                                         maxLen: requestSize - totalRead,
@@ -1108,6 +1116,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // after the first says nothing new and would only make the log expensive.
                 var spanLine: String? = nil
                 switch served {
+                // Two lines, not one, because they are two different findings: the parse's return to
+                // the head was already true in 6.5.2, playback's first read being served is what the
+                // head living past `markOpenPhaseFinished` added. One line could not tell a reporter
+                // which of the two they were looking at.
+                case .head where !openPhaseActive && !headSpanPlaybackServeLogged:
+                    headSpanPlaybackServeLogged = true
+                    spanLine = "[AVIOReader] \(label) retained file head served playback's first read"
+                        + " at \(spanPos); no reconnect for it"
                 case .head where !headSpanServeLogged:
                     headSpanServeLogged = true
                     spanLine = "[AVIOReader] \(label) retained file head served the return to \(spanPos)"
@@ -1612,7 +1628,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// loopback origin, which answers before the race can be lost, made it look like it worked.
     private func startTailPrefetch() {
         guard !isLive, !isClosed else { return }
-        var request = URLRequest(url: requestURL())
+        let url = requestURL()
+        // An origin that already answered this form with something else will answer it that way
+        // again. Said out loud rather than skipped silently: "no issued line" and "issued, declined"
+        // are different findings, and a reporter reading this log can only report what it prints.
+        if let reason = SuffixRangeSupport.shared.denialReason(for: url) {
+            EngineLog.emit(
+                "[AVIOReader] \(label) tail prefetch skipped: this origin declined suffix ranges "
+                + "earlier this session (\(reason))", category: .demux)
+            return
+        }
+        var request = URLRequest(url: url)
         request.setValue("bytes=-\(Self.tailPrefetchBytes)", forHTTPHeaderField: "Range")
         request.timeoutInterval = Self.effectiveDetourBudget(chunkRequestTimeout: chunkRequestTimeout)
         applyExtraHeaders(&request)
@@ -1644,14 +1670,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             self.winCond.broadcast()
             self.winCond.unlock()
             if case .span(let start, let data) = outcome {
+                SuffixRangeSupport.shared.noteServed(url)
                 self.addBytesFetched(data.count)
                 EngineLog.emit(
                     "[AVIOReader] \(self.label) tail prefetch \(installed ? "installed" : "dropped") "
                     + "\(data.count)B at \(start) after \(Int(elapsedMs))ms",
                     category: .demux)
-            } else if case .rejected(let reason) = outcome {
+            } else if case .rejected(let reason, let byOrigin) = outcome {
+                var learned = false
+                if byOrigin {
+                    SuffixRangeSupport.shared.noteDeclined(url, reason: reason)
+                    learned = true
+                } else {
+                    learned = SuffixRangeSupport.shared.noteTransportFailure(url, reason: reason)
+                }
                 EngineLog.emit(
-                    "[AVIOReader] \(self.label) tail prefetch rejected after \(Int(elapsedMs))ms: \(reason)",
+                    "[AVIOReader] \(self.label) tail prefetch rejected after \(Int(elapsedMs))ms: \(reason)"
+                    + (learned ? "; not asking this origin again this session" : ""),
                     category: .demux)
             }
         }
@@ -1705,14 +1740,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return start
     }
 
-    /// The demuxer is done parsing; a far seek from here on is playback. Releases the retained head
-    /// (a scrub will never want it, and it is real memory) and stops collecting. The tail span
-    /// stays: it is 64 KB, and a container that re-reads its trailing index during playback should
-    /// keep hitting it rather than paying a round trip per visit.
+    /// The demuxer is done parsing; a far seek from here on is playback. Stops COLLECTING into the
+    /// head, but deliberately does not release it here.
+    ///
+    /// #281 retest: releasing it here was one read too early. The read that follows this call is
+    /// playback's FIRST, and after a trailing-index parse the anchored connection sits at the END of
+    /// the file, so that read is a backward one that lands at the head on every layout measured (48
+    /// here, 5752 in the field trace). Dropping the head on the last parse read handed straight back
+    /// the round trip the head exists to remove, and no `probe`-based measurement could see it,
+    /// because `probe` exits at exactly this line. The head is released instead by the first
+    /// post-open read it cannot answer, which is either playback moving past it or a resume position
+    /// nowhere near it. The tail span stays for the same reason it always did: it is 64 KB, and a
+    /// container that re-reads its trailing index during playback should keep hitting it.
     func markOpenPhaseFinished() {
         winCond.lock()
         openPhaseActive = false
-        headSpan = Data()
         winCond.unlock()
     }
 
@@ -2941,6 +2983,76 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     }
 }
 
+/// Which origins have already shown they cannot answer a suffix range, so the next open does not
+/// ask them again.
+///
+/// #281 retest: the reporter's origin answers `bytes=-65536` with a 200 and the WHOLE file, on every
+/// single open. The delegate hangs up at the response header so the body is never taken, but the
+/// request is not therefore free: it is a second connection opened at the same instant as the data
+/// connection whose first byte IS the cold start, sharing that uplink, against a server that has
+/// already demonstrated it cannot serve it. A request that structurally cannot be answered belongs
+/// once per origin, not once per open.
+///
+/// Only the origin's own answer latches. A transport failure is the network's rather than the
+/// server's, and a link bad enough to time out this request will time out others, so it takes two
+/// before the origin is judged by it. Process lifetime: a server does not gain suffix-range support
+/// mid-session, and forgetting across launches costs exactly one request.
+final class SuffixRangeSupport: @unchecked Sendable {
+    static let shared = SuffixRangeSupport()
+
+    private static let transportFailuresBeforeDenying = 2
+
+    private let lock = NSLock()
+    private var denied: [String: String] = [:]      // origin -> how it declined, for the log line
+    private var transportFailures: [String: Int] = [:]
+
+    /// Scheme + host + port. Suffix-range support is a property of the server, not of one file.
+    static func originKey(for url: URL) -> String? {
+        guard let host = url.host else { return nil }
+        return "\(url.scheme ?? "http")://\(host):\(url.port.map(String.init) ?? "-")"
+    }
+
+    /// How this origin declined, or nil if it has not (yet) declined.
+    func denialReason(for url: URL) -> String? {
+        guard let key = Self.originKey(for: url) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return denied[key]
+    }
+
+    func noteDeclined(_ url: URL, reason: String) {
+        guard let key = Self.originKey(for: url) else { return }
+        lock.lock(); defer { lock.unlock() }
+        denied[key] = reason
+    }
+
+    /// Returns true when this failure was the one that tipped the origin into being denied.
+    @discardableResult
+    func noteTransportFailure(_ url: URL, reason: String) -> Bool {
+        guard let key = Self.originKey(for: url) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard denied[key] == nil else { return false }
+        let count = (transportFailures[key] ?? 0) + 1
+        transportFailures[key] = count
+        guard count >= Self.transportFailuresBeforeDenying else { return false }
+        denied[key] = reason
+        return true
+    }
+
+    /// A served fetch clears the transport tally: whatever those failures were, they were not this
+    /// origin refusing the form.
+    func noteServed(_ url: URL) {
+        guard let key = Self.originKey(for: url) else { return }
+        lock.lock(); defer { lock.unlock() }
+        transportFailures[key] = nil
+    }
+
+    func resetForTesting() {
+        lock.lock(); defer { lock.unlock() }
+        denied.removeAll()
+        transportFailures.removeAll()
+    }
+}
+
 /// #281: collects the speculative tail fetch, and refuses everything that is not the tail.
 ///
 /// The guarantee that matters is that this never downloads a body it did not ask for. Suffix
@@ -2952,7 +3064,11 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
         case span(Int64, Data)
         /// Named so the log says WHICH way an origin declined, since "no suffix ranges", "a 200 with
         /// the whole file" and "a short body" are three different origins to talk to a reporter about.
-        case rejected(String)
+        ///
+        /// `byOrigin` separates the origin's own answer from the network's: the first is a property
+        /// of the server and will repeat on every open, the second may not. Only the first is worth
+        /// remembering after one occurrence (`SuffixRangeSupport`).
+        case rejected(String, byOrigin: Bool)
     }
 
     private let expectedLength: Int
@@ -3021,14 +3137,16 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     private func outcome(error: Error?) -> Outcome {
-        if let rejection { return .rejected(rejection) }
-        if let error { return .rejected("transport: \(error.localizedDescription)") }
-        guard let start = spanStart else { return .rejected("no usable response header") }
+        if let rejection { return .rejected(rejection, byOrigin: true) }
+        if let error { return .rejected("transport: \(error.localizedDescription)", byOrigin: false) }
+        guard let start = spanStart else {
+            return .rejected("no usable response header", byOrigin: true)
+        }
         // A short body would put later offsets in the span at the wrong place, so a partial
         // delivery is dropped rather than trimmed: this is an optimisation, and a wrong
         // optimisation is worse than none.
         guard buffer.count == expectedLength else {
-            return .rejected("short body: \(buffer.count)B of \(expectedLength)B")
+            return .rejected("short body: \(buffer.count)B of \(expectedLength)B", byOrigin: true)
         }
         return .span(start, buffer)
     }
