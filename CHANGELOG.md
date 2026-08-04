@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A bounded-range boundary no longer re-fetches bytes the origin already
+  delivered.** The #220 frontier refill opens the next range while data is still
+  resident ahead of the read position, so a range boundary is not a stall.
+  Starting that connection reset the window start to the frontier and dropped
+  the window with it, up to 8 MB of delivered but undrained bytes, and the next
+  read then sat below the window start, took the backward branch, and pulled
+  those same bytes back over the network in 4 MB detour blocks on the demux read
+  thread. A continuation now keeps its window. Visible on any paced consumer
+  (playback reads at media rate, so the transfer always wins the race), worst on
+  a high-bitrate source where the boundary comes around often, and worst of all
+  on the software path, which carries no read-ahead and turns a blocked read
+  straight into a picture stutter.
 
 ## [6.6.3] - 2026-08-04
 

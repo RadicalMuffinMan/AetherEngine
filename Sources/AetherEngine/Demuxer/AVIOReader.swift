@@ -351,6 +351,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// `connEndedByBackpressure`; cleared by `startPersistentConnection`.
     private var connEndedAtRangeEnd = false
 
+    /// First byte the live connection was asked for. Distinct from `winStart` since #295: a
+    /// continuation keeps the resident window, so the window no longer begins where the request
+    /// did, and the checks that need the REQUESTED offset (a 200 that ignored Range, the size
+    /// derived from a from-zero response) must not read the window's start instead. winCond-guarded.
+    private var connRequestedOffset: Int64 = 0
+
     /// #220: winCond-guarded snapshot of the sliding window for the periodic memprobe.
     /// `ahead` is the undrained forward extent, the quantity `appendPersistentData` gates
     /// the suspend on, so a window sitting far above winHighWater with `suspended=false` is
@@ -1811,8 +1817,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if fileSize > offset { return min(Self.persistentRangeBytes, fileSize - offset) }
             return fileSize <= 0 ? Self.persistentRangeBytes : nil
         }()
-        winStart = offset
-        window = Data()
+        // #295: a request that begins inside the resident window, or exactly at its end, is a
+        // CONTINUATION rather than a reposition. Resetting `winStart` to it dropped every byte
+        // below it, which for the #220 frontier refill is up to `winLowWater` of already delivered,
+        // still undrained data: the very next read then sat below `winStart`, took the backward
+        // branch, and pulled those same bytes back over the network 4 MB at a time on the demux
+        // read thread. Keeping them costs nothing (the new range covers only what follows) and the
+        // window stays bounded by `trimWindowLocked` and `winHardCap` exactly as before.
+        // The truncating case is the narrow race where the old connection appended past the
+        // frontier the read loop computed before it unlocked; those bytes are re-delivered by the
+        // new range, which is correct if slightly wasteful, and never leaves a hole.
+        if offset >= winStart, offset <= winStart + Int64(window.count) {
+            let keep = Int(offset - winStart)
+            if keep < window.count { window = window.subdata(in: 0..<keep) }
+        } else {
+            winStart = offset
+            window = Data()
+        }
+        connRequestedOffset = offset
         connEnded = false
         connEndedByBackpressure = false
         connEndedAtRangeEnd = false
@@ -2004,7 +2026,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // VOD: 200 at offset > 0 means server ignored Range and sent the full body
         // from byte 0 (silent corruption). Reject it. Live is exempt: transcode
         // reconnect legitimately answers 200 with "from now".
-        let requestedOffset = (generation == connGeneration) ? winStart : 0
+        let requestedOffset = (generation == connGeneration) ? connRequestedOffset : 0
         // Issue #70: the first from-0 data connection doubles as the size probe, so the
         // playback open skips probeFileSize() entirely. Derive the total from this
         // response (206 Content-Range, or Content-Length on a from-0 2xx). Write-once
