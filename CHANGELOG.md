@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.7.0] - 2026-08-04
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.7.0))
+
 ### Added
 
 - **The software path reports its read-ahead, and what the display did with it.** A software
