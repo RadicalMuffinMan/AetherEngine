@@ -270,10 +270,14 @@ let smb = try await SMBConnection.connect(
     path: "Movies/film.mkv", user: "alice", password: "s3cret"
 )
 try await engine.load(source: .custom(
-    SMBIOReader(source: smb, discImageProbeEnabled: false),
+    SMBIOReader(source: smb),
     formatHint: "matroska"
 ))
 ```
+
+When the SMB path is known to be an ordinary media file, construct the reader with
+`discImageProbeEnabled: false` to skip ISO/UDF signature reads. Keep the default for raw disc
+images so DVD/Blu-ray recognition remains available.
 
 Read-only, NTLMv2 / guest auth (no Kerberos). On tvOS the host must declare `NSLocalNetworkUsageDescription` + the local-network entitlement to reach a LAN share. See [`aetherctl smbtest`](docs/cli.md#smbtest) to validate a share from macOS.
 
