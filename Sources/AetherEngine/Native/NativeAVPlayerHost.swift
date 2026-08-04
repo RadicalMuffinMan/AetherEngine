@@ -87,6 +87,10 @@ final class NativeAVPlayerHost {
     /// and the reroute no longer waits out a grace whose conclusion is known.
     private var carriageProbeEvidence: RemoteHLSIngestFallback.CarriageEvidence = .pending
     private var carriageProbeTask: Task<Void, Never>?
+    /// #296: cadence and ceiling of the wait that holds the probe's deferred segment-head read until
+    /// readyToPlay. 20 s is well past the point where a mount that has not become ready is going to.
+    static let carriageProbeReadinessTickSeconds = 0.05
+    static let carriageProbeReadinessTicks = 400
 
     /// #35 (Sodalite) cold-DV-master startup-readiness gate. While the engine drives the bounded
     /// retry loop this is true, so a startup failure (`.failed` with any code, including a
@@ -1242,11 +1246,16 @@ final class NativeAVPlayerHost {
         }
     }
 
-    /// AE#293: read the carriage off the source itself (playlist plus the first segment's PMT) while the
-    /// native mount runs, so the #168 verdict does not cost a mount plus the watchdog grace on every
-    /// first open. Gated on AVFoundation's own master parse, which is already fetched and therefore free:
-    /// only a codec the HLS Authoring Spec sanctions in fMP4 alone, or a source with no master evidence
-    /// at all, reaches the network here. The verdict feeds the same watchdog; it never fires on its own.
+    /// AE#293: read the carriage off the source itself (playlist plus, where the playlists cannot settle
+    /// it, the first segment's PMT) while the native mount runs, so the #168 verdict does not cost a mount
+    /// plus the watchdog grace on every first open. Gated on AVFoundation's own master parse, which is
+    /// already fetched and therefore free: only a codec the HLS Authoring Spec sanctions in fMP4 alone, or
+    /// a source with no master evidence at all, reaches the network here. The verdict feeds the same
+    /// watchdog; it never fires on its own.
+    ///
+    /// AE#296: the two stages run at different times, because they cost different things. Playlists are
+    /// not what a per-token connection cap counts, so the playlist stage runs against the mount; a segment
+    /// fetch is, so it waits for readyToPlay (see `awaitReadyForDeferredProbe`).
     @MainActor
     private func startCarriageProbe(asset: AVURLAsset, url: URL, httpHeaders: [String: String]) {
         let sid = sessionID
@@ -1258,15 +1267,60 @@ final class NativeAVPlayerHost {
             let codecs = variants.compactMap { $0.videoAttributes }.flatMap { $0.codecTypes }
             guard RemoteHLSIngestFallback.shouldProbeCarriage(
                 advertisesVideo: advertises, advertisedVideoCodecs: codecs) else { return }
-            let verdict = await HLSCarriageProbe.classifyLiveCarriage(
-                playlistURL: url, httpHeaders: httpHeaders)
-            guard let self, !Task.isCancelled, self.sessionID == sid else { return }
-            self.carriageProbeEvidence = verdict == .hevcInMPEGTS ? .transportStreamHEVC : .nativeCapable
-            EngineLog.emit(
-                "[NativeAVPlayerHost] #\(sid) carriage probe: \(verdict) (#293)",
-                category: .engine
+            let evidence = await HLSCarriageProbe.classifyFromPlaylists(
+                playlistURL: url,
+                httpHeaders: httpHeaders,
+                advertisesFragmentedMP4OnlyVideo:
+                    RemoteHLSIngestFallback.advertisesFragmentedMP4OnlyVideo(codecs)
             )
+            guard let self, !Task.isCancelled, self.sessionID == sid else { return }
+            switch evidence {
+            case .settled(let verdict):
+                self.publishCarriageProbeVerdict(verdict, sid: sid, from: "playlist")
+            case .needsSegmentHead(let segmentURL):
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) carriage probe: the playlists cannot settle this one, "
+                    + "so the segment head waits for readyToPlay rather than compete with the mount (#296)",
+                    category: .engine
+                )
+                guard await self.awaitReadyForDeferredProbe(sid: sid) else { return }
+                let verdict = await HLSCarriageProbe.classifyDeferredSegmentHead(
+                    url: segmentURL, httpHeaders: httpHeaders)
+                guard !Task.isCancelled, self.sessionID == sid else { return }
+                self.publishCarriageProbeVerdict(verdict, sid: sid, from: "segment PMT")
+            }
         }
+    }
+
+    @MainActor
+    private func publishCarriageProbeVerdict(
+        _ verdict: MPEGTransportStreamCodecProbe.Verdict, sid: Int, from source: String
+    ) {
+        carriageProbeEvidence = verdict == .hevcInMPEGTS ? .transportStreamHEVC : .nativeCapable
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sid) carriage probe: \(verdict) from \(source) evidence (#293)",
+            category: .engine
+        )
+    }
+
+    /// AE#296: hold the deferred segment-head read until the item is ready. The verdict cannot be acted on
+    /// before then anyway (the watchdog arms at readyToPlay), so waiting costs nothing and removes the one
+    /// window where the read is expensive: a connection lost while the mount is establishing its own can
+    /// cost the mount, one lost here can only cost the verdict, on a session that is already black. A
+    /// session that never reaches readyToPlay, or whose watchdog disarms first, spends no media byte at
+    /// all. Returns false when the wait was overtaken by cancellation, a new session or the ceiling.
+    @MainActor
+    private func awaitReadyForDeferredProbe(sid: Int) async -> Bool {
+        var ticksWaited = 0
+        while !isReady {
+            guard !Task.isCancelled,
+                  sessionID == sid,
+                  ticksWaited < Self.carriageProbeReadinessTicks else { return false }
+            ticksWaited += 1
+            try? await Task.sleep(
+                nanoseconds: UInt64(Self.carriageProbeReadinessTickSeconds * 1_000_000_000))
+        }
+        return !Task.isCancelled && sessionID == sid
     }
 
     /// AetherEngine#168 follow-up: after readyToPlay, poll `item.tracks` at the tick cadence against the
