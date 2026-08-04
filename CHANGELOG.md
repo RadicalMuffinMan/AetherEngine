@@ -12,6 +12,38 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.6.3] - 2026-08-04
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.3))
+
+### Added
+
+- **A software session says when its frames are decoding into nothing.** The
+  software path renders into an `AVSampleBufferDisplayLayer` the engine owns,
+  and that layer reaches the screen only once the host binds a surface with
+  `bind(view:)` or `AetherPlayerSurface`. A host that presents an
+  `AVPlayerViewController` for a software-routed source instead gets audio, a
+  completely healthy engine log and no picture, because this path has no
+  `AVPlayerItem` for AVKit to show, and a layer bound to a view that never got a
+  layout looks the same from the outside. Both are now named once per session,
+  about two seconds after frames start flowing, with the count of frames that
+  went nowhere. Nothing about the session changes; the report that prompted this
+  read a full render queue (`isReadyForMoreMediaData == false`, which is the
+  demux loop's back-pressure gate working) as a renderer that had stopped
+  accepting frames, and no line said otherwise. Reported by @akacores (#298).
+
+### Changed
+
+- **A frame whose presentation timestamp is not numeric no longer reaches the
+  display queue.** `AV_NOPTS_VALUE` arrives at the renderer as `CMTime.invalid`,
+  and CoreMedia builds a sample buffer from it without complaint, so the render
+  synchronizer was the first thing in the chain that could not schedule it; the
+  deinterlace path has dropped its own untimestamped output for that reason since
+  it was added. The gate sits before the B-frame reorder buffer, where such a
+  frame additionally reordered its neighbours (every comparison against NaN is
+  false), and it counts and names what it drops so a source that produces untimed
+  frames says so instead of showing a still picture (#298).
+
 ## [6.6.2] - 2026-08-04
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.2))
