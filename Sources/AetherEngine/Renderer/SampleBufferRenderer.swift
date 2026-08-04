@@ -61,8 +61,17 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     private var loggedLayerFailed = false
     private var loggedNotReady = false
-    private var enqueueCount = 0
+    /// Internal (not private) for #298 tests: the gate's job is that untimed frames never get here.
+    private(set) var enqueueCount = 0
     private var hdr10PlusAttachedCount = 0
+
+    /// #298: frames refused at the enqueue gate for carrying an unschedulable PTS. Guarded by `reorderLock`.
+    private var _untimedFramesDropped = 0
+    var untimedFramesDropped: Int {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _untimedFramesDropped
+    }
 
     init() {
         displayLayer = Self.makeDisplayLayer(isHDR: false)
@@ -136,9 +145,32 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.unlock()
     }
 
+    /// #298: whether a frame's presentation timestamp can be scheduled at all. AV_NOPTS_VALUE reaches
+    /// the decoder callback as `CMTime.invalid`, and CoreMedia builds a sample buffer from it without
+    /// complaint (`CMSampleBufferCreateReadyWithImageBuffer` returns noErr, the sample's PTS reads back
+    /// as NaN seconds), so the display queue is the first place it can do damage: the render
+    /// synchronizer cannot pace an untimed sample. The deinterlace path already drops its untimestamped
+    /// output for exactly this reason (see `SoftwareVideoDecoder.drainDecodedFrames`); this is the same
+    /// rule one layer lower, so no producer can put an unschedulable sample in the queue.
+    static func isSchedulable(_ pts: CMTime) -> Bool { pts.isNumeric }
+
     /// Enqueue a decoded frame through the B-frame reorder buffer. `hdr10PlusData` carries per-frame ST 2094-40 metadata serialised to T.35 SEI format for kCMSampleAttachmentKey_HDR10PlusPerFrameData.
     func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data? = nil) {
         reorderLock.lock()
+
+        // Refused before the reorder buffer, not at flush: `CMTimeGetSeconds(.invalid)` is NaN and
+        // every comparison against NaN is false, so an untimed frame lands past frames it should
+        // precede and reorders its neighbours on the way out.
+        guard Self.isSchedulable(pts) else {
+            _untimedFramesDropped += 1
+            let dropped = _untimedFramesDropped
+            reorderLock.unlock()
+            if dropped == 1 || dropped % 250 == 0 {
+                EngineLog.emit("[Renderer] dropped \(dropped) frame(s) with no usable timestamp (unschedulable)",
+                               category: .swPlayback)
+            }
+            return
+        }
 
         if let threshold = skipUntilPTS {
             if CMTimeCompare(pts, threshold) < 0 {
