@@ -69,6 +69,74 @@ private final class AudioContinuityMonitor {
     }
 }
 
+/// #292 drill: issue a seek and make a transport call while its reposition is still in flight, then
+/// report what the landing did with that intent.
+///
+/// The software and audio hosts park their loops for the duration of a seek by clearing `isPlaying`,
+/// and since #254 the reposition that follows is awaited off the main actor, so a transport call
+/// (another seek, `pause()`, `play()`) can land inside that window. `seektest` cannot reach any of
+/// this: it awaits every seek, so its bursts are strictly serial.
+///
+/// `inWindow` is the precondition. Without it the call arrived after the landing and the run proves
+/// nothing, so it reports INCONCLUSIVE rather than a green PASS.
+///
+/// Every drill opens by healing the session with the report's own manual workaround (pause + play)
+/// and then settling into `startPlaying`, so a defect one drill provokes cannot be inherited by the
+/// next: before the fix each of these leaves the session wedged, and drills run back to back on a
+/// wedged session are unattributable.
+@MainActor
+private func seekIntentDrill(
+    engine: AetherEngine,
+    label: String,
+    target: Double,
+    startPlaying: Bool,
+    expectPlaying: Bool,
+    extraPrecondition: @MainActor () -> Bool = { true },
+    duringReposition: @MainActor @escaping () async -> Void
+) async -> String {
+    engine.pause()
+    engine.play()
+    let healClock = engine.currentTime
+    try? await Task.sleep(nanoseconds: 1_500_000_000)
+    let healAdvance = engine.currentTime - healClock
+    if healAdvance < 0.5 {
+        return String(format: "INCONCLUSIVE %@: session did not play at drill start (%+.2fs in 1.5s)",
+                      label, healAdvance)
+    }
+    if !startPlaying {
+        engine.pause()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+    print(String(format: "  #292 DRILL %@: from %@, seek(to: %.2f), transport call mid-reposition",
+                 label, startPlaying ? "playing" : "paused", target))
+    let seekTask = Task { @MainActor in await engine.seek(to: target) }
+    await Task.yield()                                   // let the seek reach its off-main await
+    try? await Task.sleep(nanoseconds: 2_000_000)
+    let inWindow = engine.isSeeking
+    await duringReposition()
+    _ = await seekTask.value
+    let stateAtLanding = engine.state
+    let clockAtLanding = engine.currentTime
+    try? await Task.sleep(nanoseconds: 3_000_000_000)
+    let advanced = engine.currentTime - clockAtLanding
+    let playing = advanced >= 1.0
+    print(String(format: "    inWindow=%@ landed state=%@ clock=%.2f -> %.2f (%+.2fs in 3s)",
+                 inWindow ? "yes" : "NO", String(describing: stateAtLanding),
+                 clockAtLanding, engine.currentTime, advanced))
+    guard inWindow, extraPrecondition() else {
+        return "INCONCLUSIVE \(label): the transport call did not land inside the reposition window"
+    }
+    guard playing == expectPlaying else {
+        return String(format: "FAIL %@: expected the landing to be %@, clock advanced %+.2fs",
+                      label, expectPlaying ? "playing" : "paused", advanced)
+    }
+    guard (stateAtLanding == .playing) == expectPlaying else {
+        return "FAIL \(label): engine reported \(stateAtLanding) over a host that landed "
+            + (playing ? "playing" : "paused")
+    }
+    return "PASS \(label)"
+}
+
 @MainActor
 private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil) async -> Int32 {
     let engine: AetherEngine
@@ -141,10 +209,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         case "setrate":
             print("  HOSTCALL setRate(1.0)")
             engine.setRate(1.0)
-        case "reloadlive", "seekback":
-            break  // reloadlive handled at load time, seekback in the telemetry loop
+        case "reloadlive", "seekback", "overlapseek":
+            break  // reloadlive handled at load time, seekback/overlapseek in the telemetry loop
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,reloadlive,seekback)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,reloadlive,seekback,overlapseek)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }
@@ -174,6 +242,19 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     var subsSelected = false
     var seekPatternIndex = 0
     var seekLandings: [Double] = []
+
+    // #292 drill state. `supersededSeeks` is the PRECONDITION: without an observed supersede the two
+    // seeks never interleaved and the run proves nothing, so it reports INCONCLUSIVE rather than PASS.
+    let supersededSeeks = UncheckedBox<Int>(0)
+    var seekEventSub: AnyCancellable?
+    if hostCalls.contains("overlapseek") {
+        seekEventSub = engine.seekEvents.sink { event in
+            if event.outcome == .superseded { supersededSeeks.value += 1 }
+        }
+    }
+    defer { seekEventSub?.cancel() }
+    var overlapVerdicts: [String] = []
+
     let ticks = max(1, Int(seconds))
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -200,6 +281,36 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         if hostCalls.contains("seekback"), tick == 30 {
             print("  HOSTCALL seekToLiveEdge()")
             await engine.seekToLiveEdge()
+        }
+        // #292: three transport calls that can land inside a seek's reposition window. A is the
+        // reported case (a scrub arriving as two same-target seeks, the second superseding the first);
+        // B and C are its siblings, a pause and a play issued while the reposition is still running.
+        if hostCalls.contains("overlapseek"), tick == 8 {
+            let targetA = engine.duration * 0.25
+            overlapVerdicts.append(await seekIntentDrill(
+                engine: engine, label: "A superseded scrub while playing", target: targetA,
+                startPlaying: true, expectPlaying: true,
+                extraPrecondition: { supersededSeeks.value > 0 },
+                duringReposition: { await engine.seek(to: targetA) }))
+
+            let targetB = engine.duration * 0.45
+            overlapVerdicts.append(await seekIntentDrill(
+                engine: engine, label: "B pause during the reposition", target: targetB,
+                startPlaying: true, expectPlaying: false,
+                duringReposition: { engine.pause() }))
+            // The report's manual workaround: play() after the landing must resume from the target.
+            let clockBeforeResume = engine.currentTime
+            engine.play()
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let resumed = engine.currentTime - clockBeforeResume
+            print(String(format: "    B resume: play() advanced the clock %+.2fs in 2s", resumed))
+            if resumed < 0.5 { overlapVerdicts.append("FAIL B resume: play() did not restart the clock") }
+
+            let targetC = engine.duration * 0.65
+            overlapVerdicts.append(await seekIntentDrill(
+                engine: engine, label: "C play during the reposition", target: targetC,
+                startPlaying: false, expectPlaying: true,
+                duringReposition: { engine.play() }))
         }
         // #220 repro affordance: a periodic short backward seek drives the subtitle drain
         // through .resetAndDecode and re-anchors the #151 forward prefetcher, the churn a
@@ -266,6 +377,19 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     if case .error(let message) = endState {
         print("VERDICT: session ended in error: \(message)")
         return 2
+    }
+    if hostCalls.contains("overlapseek") {
+        print("#292 seek-window drills:")
+        for verdict in overlapVerdicts { print("  \(verdict)") }
+        if overlapVerdicts.isEmpty { print("  not run (session ended before tick 8)") }
+        if overlapVerdicts.contains(where: { $0.hasPrefix("FAIL") }) {
+            print("VERDICT: #292 reproduced (the seek window swallowed a transport call)")
+            return 4
+        }
+        if overlapVerdicts.isEmpty || overlapVerdicts.contains(where: { $0.hasPrefix("INCONCLUSIVE") }) {
+            print("VERDICT: #292 drill inconclusive; widen the reposition window (--throttle-kbps, remote source)")
+            return 5
+        }
     }
     if finalTime <= 3.0 {
         print("VERDICT: clock did not advance (t=\(String(format: "%.2f", finalTime))s); transport stalled after load")
