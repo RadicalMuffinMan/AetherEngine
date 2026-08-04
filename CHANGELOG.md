@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.6.2] - 2026-08-04
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.2))
+
+### Fixed
+
+- **A seek no longer discards a transport call that arrives while its
+  reposition is still running.** The software and audio hosts park their demux
+  and feeder loops for the duration of a seek by clearing `isPlaying`, and since
+  6.1.1 the demuxer reposition that follows is awaited off the main actor, so a
+  second seek could enter that window and read the flag its predecessor had
+  cleared as "was paused". A scrub during playback that reached the engine as
+  two same-target seeks therefore anchored the audio clock at rate 0 and left
+  the session parked, while the engine went on reporting `.playing`; only a
+  manual pause plus play recovered it. The intent is now stashed by the seek
+  that owns the window, inherited by whoever supersedes it, rewritten by
+  `pause()` and `play()`, and read at the landing rather than at entry, which
+  also closes the two siblings of the same defect: a `pause()` issued during a
+  reposition was swallowed and playback continued, and a `play()` issued during
+  one landed at rate 0 under a running loop. The seek finalize no longer reports
+  `.playing` over a software or audio host that landed paused either. Reported
+  by @wunax (#292).
+
 ## [6.6.1] - 2026-08-04
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.1))
