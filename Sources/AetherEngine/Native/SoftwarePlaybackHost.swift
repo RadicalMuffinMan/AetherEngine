@@ -139,6 +139,22 @@ final class SoftwarePlaybackHost {
     /// thread writing while the main-actor time tick reads them.
     private let liveEdgeLock = NSLock()
 
+    /// #303: seconds of decoded video queued ahead of the clock, nil before the first frame. This is
+    /// the cushion an IO hiccup eats into, and the reason a blocked read reaches the picture here
+    /// while the native path swallows the same event. Distinct from `bufferedSessionTime`, which is
+    /// the DEMUXED frontier and is only fed on live sessions.
+    var displayCushionSeconds: Double? {
+        SoftwareBufferFrontier.cushionSeconds(newestEnqueuedPts: renderer.newestEnqueuedPtsSeconds,
+                                              sourceClock: sourceClockSeconds)
+    }
+
+    /// #303: the renderer's own view of what reached the display. Async because the AVFoundation
+    /// accessor is; the memprobe already runs in an async context, so it is read there rather than
+    /// cached, and the line never carries a stale snapshot.
+    func loadRenderMetrics() async -> SampleBufferRenderer.RenderMetrics? {
+        await renderer.loadRenderMetrics()
+    }
+
     /// SW path's buffered frontier (AetherEngine#54): newest demuxed source PTS in session time. Published as clock.bufferedPosition.
     nonisolated var bufferedSessionTime: Double {
         liveEdgeLock.lock()

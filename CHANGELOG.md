@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The software path reports its read-ahead, and what the display did with it.** A software
+  session left a trace with no cushion figure in it: `frameAhead` is the native producer-shift
+  fold and reads 0 here whatever the buffer holds, `bufferedSessionTime` is fed only on live
+  sessions so a VOD software session published its own playhead back as its frontier, and the
+  `isReadyForMoreMediaData=false` line is latched to one per session. The memprobe now carries
+  `swAhead=` (seconds of decoded video queued ahead of the clock), plus `swDropped=` and
+  `swDelay=` from the renderer's own accounting, which counts frames dropped for missing their
+  display deadline rather than only the ones we refuse ourselves. On a native session the fields
+  are absent rather than zero.
+
+### Changed
+
+- **`bufferedPosition` on a VOD software session reports the decoded cushion instead of the
+  playhead.** The AetherEngine#54 contract is unchanged (it never trails the playhead) and the live
+  frontier still wins where it is larger; what changes is that the VOD software case stops
+  publishing a frontier that was only ever a placeholder.
 
 ## [6.6.4] - 2026-08-04
 

@@ -1179,7 +1179,13 @@ extension AetherEngine {
                 guard let self = self else { return }
                 self.clock.currentTime = value
                 // bufferedPosition = newest demuxed source PTS, clamped to never trail the playhead (#54).
-                self.clock.bufferedPosition = max(value, host.bufferedSessionTime)
+                // #303: `bufferedSessionTime` is fed from `noteEdge`, which only runs on live
+                // sessions, so a VOD software session used to publish the playhead back as its own
+                // frontier. The decoded cushion is what it has instead.
+                self.clock.bufferedPosition = SoftwareBufferFrontier.bufferedPosition(
+                    currentTime: value,
+                    liveFrontier: host.bufferedSessionTime,
+                    cushion: host.displayCushionSeconds)
             }
             .store(in: &softwareCancellables)
         // #107: sourceTime rides the RAW synchronizer clock (source axis) so subtitle cues

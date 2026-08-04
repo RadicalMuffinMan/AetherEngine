@@ -146,6 +146,14 @@ extension AetherEngine {
                         ?? self.nativeVideoSession?.demuxerBytesFetched,
                     prefetchFetchedBytes: self.subtitleForwardPrefetchDemuxer?.avioBytesFetched)
 
+                // #303: the software path's own read-ahead, and what the display did with it.
+                // `avBufAhead` covers the AVPlayer path only, and `frameAhead` is the native
+                // producer-shift fold that reads 0 here whatever the buffer is doing, so a software
+                // session used to leave a trace with no cushion figure in it at all.
+                let swStr = Self.softwareReadAheadFragment(
+                    cushionSeconds: self.softwareHost?.displayCushionSeconds,
+                    metrics: await self.softwareHost?.loadRenderMetrics())
+
                 let line = "[AetherEngine] memprobe t=\(elapsed)s "
                     + "rss=\(rssMB)MB "
                     + vmStr
@@ -175,6 +183,7 @@ extension AetherEngine {
                     // separates "reads fast while building its lead" from "the lead never settles".
                     + SubtitlePrefetchTelemetry.probeFragment(playhead: self.sourceTime)
                     + "swFrames=\(self.softwareHostFramesEnqueued) "
+                    + swStr
                     + "audioTracks=\(self.audioTracks.count) "
                     + "subTracks=\(self.subtitleTracks.count) "
                     + "subActive=\(self.isSubtitleActive) "
@@ -290,6 +299,26 @@ extension AetherEngine {
         }
         return fragment("pump", pump, pumpFetchedBytes)
             + fragment("pref", prefetch, prefetchFetchedBytes)
+    }
+
+    /// #303: the software path's read-ahead, and the display's own account of what it did with it.
+    /// Empty on a native session, so the line does not carry three fields that can only read zero
+    /// there. Each half is independently optional: the cushion exists as soon as a frame has been
+    /// enqueued, while the metrics need an OS and a queue target that can answer for them.
+    nonisolated static func softwareReadAheadFragment(
+        cushionSeconds: Double?,
+        metrics: SampleBufferRenderer.RenderMetrics?
+    ) -> String {
+        var out = ""
+        if let cushionSeconds {
+            out += "swAhead=\(String(format: "%.2f", cushionSeconds))s "
+        }
+        if let metrics {
+            out += "swDropped=\(metrics.dropped)/\(metrics.total) "
+            if metrics.corrupted > 0 { out += "swCorrupt=\(metrics.corrupted) " }
+            out += "swDelay=\(String(format: "%.2f", metrics.accumulatedDelay))s "
+        }
+        return out
     }
 
     // MARK: - Live telemetry bridge
