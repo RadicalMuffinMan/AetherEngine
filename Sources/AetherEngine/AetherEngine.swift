@@ -3696,10 +3696,14 @@ public final class AetherEngine: ObservableObject {
         // Seek has physically landed. #122: preserve the transport intent in effect when the seek
         // was issued: a scrub started while paused lands paused, so the engine never reports playing
         // after a paused scrub and the #93 recovery reassert can't misread the paused landing as a
-        // spurious pause and call host.play(). A seek on any non-native host keeps the prior
-        // `.playing` default (those paths do not carry the durable intent and are not affected).
+        // spurious pause and call host.play().
+        // #292: the SW/audio hosts carry that intent through their seek window now, so read it off
+        // them instead of defaulting to `.playing`. Reporting playing over a host that landed paused
+        // is half of what the #292 report describes. AVPlayer-backed audio keeps the default.
         if let nativeHost {
             reconcileNativeSeekTransport(host: nativeHost, isStarved: false)
+        } else if !audioAVPlayerActive, let hostIsPlaying = softwareHost?.isPlaying ?? audioHost?.isPlaying {
+            state = hostIsPlaying ? .playing : .paused
         } else {
             state = .playing
         }

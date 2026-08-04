@@ -100,6 +100,12 @@ final class SoftwarePlaybackHost {
     /// the length of the reposition and then snap to the target.
     private var seekInFlight = false
 
+    /// Transport intent for the reposition currently in flight (#292). `seek` clears `isPlaying` to park
+    /// the loops, so a seek entering while another is suspended in its off-main reposition (#254) would
+    /// read that cleared flag as "was paused" and land a playing session at rate 0. Rewritten by
+    /// `pause()` / `play()` so an explicit transport call inside the window still wins.
+    private var inFlightSeekResumeIntent = false
+
     /// Guards isPlaying/stopRequested across demux thread reads and main-actor writes.
     private let flagsLock = NSLock()
     nonisolated(unsafe) private var _isPlaying: Bool = false
@@ -556,6 +562,7 @@ final class SoftwarePlaybackHost {
         // Cold start: demux loop arms the clock on first decoded audio sample; don't eager-start.
         rate = lastRate
         isPlaying = true
+        inFlightSeekResumeIntent = true
     }
 
     private var demuxLoopStarted: Bool = false
@@ -608,6 +615,7 @@ final class SoftwarePlaybackHost {
         pausedByHost = true
         rate = 0
         isPlaying = false
+        inFlightSeekResumeIntent = false
     }
 
     /// Background-enter (iOS keepalive): keep audio flowing, stop feeding video. The demux loop reads the flag.
@@ -649,7 +657,12 @@ final class SoftwarePlaybackHost {
         // reposition can tell on `seekQueue` whether a newer seek has already taken over.
         bumpSeekGeneration()
         let generation = seekGeneration
-        let wasPlaying = isPlaying
+        // #292: inside another seek's window `isPlaying` is that seek's parked flag, not the transport's
+        // intent. Inherit what it captured, and hand the same value on to whoever supersedes this one.
+        let wasPlaying = SeekResumeIntent.resolve(isPlaying: isPlaying,
+                                                  seekInFlight: seekInFlight,
+                                                  inFlightIntent: inFlightSeekResumeIntent)
+        inFlightSeekResumeIntent = wasPlaying
         isPlaying = false
 
         videoDecoder.flush()
@@ -692,7 +705,10 @@ final class SoftwarePlaybackHost {
 
         currentTime = seconds
 
-        if wasPlaying {
+        // #292: the intent is read HERE, not from what this seek captured on entry. `pause()` / `play()`
+        // during the reposition rewrite the stash, and a landing that ignored them either overrode the
+        // pause (kept playing) or, from the other side, anchored at rate 0 under a running loop.
+        if inFlightSeekResumeIntent {
             // Anchor clock at seek target: clock at .zero + PTS=seekTarget would stall rendering for seekTarget seconds (FigVideoQueueRemote -12080).
             audioOutput?.seekClock(to: targetTime, rate: lastRate)
             isPlaying = true
