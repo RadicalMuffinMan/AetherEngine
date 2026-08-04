@@ -348,10 +348,12 @@ public final class Demuxer: @unchecked Sendable {
     /// Open a custom `IOReader` source. `formatHint` disambiguates probing when
     /// no filename is available. `isLive` suppresses SEEK_END that latches EOF
     /// on forward-only readers (38ad60b). AetherEngine#36: DiscReader adapts
-    /// DVD/BD ISOs to VOB/MPEGTS concat streams.
+    /// DVD/BD ISOs to VOB/MPEGTS concat streams unless the reader opts out via
+    /// `discImageProbeEnabled`.
     func open(reader: IOReader, formatHint: String? = nil, profile: DemuxerOpenProfile = .playback, isLive: Bool = false, selectTitleID: Int? = nil, discCacheKey: String? = nil) throws {
         self.openProfile = profile
-        if let discInfo = try DiscReader.wrap(reader, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
+        if reader.discImageProbeEnabled,
+           let discInfo = try DiscReader.wrap(reader, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
             adoptDiscInfo(discInfo)
             let bridge = CustomIOReaderBridge(reader: discInfo.reader)
             let inputFormat = av_find_input_format(discInfo.formatHint)

@@ -29,6 +29,16 @@ the public-API contract.
   frontier still wins where it is larger; what changes is that the VOD software case stops
   publishing a frontier that was only ever a placeholder.
 
+### Fixed
+
+- **Ordinary remote custom readers can skip ISO/UDF disc-image recognition.**
+  `IOReader.discImageProbeEnabled` defaults to `true`, preserving automatic DVD
+  and Blu-ray image support. Readers that already know they expose a regular
+  media file can return `false`, avoiding the sparse remote seeks used only for
+  ISO9660 and UDF signature checks. The policy travels with independent readers,
+  so subtitle side demuxers, reloads, and frame extraction do not repeat those
+  unnecessary network reads. Contributed by @murderer1234.
+
 ## [6.6.4] - 2026-08-04
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.4))
