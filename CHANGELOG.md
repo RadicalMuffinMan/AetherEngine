@@ -12,6 +12,32 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.6.1] - 2026-08-04
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.1))
+
+### Fixed
+
+- **The live carriage probe no longer spends a media connection where the
+  playlists already answer, nor spends one against the mount.** Origins that
+  authenticate per token routinely cap concurrent connections at one or two, and
+  what such a cap counts is media fetches rather than playlist fetches, so the
+  6.6.0 probe's ranged segment head was a second media connection opened while
+  AVPlayer was establishing its own on exactly the channels the probe exists to
+  speed up. An fMP4 media segment requires an `EXT-X-MAP` (RFC 8216 4.3.2.5), so
+  a master advertising hvc1 / hev1 / dvh1 / dvhe / av01 over a window that
+  carries none is that codec in MPEG-TS, settled now from the `CODECS` attribute
+  AVFoundation has already parsed plus one playlist fetch and no segment byte at
+  all. AES-128 no longer blocks that branch, since nothing is being decrypted to
+  reach the verdict. What the playlists cannot settle, a direct media playlist or
+  a master without `CODECS`, still reads one segment head, because only the PMT
+  separates HEVC in MPEG-TS from H.264 in MPEG-TS there, but it waits for
+  readyToPlay: the verdict cannot be acted on before the watchdog arms in any
+  case, and a connection lost at that point costs the verdict rather than the
+  mount. A session whose watchdog disarms first, or which never becomes ready,
+  now fetches nothing. The saving stays about 3.5 s of the 4 s grace. Raised by
+  @kskchaitanya1993 out of the #293 device leg (#296).
+
 ## [6.6.0] - 2026-08-03
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.6.0))
