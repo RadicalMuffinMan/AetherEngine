@@ -73,8 +73,41 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return _untimedFramesDropped
     }
 
+    /// #303: newest presentation timestamp this renderer has admitted, in seconds on the source
+    /// axis, nil before the first frame. Recorded at admission into the reorder buffer, so it is
+    /// past the unschedulable-PTS gate and the post-seek skip: everything counted here is decoded
+    /// and will be displayed. Its lead over the synchronizer is the cushion an IO hiccup eats into.
+    /// Guarded by `reorderLock`.
+    private var _newestEnqueuedPtsSeconds: Double?
+    var newestEnqueuedPtsSeconds: Double? {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _newestEnqueuedPtsSeconds
+    }
+
     init() {
         displayLayer = Self.makeDisplayLayer(isHDR: false)
+    }
+
+    /// #303: what the display did with the frames, as the renderer itself counts them. Our own
+    /// counters can only see what we refuse; `numberOfDroppedFrames` also covers frames dropped for
+    /// missing their display deadline, which is the class that shows up as a stutter.
+    struct RenderMetrics: Sendable {
+        let total: Int
+        let dropped: Int
+        let corrupted: Int
+        let accumulatedDelay: TimeInterval
+    }
+
+    /// nil where the metrics cannot be asked for: an OS predating the API, or the pre-tvOS-18 path
+    /// where the queue target is the display layer itself rather than an `AVSampleBufferVideoRenderer`.
+    func loadRenderMetrics() async -> RenderMetrics? {
+        guard #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) else { return nil }
+        guard let m = await displayLayer.sampleBufferRenderer.videoPerformanceMetrics else { return nil }
+        return RenderMetrics(total: m.totalNumberOfFrames,
+                             dropped: m.numberOfDroppedFrames,
+                             corrupted: m.numberOfCorruptedFrames,
+                             accumulatedDelay: m.totalAccumulatedFrameDelay)
     }
 
     // MARK: - Queue rendering target
@@ -181,6 +214,12 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
 
         let ptsSeconds = CMTimeGetSeconds(pts)
+        // #303: the frontier is the newest timestamp HELD, not the newest handed over. A B-frame run
+        // arrives out of order, so taking the last call's timestamp would report a cushion that
+        // shrinks and grows with the coding pattern rather than with the buffer.
+        if ptsSeconds > (_newestEnqueuedPtsSeconds ?? -.greatestFiniteMagnitude) {
+            _newestEnqueuedPtsSeconds = ptsSeconds
+        }
         let insertIdx = reorderBuffer.firstIndex(where: {
             CMTimeGetSeconds($0.1) > ptsSeconds
         }) ?? reorderBuffer.endIndex
@@ -202,6 +241,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
     func flush(removingDisplayedImage: Bool = true) {
         reorderLock.lock()
         reorderBuffer.removeAll()
+        // #303: nothing is held any more, so the frontier is not a frontier. Left standing, a
+        // backward seek would keep reporting the pre-seek timestamp and read as a cushion of
+        // however far the seek travelled.
+        _newestEnqueuedPtsSeconds = nil
         // Invalidate the format description cache; the next load() may open a stream with different colorimetry at the same resolution.
         cachedFormatDesc = nil
         cachedFormatKey = nil
