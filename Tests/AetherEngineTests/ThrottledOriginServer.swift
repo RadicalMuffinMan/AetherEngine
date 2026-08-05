@@ -11,17 +11,28 @@ import Foundation
 /// the client stops reading, write() parks on the full socket buffer, so `bytesWritten`
 /// plateauing IS the observable for working flow control.
 final class ThrottledOriginServer: @unchecked Sendable {
+    /// Per-request response override for failure-path tests. The default keeps every
+    /// existing test on the historical always-206 behaviour.
+    enum Directive {
+        case serve206
+        case status(Int, retryAfter: Int? = nil)
+        case redirect(to: String)
+        case dropConnection
+    }
+
     let port: UInt16
     private let listenFD: Int32
     private let totalSize: Int64
     private let chunkBytes: Int
     private let throttleUs: useconds_t
     private let firstByteDelayUs: @Sendable (_ isSuffix: Bool) -> useconds_t
+    private let respond: @Sendable (_ requestIndex: Int, _ offset: Int64, _ path: String) -> Directive
     private let lock = NSLock()
     private var _bytesWritten: Int64 = 0
     private var _connFDs: [Int32] = []
     private var _stopped = false
     private var _requestedRanges: [(start: Int64, end: Int64?)] = []
+    private var _requestLog: [(path: String, start: Int64, end: Int64?)] = []
 
     var bytesWritten: Int64 {
         lock.lock(); defer { lock.unlock() }
@@ -40,6 +51,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
         return _requestedRanges.count
     }
 
+    /// Every request with its path, so a redirect test can tell source-URL hits from
+    /// pinned-URL hits.
+    var requestLog: [(path: String, start: Int64, end: Int64?)] {
+        lock.lock(); defer { lock.unlock() }
+        return _requestLog
+    }
+
     private var stopped: Bool {
         lock.lock(); defer { lock.unlock() }
         return _stopped
@@ -50,11 +68,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
     /// that difference is what let the speculative tail fetch pass every test while never once
     /// winning its race in the field. `isSuffix` is true for the `bytes=-n` form.
     init?(totalSize: Int64, chunkBytes: Int = 256 * 1024, throttleUs: useconds_t = 5000,
-          firstByteDelayUs: @escaping @Sendable (_ isSuffix: Bool) -> useconds_t = { _ in 0 }) {
+          firstByteDelayUs: @escaping @Sendable (_ isSuffix: Bool) -> useconds_t = { _ in 0 },
+          respond: @escaping @Sendable (_ requestIndex: Int, _ offset: Int64, _ path: String) -> Directive = { _, _, _ in .serve206 }) {
         self.totalSize = totalSize
         self.chunkBytes = chunkBytes
         self.throttleUs = throttleUs
         self.firstByteDelayUs = firstByteDelayUs
+        self.respond = respond
 
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -139,6 +159,11 @@ final class ThrottledOriginServer: @unchecked Sendable {
     /// Returns false when the connection should close (client gone, or a malformed request).
     private func serveOneRequest(_ fd: Int32) -> Bool {
         guard let request = readRequestHeader(fd) else { return false }
+        let path = request.components(separatedBy: "\r\n").first
+            .flatMap { line -> String? in
+                let parts = line.components(separatedBy: " ")
+                return parts.count >= 2 ? parts[1] : nil
+            } ?? "?"
         var offset: Int64 = 0
         var rangeEnd: Int64? = nil
         var isSuffix = false
@@ -162,7 +187,30 @@ final class ThrottledOriginServer: @unchecked Sendable {
         }
         lock.lock()
         _requestedRanges.append((offset, rangeEnd))
+        _requestLog.append((path, offset, rangeEnd))
+        let requestIndex = _requestLog.count - 1
         lock.unlock()
+
+        switch respond(requestIndex, offset, path) {
+        case .serve206:
+            break
+        case .status(let code, let retryAfter):
+            let header = "HTTP/1.1 \(code) Status\r\n"
+                + (retryAfter.map { "Retry-After: \($0)\r\n" } ?? "")
+                + "Content-Length: 0\r\n"
+                + "Connection: keep-alive\r\n\r\n"
+            return writeFully(fd, Array(header.utf8))
+        case .redirect(let location):
+            let header = "HTTP/1.1 302 Found\r\n"
+                + "Location: \(location)\r\n"
+                + "Content-Length: 0\r\n"
+                + "Connection: keep-alive\r\n\r\n"
+            return writeFully(fd, Array(header.utf8))
+        case .dropConnection:
+            shutdown(fd, SHUT_RDWR)
+            close(fd)
+            return false
+        }
 
         var pendingDelay = firstByteDelayUs(isSuffix)
         while pendingDelay > 0 && !stopped {

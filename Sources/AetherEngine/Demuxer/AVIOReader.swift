@@ -93,19 +93,27 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
     }
 
-    private func invalidateResolvedURL() {
+    private func invalidateResolvedURL(reason: String = "expiry status") {
         resolvedURLLock.lock()
         defer { resolvedURLLock.unlock() }
         if _resolvedURL != nil {
             _resolvedURL = nil
             #if DEBUG
-            EngineLog.emit("[AVIOReader] Dropped resolved URL cache (expiry status)", category: .demux)
+            EngineLog.emit("[AVIOReader] Dropped resolved URL cache (\(reason))", category: .demux)
             #endif
         }
     }
 
     private static func isResolvedExpiryStatus(_ status: Int) -> Bool {
         return status == 401 || status == 403 || status == 404 || status == 410
+    }
+
+    /// Hard server errors answered by a pinned post-redirect URL: the redirect target
+    /// may be dead or expired while the source URL would mint a fresh one. 503 is
+    /// excluded — it is rate limiting (#71), carries Retry-After, and the pin is not
+    /// the problem there.
+    static func isResolvedHardServerError(_ status: Int) -> Bool {
+        return status >= 500 && status != 503
     }
 
     // Cumulative bytes fetched since open; memory probe compares against RSS growth.
@@ -466,6 +474,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// TEST-ONLY slow-CDN throttle (kbit/s, 0 = unlimited), captured once from the static hook at init.
     private let throttleKbps: Int
+    /// TEST-ONLY reconnect-backoff scale (1.0 = real timing), captured once from the static hook at init.
+    private let backoffScale: Double
     private var throttleVClockNs: UInt64 = 0
     private let throttleLock = NSLock()
 
@@ -484,6 +494,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.chunkMaxRetries = max(1, chunkMaxRetries)
         self.boundedInitialFetch = boundedInitialFetch.map { max(1, $0) }
         self.throttleKbps = AetherEngine.sourceThrottleKbpsForTesting
+        self.backoffScale = AetherEngine.reconnectBackoffScaleForTesting
     }
 
     /// Slow-CDN simulation: hold delivered bytes to `throttleKbps` by sleeping the demux thread before the
@@ -1198,7 +1209,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // connections and 1506918 delivered bytes, 1.97x what was read. Serving what is in
             // hand first also lets the #220 frontier refill below run, which it could not while
             // this branch preempted it on every completed range.
-            if activeTask == nil, !connEndedByBackpressure, !windowCanServe {
+            //
+            // A connection that ended in ERROR without delivering a single byte of its
+            // generation is excluded too: this branch reconnects via seekReconnect, which
+            // clears the unproductive streak and applies no backoff, so an origin refusing
+            // every request (e.g. a connection-capped panel answering 500) turned into an
+            // unbounded reconnect spiral at ~15 connections/s. Falling through reaches the
+            // ended-connection ladder below: status accounting, Retry-After, backoff,
+            // `.reconnecting`, bounded give-up. Planned ends stay here — a completed range
+            // (connEndedAtRangeEnd) and a hard-cap end delivered their bytes, and any
+            // generation that delivered at least one byte keeps the fast path.
+            let endedInError = connEnded && !connEndedAtRangeEnd && !connEndedByBackpressure
+                && !connFirstDataSeen
+            if activeTask == nil, !connEndedByBackpressure, !windowCanServe, !endedInError {
                 let target = position
                 winCond.unlock()
                 timedReconnect(seek: true, at: target)
@@ -1427,6 +1450,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             EngineLog.emit("[AVIOReader] \(label) conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
             emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
+            // Two consecutive zero-progress failures through the pinned URL point at
+            // the pin itself (an expired redirect target answers every offset alike),
+            // not a transient: drop it so the retry re-resolves through the source URL
+            // for a fresh redirect. No-op when nothing is pinned.
+            if unproductiveReconnects >= 2 || rateLimitStreak >= 2 {
+                invalidateResolvedURL(reason: "unproductive reconnect streak")
+            }
             let backoffStart = DispatchTime.now()
             backoffBeforeReconnect(streak: backoffStreak, retryAfter: retryAfter)
             diag.recordBackoff(ms: msSince(backoffStart))
@@ -1491,13 +1521,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Sleeps in 0.1s slices so a close is honoured promptly.
     private func backoffBeforeReconnect(streak: Int, retryAfter: TimeInterval) {
         let expo = streak <= 0 ? 0.0 : min(Double(1 << min(streak, 4)) * 0.5, 8.0)
-        let total = min(max(expo, retryAfter), 15.0)
+        let total = min(max(expo, retryAfter), 15.0) * backoffScale
         if total <= 0 { return }
         var slept = 0.0
         while slept < total {
             if isClosed { return }
-            Thread.sleep(forTimeInterval: 0.1)
-            slept += 0.1
+            let slice = min(0.1, total - slept)
+            Thread.sleep(forTimeInterval: slice)
+            slept += slice
         }
     }
 
@@ -2062,8 +2093,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if let resolvedURL { recordResolvedURL(resolvedURL) }
             return true
         }
+        // The 200-ignored-Range rejection logged above; every other rejected
+        // status was previously silent, leaving the reconnect storm unexplained
+        // in the log.
+        if status != 200 {
+            EngineLog.emit(
+                "[AVIOReader] \(label) gen=\(generation) rejected response status=\(status) at offset \(requestedOffset)"
+                    + (retryAfter > 0 ? " retryAfter=\(Int(retryAfter))s" : ""),
+                category: .demux
+            )
+        }
         if Self.isResolvedExpiryStatus(status) {
             invalidateResolvedURL()
+        } else if Self.isResolvedHardServerError(status) {
+            invalidateResolvedURL(reason: "hard \(status) from pinned URL")
         }
         return false
     }

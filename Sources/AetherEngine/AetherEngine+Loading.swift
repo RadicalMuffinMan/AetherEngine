@@ -578,8 +578,9 @@ extension AetherEngine {
                 self.liveSourceReset.send()
             }
         }
-        // #126: zero-progress VOD pump death (readError before any packet/segment). Without this
-        // the host sees isPlayable=true, tracks=0, waitingToPlay until its own first-frame timeout.
+        // #126: zero-progress VOD pump death (readError before any packet/segment), and #169:
+        // mid-session readError after the revive cap. Without this the host sees
+        // isPlayable=true / a stalled item and waits until its own timeout.
         session.onVODSourceFailed = { [weak self, weak session] code in
             Task { @MainActor in
                 guard let self, let session, self.nativeVideoSession === session else {
@@ -589,7 +590,7 @@ extension AetherEngine {
                     )
                     return
                 }
-                self.state = .error("Source read failed before any media was produced (code \(code))")
+                self.state = .error("Source read failed (code \(code))")
             }
         }
         // prepareNativeSubtitles + non-bitmap text tracks: builds the native subtitle table; must be set before start().
