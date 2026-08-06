@@ -271,11 +271,13 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
 
+        let playerURL = remoteHLSPlayerURL(for: url, options: options)
+
         // Jellyfin HLS URLs carry auth (ApiKey / PlaySessionId / LiveStreamId) as query params, but
         // generic live HLS origins (IPTV / Stremio add-on channels) enforce per-stream Referer /
         // User-Agent / Authorization headers, so LoadOptions.httpHeaders rides into the AVURLAsset (#119).
         // forwardBufferDuration: 0 = system-adaptive; the 4 s VOD floor caused a 3-4 s black screen on live startup.
-        host.load(url: url,
+        host.load(url: playerURL,
                   startPosition: startPosition,
                   perFrameHDR: true,
                   // AE#154: a VOD resume anchor seeks; nil keeps the live no-initial-seek contract.
@@ -304,6 +306,50 @@ extension AetherEngine {
         }
         startMemoryProbe()
         // No startLiveTelemetrySampler: all sampler counters read the loopback pipeline (demuxer / producer / cache / server), none of which exists on this bypass.
+    }
+
+    /// The address AVPlayer is given for a remote HLS source.
+    ///
+    /// Normally that is the origin itself. When the host has opted into
+    /// certificates that fail system trust it cannot be, because AVPlayer
+    /// evaluates trust inside its own networking and nothing the host or the
+    /// engine sets is consulted there. A loopback stand-in moves the https
+    /// request onto a URLSession this engine owns, and http origins are left
+    /// alone since they have nothing to evaluate.
+    ///
+    /// Failing to start the proxy returns the origin, which plays for everyone
+    /// whose certificate the system already trusts rather than failing the
+    /// whole load.
+    func remoteHLSPlayerURL(for origin: URL, options: LoadOptions) -> URL {
+        guard EngineTLS.allowUntrustedCertificates,
+            origin.scheme?.lowercased() == "https"
+        else { return origin }
+
+        let proxy: HLSReverseProxyServer
+        if let existing = tlsProxy {
+            proxy = existing
+        } else {
+            proxy = HLSReverseProxyServer()
+            do {
+                try proxy.start()
+            } catch {
+                EngineLog.emit(
+                    "[AetherEngine] TLS proxy did not start (\(error)); AVPlayer goes to the "
+                        + "origin, which needs a certificate the system trusts",
+                    category: .engine)
+                return origin
+            }
+            tlsProxy = proxy
+        }
+
+        guard let local = proxy.proxyURL(for: origin, httpHeaders: options.httpHeaders) else {
+            return origin
+        }
+        EngineLog.emit(
+            "[AetherEngine] routing \(origin.host ?? "the origin") through the TLS proxy so the "
+                + "handshake runs where the trust opt-in applies",
+            category: .engine)
+        return local
     }
 
     /// #168: program `preferredDisplayCriteria` for an HDR range detected on the probe-free nativeRemoteHLS
