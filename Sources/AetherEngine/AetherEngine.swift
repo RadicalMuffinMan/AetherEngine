@@ -1074,6 +1074,12 @@ public final class AetherEngine: ObservableObject {
 
     /// Loopback HLS-fMP4 engine. Non-nil between load and stop.
     var nativeVideoSession: HLSVideoEngine?
+
+    /// Stands in for the origin on the native remote HLS route when the host
+    /// has opted into certificates that fail system trust. Non-nil only for
+    /// those sessions, so every other stream reaches AVPlayer the way it
+    /// always has.
+    var tlsProxy: HLSReverseProxyServer?
     /// Thread-safe starvation inputs for session-coupled FrameExtractor yield closures
     /// (#93 startup); written on load/stop and by the 1 Hz telemetry tick.
     let extractorYieldState = ExtractorYieldState()
@@ -4901,6 +4907,8 @@ public final class AetherEngine: ObservableObject {
         nativeVideoSession?.setNativeVideoFrameTimeObserver(nil)
         nativeVideoSession?.stop()
         nativeVideoSession = nil
+        tlsProxy?.stop()
+        tlsProxy = nil
         nativeSubtitleRenditionsServed = false
         airPlayProgressWatchdog?.cancel()
         airPlayProgressWatchdog = nil
