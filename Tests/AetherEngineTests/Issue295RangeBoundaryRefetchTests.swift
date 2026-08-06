@@ -51,17 +51,21 @@ struct Issue295RangeBoundaryRefetchTests {
         }
         try? await Task.sleep(nanoseconds: 200_000_000)
 
-        let ranges = dataRanges(server, fileSize: total)
-        var overlaps: [String] = []
-        var covered: [(Int64, Int64)] = []
-        for r in ranges {
-            let end = r.end ?? total - 1
-            for c in covered where r.start <= c.1 && end >= c.0 {
-                overlaps.append("[\(r.start)-\(end)] overlaps [\(c.0)-\(c.1)]")
-            }
-            covered.append((r.start, end))
+        // #310 changed what "no re-fetch" looks like on the wire. A connection can now be
+        // ENDED at winHighWater with the tail of its range undelivered, and the refill then
+        // legitimately re-requests that undelivered tail — so REQUESTED spans may overlap a
+        // cancelled predecessor's. What pins the #295 defect is direction: the refill and
+        // every request after it start at the delivered frontier, which only moves forward,
+        // while the defect's detour re-fetches fired at the READ position, below the refill
+        // it had just issued. Strictly increasing request starts therefore hold exactly
+        // when no delivered byte is asked for again.
+        let starts = dataRanges(server, fileSize: total).map(\.start)
+        #expect(starts.count >= 2, "the read never crossed a range boundary: \(starts)")
+        var regressions: [String] = []
+        for (a, b) in zip(starts, starts.dropFirst()) where b <= a {
+            regressions.append("\(b) after \(a)")
         }
-        #expect(overlaps.isEmpty,
-                "delivered bytes were fetched again: \(overlaps.joined(separator: ", ")); all ranges: \(ranges)")
+        #expect(regressions.isEmpty,
+                "a request started at or below its predecessor, i.e. re-requested delivered bytes: \(regressions.joined(separator: ", ")); all starts: \(starts)")
     }
 }
