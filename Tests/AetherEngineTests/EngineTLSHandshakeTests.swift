@@ -11,6 +11,10 @@
 
     @testable import AetherEngine
 
+    /// Everything that flips `EngineTLS.allowUntrustedCertificates` lives in
+    /// this one suite. The flag is process global and suites otherwise run in
+    /// parallel, so a second suite setting it would decide what this one is
+    /// testing.
     @Suite("EngineTLS live handshake against a self-signed origin", .serialized)
     struct EngineTLSHandshakeTests {
 
@@ -62,6 +66,72 @@
             #expect(got == sliceCap, "delivered \(got) of \(sliceCap) bytes")
             #expect(buf[0] == 0xA7)
             #expect(server.requestsServed > 0)
+        }
+
+        @Test("Through the proxy: a client that never sees the certificate gets the stream")
+        func proxyServesThroughUntrustedOrigin() async throws {
+            let origin = try #require(SelfSignedHLSOrigin())
+            defer { origin.stop() }
+
+            let previous = EngineTLS.allowUntrustedCertificates
+            defer { EngineTLS.allowUntrustedCertificates = previous }
+            EngineTLS.allowUntrustedCertificates = true
+
+            let proxy = HLSReverseProxyServer()
+            try proxy.start()
+            defer { proxy.stop() }
+
+            let master = URL(string: "https://127.0.0.1:\(origin.port)/master.m3u8")!
+            let entry = try #require(proxy.proxyURL(for: master))
+
+            let playlist = try await Self.text(of: entry)
+            #expect(playlist.contains("#EXT-X-STREAM-INF"))
+            let variant = try #require(
+                playlist.components(separatedBy: "\n").first { $0.hasPrefix("http://127.0.0.1:") })
+
+            let media = try await Self.text(of: try #require(URL(string: variant)))
+            #expect(media.contains("#EXTINF"))
+            let segmentLine = try #require(
+                media.components(separatedBy: "\n").first {
+                    $0.hasPrefix("http://127.0.0.1:") && !$0.contains("m3u8")
+                })
+
+            let (bytes, response) = try await URLSession.shared.data(
+                from: try #require(URL(string: segmentLine)))
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            #expect(bytes.count == 4096, "served \(bytes.count) segment bytes")
+            #expect(bytes.first == 0x47, "not an MPEG-TS sync byte")
+        }
+
+        @Test("Through the proxy: flag off refuses to launder an untrusted origin")
+        func proxyRefusesWhenNotOptedIn() async throws {
+            let origin = try #require(SelfSignedHLSOrigin())
+            defer { origin.stop() }
+
+            let previous = EngineTLS.allowUntrustedCertificates
+            defer { EngineTLS.allowUntrustedCertificates = previous }
+            EngineTLS.allowUntrustedCertificates = false
+
+            let proxy = HLSReverseProxyServer()
+            try proxy.start()
+            defer { proxy.stop() }
+
+            let master = URL(string: "https://127.0.0.1:\(origin.port)/master.m3u8")!
+            let entry = try #require(proxy.proxyURL(for: master))
+
+            var request = URLRequest(url: entry)
+            request.timeoutInterval = 15
+            let (_, response) = try await URLSession.shared.data(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 502,
+                    "the upstream handshake should have failed system trust")
+        }
+
+        private static func text(of url: URL) async throws -> String {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 15
+            let (data, response) = try await URLSession.shared.data(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+            return String(decoding: data, as: UTF8.self)
         }
     }
 
@@ -180,7 +250,7 @@
             server.serve_forever()
             """
 
-        private static let certPEM = """
+        static let certPEM = """
             -----BEGIN CERTIFICATE-----
             MIIDGjCCAgKgAwIBAgIUPCvl3+omqHtbGt28tTO8nBwZNtwwDQYJKoZIhvcNAQEL
             BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDgwMjA1MjIyOFoXDTM2MDcz
@@ -202,7 +272,7 @@
             -----END CERTIFICATE-----
             """
 
-        private static let keyPEM = """
+        static let keyPEM = """
             -----BEGIN PRIVATE KEY-----
             MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDV2eWoSsfBmI58
             qc41LLGn5YZ85EzxHMKnl0WCbzEmkaJHoj8vLZN7O3axw0/2UGrwAQRO2hyb11g5
