@@ -568,7 +568,7 @@ final class HLSLocalServer: @unchecked Sendable {
                 return nil
             }
             buffer.append(chunk, count: n)
-            if let end = findHeadersTerminator(buffer) {
+            if let end = Self.findHeadersTerminator(buffer) {
                 return buffer.prefix(end + 4)
             }
             if buffer.count > 8192 {
@@ -579,7 +579,7 @@ final class HLSLocalServer: @unchecked Sendable {
         }
     }
 
-    private func findHeadersTerminator(_ buf: Data) -> Int? {
+    static func findHeadersTerminator(_ buf: Data) -> Int? {
         guard buf.count >= 4 else { return nil }
         let needle: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
         return buf.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int? in
