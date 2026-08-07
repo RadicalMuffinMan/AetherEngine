@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.11.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.11.0))
+
 ### Fixed
 
 - **An origin refusing every range refill no longer spins the reader in an unbounded
