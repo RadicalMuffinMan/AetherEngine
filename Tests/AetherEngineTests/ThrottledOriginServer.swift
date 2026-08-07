@@ -207,6 +207,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
                 + "Connection: keep-alive\r\n\r\n"
             return writeFully(fd, Array(header.utf8))
         case .dropConnection:
+            // `serve` leaves closing to `stop()`, which closes every fd still in `_connFDs`.
+            // Closing here without deregistering first frees a descriptor number the process
+            // can hand straight to the next socket, and `stop()` would then shut down whatever
+            // took it over. Deregister under the lock, then close exactly once.
+            lock.lock()
+            _connFDs.removeAll { $0 == fd }
+            lock.unlock()
             shutdown(fd, SHUT_RDWR)
             close(fd)
             return false

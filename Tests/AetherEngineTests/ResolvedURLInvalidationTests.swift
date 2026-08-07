@@ -7,7 +7,9 @@ import Foundation
 /// redirect targets expire per connection answers every later range with a hard 5xx from
 /// the pinned URL, and the reader hammered that dead URL forever instead of re-resolving
 /// through the source URL for a fresh redirect.
-@Suite("Resolved-URL invalidation on hard server errors")
+///
+/// `.serialized`: the rate-limit case mutates the process-wide backoff-scale test hook.
+@Suite("Resolved-URL invalidation on hard server errors", .serialized)
 struct ResolvedURLInvalidationTests {
 
     private final class AttemptCounter: @unchecked Sendable {
@@ -72,6 +74,58 @@ struct ResolvedURLInvalidationTests {
         let cdnAttemptsAtBoundary = cdn.requestLog.filter { $0.start == firstRange }.count
         #expect(cdnAttemptsAtBoundary >= 2,
                 "the CDN should see the failed attempt plus the redirected retry")
+    }
+
+    /// The counterpart: a metered origin (429/503) must KEEP the pin. Dropping it sends the
+    /// retry back through the source URL for a fresh redirect, which is a second request
+    /// against the origin that is already refusing them, and on a connection-capped panel
+    /// (#307) that is the request there is no room for.
+    @Test("a rate-limited refill keeps the pin instead of re-resolving through the source",
+          .timeLimit(.minutes(2)))
+    func rateLimitedRefillKeepsThePin() async throws {
+        AetherEngine.reconnectBackoffScaleForTesting = 0.02
+        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
+
+        let firstRange: Int64 = 256 * 1024
+        let attempts = AttemptCounter()
+        // CDN: meters the first two attempts at the boundary refill, then serves.
+        let cdnMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, offset, _ in
+                offset == firstRange && attempts.next(for: offset) <= 2
+                    ? .status(503) : .serve206
+            }
+        )
+        let cdn = try #require(cdnMaybe)
+        defer { cdn.stop() }
+        let cdnPort = cdn.port
+        let sourceMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, _, _ in .redirect(to: "http://127.0.0.1:\(cdnPort)/cdn/movie.bin") }
+        )
+        let source = try #require(sourceMaybe)
+        defer { source.stop() }
+
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
+                                boundedInitialFetch: firstRange)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        let sliceCap = 128 * 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        let target = Int(firstRange) + 256 * 1024
+        var got = 0
+        while got < target {
+            let n = reader.read(into: buf, size: Int32(min(sliceCap, target - got)))
+            if n <= 0 { break }
+            got += Int(n)
+        }
+        #expect(got == target, "read stopped at \(got) of \(target); the 503s were terminal")
+
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        #expect(sourceHitsAtBoundary.isEmpty,
+                "a metered refill re-resolved through the source: \(source.requestLog)")
     }
 
     @Test("hard-server-error classification excludes rate limiting")

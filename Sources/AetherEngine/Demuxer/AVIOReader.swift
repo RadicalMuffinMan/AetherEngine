@@ -1454,7 +1454,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // the pin itself (an expired redirect target answers every offset alike),
             // not a transient: drop it so the retry re-resolves through the source URL
             // for a fresh redirect. No-op when nothing is pinned.
-            if unproductiveReconnects >= 2 || rateLimitStreak >= 2 {
+            //
+            // A rate-limit streak is deliberately NOT a reason to drop it: 429/503 says the
+            // origin is metering us, not that the target is dead (#71), and re-resolving
+            // spends a second request on the very origin that is refusing them. On the
+            // connection-capped panel behind #307 that is the request that cannot be spared.
+            if !isRateLimited, unproductiveReconnects >= 2 {
                 invalidateResolvedURL(reason: "unproductive reconnect streak")
             }
             let backoffStart = DispatchTime.now()
