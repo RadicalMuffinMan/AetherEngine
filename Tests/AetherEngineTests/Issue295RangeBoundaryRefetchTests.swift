@@ -67,5 +67,18 @@ struct Issue295RangeBoundaryRefetchTests {
         }
         #expect(regressions.isEmpty,
                 "a request started at or below its predecessor, i.e. re-requested delivered bytes: \(regressions.joined(separator: ", ")); all starts: \(starts)")
+
+        // Direction alone cannot price a re-fetch, and the defect was priced: 1506918 bytes
+        // delivered for a 764450 byte object, 1.97x what was read. Count it on the READER
+        // side, not the origin's: bytes the origin wrote into a socket we then cancelled were
+        // never delivered, so `bytesWritten` would make a healthy high-water end look like a
+        // re-fetch. What the reader accepted, minus what the consumer read, is exactly the
+        // resident window plus whatever is in flight. Measured margin on this fixture is the 64 KB
+        // tail probe; the 2 MB slack is set so one 4 MB detour block, the defect's unit of
+        // re-fetch, still fails it.
+        let overRead = reader.cumulativeBytesFetched - read
+        let resident = Int64(reader.windowDiagnostics.aheadBytes)
+        #expect(overRead <= resident + 2 * 1024 * 1024,
+                "the reader accepted \(overRead / (1024 * 1024)) MB beyond the \(read / (1024 * 1024)) MB consumed, with only \(resident / (1024 * 1024)) MB resident: bytes were fetched twice")
     }
 }
