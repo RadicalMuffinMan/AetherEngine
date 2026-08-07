@@ -55,6 +55,15 @@ enum RemoteHLSMediaSelection {
         }
     }
 
+    /// #316: fold a freshly surfaced legible group into the published list. The renditions are
+    /// authoritative for their own id range and are replaced wholesale on every surfacing, but the
+    /// host's load-declared external tracks (registered before the item existed) have to survive it.
+    /// Assigning the legible list straight to `subtitleTracks` delisted them a beat after they were
+    /// registered, which is why a bypass sidecar looked like it had never been declared.
+    static func mergedSubtitleTracks(existing: [TrackInfo], legible: [LegibleOption]) -> [TrackInfo] {
+        existing.filter(\.isExternal) + subtitleTrackInfos(from: legible)
+    }
+
     /// Group-order ordinal backing a synthetic track id; nil for ids outside the remote-HLS range.
     static func ordinal(forTrackID id: Int) -> Int? {
         id >= subtitleTrackIDBase ? id - subtitleTrackIDBase : nil

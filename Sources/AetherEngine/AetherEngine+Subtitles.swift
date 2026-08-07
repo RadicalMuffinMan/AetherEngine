@@ -941,6 +941,25 @@ extension AetherEngine {
         return info
     }
 
+    /// #88: seat the load-declared external tracks in `subtitleTracks`. On the probe path this runs
+    /// BEFORE preferred-language selection and the native rendition table are built from the list.
+    ///
+    /// #170: a session-preserving reload seeds the previous session's registry verbatim instead:
+    /// mid-session adds survive with their ids (and, registered pre-table, become rendition-eligible on
+    /// the reloaded item); mid-session removals stay removed; the host's subtitle authority carries over
+    /// so the load-end auto-selection cannot override it.
+    ///
+    /// #316: the nativeRemoteHLS bypass and the AE#154 reroute return long before the probe path reaches
+    /// this point, so both call it themselves. Without that a host declaring sidecars on a remote-HLS
+    /// source got nothing back and no diagnostic: the option was read, then dropped at the branch.
+    func registerDeclaredExternalSubtitles(_ options: LoadOptions) {
+        if let carryover = options.subtitleSessionCarryover {
+            applySubtitleSessionCarryoverRegistrations(carryover)
+        } else {
+            for track in options.externalSubtitles { registerExternalSubtitleTrack(track) }
+        }
+    }
+
     /// Registration without the preference re-run; the load path runs its own selection at load end.
     @discardableResult
     func registerExternalSubtitleTrack(_ track: ExternalSubtitleTrack) -> TrackInfo {
@@ -1991,7 +2010,9 @@ extension AetherEngine {
                     isSDH: option.hasMediaCharacteristic(.transcribesSpokenDialogForAccessibility)
                         && option.hasMediaCharacteristic(.describesMusicAndSoundForAccessibility))
             }
-            self.subtitleTracks = RemoteHLSMediaSelection.subtitleTrackInfos(from: snapshots)
+            // #316: merge, don't assign; the host's load-declared external tracks must survive.
+            self.subtitleTracks = RemoteHLSMediaSelection.mergedSubtitleTracks(
+                existing: self.subtitleTracks, legible: snapshots)
             EngineLog.emit(
                 "[AetherEngine] AE#154: remote-HLS legible group surfaced \(group.options.count) subtitle rendition(s)",
                 category: .engine)

@@ -2478,6 +2478,9 @@ public final class AetherEngine: ObservableObject {
         // nativeRemoteHLS: skip probe + loopback; play HLS URL directly with AVPlayer (Jellyfin already serves HLS).
         // Routed before the probe because we never demux the m3u8.
         if options.nativeRemoteHLS {
+            // #316: this bypass returns before the probe path's registration, so a host that declared
+            // sidecars at load time used to get nothing at all, silently. Seat them here instead.
+            registerDeclaredExternalSubtitles(options)
             do {
                 // AE#246: a VOD playlist honors the resume anchor here the same way the AE#154 reroute
                 // does; without it a rerouted (or directly requested) VOD bypass always restarted at 0.
@@ -2611,6 +2614,8 @@ public final class AetherEngine: ObservableObject {
             }
             EngineLog.emit("[AetherEngine] AE#154: HLS playlist on the VOD loopback path; rerouting to the native remote-HLS bypass", category: .engine)
             loadedOptions.nativeRemoteHLS = true
+            // #316: the reroute returns before the registration below, same as the direct bypass.
+            registerDeclaredExternalSubtitles(loadedOptions)
             do {
                 try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition)
             } catch is CancellationError {
@@ -2647,11 +2652,7 @@ public final class AetherEngine: ObservableObject {
         // instead: mid-session adds survive with their ids (and, registered pre-table, become
         // rendition-eligible on the reloaded item); mid-session removals stay removed; the host's
         // subtitle authority carries over so the load-end auto-selection cannot override it.
-        if let carryover = options.subtitleSessionCarryover {
-            applySubtitleSessionCarryoverRegistrations(carryover)
-        } else {
-            for track in options.externalSubtitles { registerExternalSubtitleTrack(track) }
-        }
+        registerDeclaredExternalSubtitles(options)
         metadata = probeOpened ? probe.mediaMetadata() : nil
         fontAttachments = probeOpened ? probe.fontAttachmentInfos() : []
         // Disc titles/chapters off the probe demuxer (post-detach, on MainActor) so the host can populate
