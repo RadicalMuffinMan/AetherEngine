@@ -10,7 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The subtitle-resolution statement says when determination reaches the playhead, instead of
+  leaving it to be noticed 30 s later.** The #250 line marked changes of the frontier's SOURCE, and
+  a frontier climbing past the rendered position is not one of those: after a far seek the
+  reconstruction line is `via=pump` by construction, the pump-to-prefetch line can still land short
+  of the target, and the next admissible line was then the 30 s cadence tick. A harness reading only
+  fenced coverage therefore saw a post-seek gap of ~29 s where the rendered state had in fact been
+  correct after ~1.4 s. The drain tick now emits `reason=coverage` on the first tick where a
+  prefetch- or EOF-bounded span reaches the playhead, once per decoded run. No claim changed: it
+  prints the statement the tick already builds, so `via=pump` still cannot state coverage, and on a
+  link that cannot feed both readers the line correctly stays absent (#318).
 
 ## [6.7.0] - 2026-08-04
 
