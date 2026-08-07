@@ -12,6 +12,19 @@ the public-API contract.
 
 ### Fixed
 
+- **The software path no longer reports 0.0 Mbps of throughput on a healthy session.**
+  `networkThroughputMbps` was a wall-clock mean over a 10 s window, but the reader fetches a large
+  range and then parks on backpressure until low water, so on a fast link most ticks of that window
+  carry no bytes at all: measured over a local origin, a healthy 2.8 Mbps VP9 session pulled 16.4 MB
+  in one tick and then exactly nothing for the next 23, while its runway drained from 16.0 to 8.3 MB.
+  The field read a confident 0.00 Mbps through all of it, which is the same false-with-confidence
+  zero #306 was filed about, one field over. It is measured over the seconds bytes actually arrived
+  in now, which is the quantity the native path already reports from `observedBitrate`, and it is nil
+  rather than zero when nothing arrived in the window at all. A host that wants a held reading can
+  keep the last non-nil value; a host given a zero could not tell a parked reader from a dead link.
+  A throttled origin is unaffected: every tick carries bytes there, and a starving 2 Mbps session
+  reads a steady 2.10 Mbps before and after (#306 follow-up, found while verifying
+  [@kskchaitanya1993](https://github.com/kskchaitanya1993)'s retest).
 - **Frame-time epochs keep rising across a `load()`, so a host can tell one item's frames from the
   next's.** `NativeVideoFrameTime.epoch` and `SoftwareVideoFrameTime.generation` both document the
   rule that a higher value retires everything recorded under a lower one, but both were counted per
