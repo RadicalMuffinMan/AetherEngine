@@ -43,6 +43,25 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// Drop frames before this PTS after a seek (prevents keyframe-to-target fast-forward). Cleared after the first passing frame.
     private var skipUntilPTS: CMTime?
 
+    /// #311: fires for every frame handed to the queue target, on the decode thread. Guarded by
+    /// `reorderLock` for the swap only; the call itself happens with no lock held, so a host that
+    /// re-enters the renderer from it cannot deadlock.
+    private var _frameEnqueuedObserver: SoftwareVideoFrameTimeObserver?
+    func setFrameEnqueuedObserver(_ observer: SoftwareVideoFrameTimeObserver?) {
+        reorderLock.lock()
+        _frameEnqueuedObserver = observer
+        reorderLock.unlock()
+    }
+
+    /// #311: incremented by every flush, so a consumer can drop the frame times it recorded for
+    /// frames the compositor has since discarded. Guarded by `reorderLock`.
+    private var _flushGeneration: UInt64 = 0
+    var flushGeneration: UInt64 {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _flushGeneration
+    }
+
     /// Cached CMVideoFormatDescription keyed by dimensions + pixel format + colorimetry + pixel aspect ratio. CMVideoFormatDescriptionCreateForImageBuffer snapshots color AND aspect attachments at creation, so a mid-stream change at same dimensions must invalidate the cache; a PAR-less first frame froze a PAR-less description for the whole stream and collapsed anamorphic content to coded dimensions (#177). Guarded by reorderLock; nil'd by flush().
     private var cachedFormatDesc: CMVideoFormatDescription?
     private var cachedFormatKey: FormatDescriptionKey?
@@ -245,6 +264,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // backward seek would keep reporting the pre-seek timestamp and read as a cushion of
         // however far the seek travelled.
         _newestEnqueuedPtsSeconds = nil
+        // #311: everything reported before this point describes frames that are now gone.
+        _flushGeneration &+= 1
         // Invalidate the format description cache; the next load() may open a stream with different colorimetry at the same resolution.
         cachedFormatDesc = nil
         cachedFormatKey = nil
@@ -310,6 +331,15 @@ final class SampleBufferRenderer: @unchecked Sendable {
             EngineLog.emit("[Renderer] isReadyForMoreMediaData=false at enqueue #\(enqueueCount + 1) status=\(statusName)", category: .swPlayback)
         }
         target.enqueue(sampleBuffer)
+
+        // #311: reported here rather than at admission, so it describes frames the compositor has
+        // been given. A frame refused for an unschedulable timestamp, skipped after a seek, or lost
+        // to a failed sample-buffer creation never reaches this line and is never reported.
+        reorderLock.lock()
+        let observer = _frameEnqueuedObserver
+        let generation = _flushGeneration
+        reorderLock.unlock()
+        observer?(SoftwareVideoFrameTime(presentation: pts, generation: generation))
 
         enqueueCount += 1
         // Sparse milestones so a stall is distinguishable from "logging stopped at #30"; bounded to 4 lines/hour at 60 fps.

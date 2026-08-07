@@ -1128,6 +1128,9 @@ extension AetherEngine {
             self?.publishLiveWindow(edgeSessionTime: edge)
         }
         self.softwareHost = host
+        // #311: a load builds a new host and a new renderer, so an observer installed once by the
+        // host app has to be carried across the seam, exactly as the native session does at load.
+        host.setVideoFrameTimeObserver(softwareVideoFrameTimeObserver)
         // SW-PiP: publish the bridge once the session owns its layer (the layer object is stable for
         // the session; the host attaches it to the view and, on PiP start, to the system window).
         softwarePiPSource = SoftwarePiPSource(layer: host.displayLayer, isLive: isLive, engine: self)

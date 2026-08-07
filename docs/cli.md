@@ -86,6 +86,8 @@ swift run aetherctl play --live --native-hls <master.m3u8>      # nativeRemoteHL
 
 `--native-hls` sets `LoadOptions.nativeRemoteHLS`, the path a host uses for a live channel AVPlayer can play itself. It is the only way to exercise the #168 carriage watchdog and the #293 carriage probe from the CLI (`hlslive` loads the ingest reader directly and never mounts natively). Pair it with `--live`; without that the m3u8 goes to the raw live path, which rejects it by design.
 
+`--frame-times` installs the #311 software frame-time observer BEFORE `load()` (the documented usage: the engine re-arms each new host with it) and reads `softwarePresentationTimebase`. Per tick it appends `ft` (frames reported since the last tick), `ftLast` (newest reported presentation time), `ftGen` (renderer flush generation, which a seek moves) and `ooo`, the count of reports that arrived out of presentation order. `ooo` is the API's own claim under test: these are reported past the reorder buffer, so it must stay 0. `tb` is the timebase read at the same instant, and its closeness to `ftLast` is the point, both are on the source axis with nothing to convert between them.
+
 `--audio-stats` installs the engine audio tap and watches the decoded PCM itself: an `AGAP` line for every source-PTS discontinuity > 2 ms between consecutive buffers, and per-second `alead` (last decoded audio PTS minus the synchronizer clock) plus `abufs` (buffers delivered) appended to the telemetry. `alead` is the audio renderer's safety margin: on the SW live path the look-ahead pump holds it near `AudioLookaheadPolicy.targetLeadSeconds`; a collapse toward zero means the source or the feeder cannot keep real time (this is how the #107 audio-chopping report was diagnosed).
 
 ## segverify

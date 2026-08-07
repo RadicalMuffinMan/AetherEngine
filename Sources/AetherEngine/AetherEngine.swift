@@ -1154,6 +1154,10 @@ public final class AetherEngine: ObservableObject {
     /// re-installed on each new native session; see `setNativeVideoFrameTimeObserver`.
     var nativeVideoFrameTimeObserver: NativeVideoFrameTimeObserver?
 
+    /// The software path's equivalent (#311), held for the same reason: a `load()` builds a fresh
+    /// host, and the observer has to survive it. See `setSoftwareVideoFrameTimeObserver`.
+    var softwareVideoFrameTimeObserver: SoftwareVideoFrameTimeObserver?
+
     func setPresentationAxis(_ map: PresentationAxisMap) {
         presentationAxis = map
         presentationAxisMirror.set(map)

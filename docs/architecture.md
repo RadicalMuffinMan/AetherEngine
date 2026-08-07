@@ -146,7 +146,8 @@ Sources/AetherEngine/
 ├── PresentationAxis.swift                   Display-axis fold for disc titles (source PTS <-> 0-based published axis, AE#105)
 ├── PresentationAxisMap.swift                Source axis <-> item axis (#260): the seam history of producer shifts as a piecewise-constant map, plus its off-main mirror. Written by the shift-changed / rebased handlers, read by the clock fold, the live thumbnail path and hosts
 ├── NativeVideoFrameTime.swift               Per-muxed-frame presentation times on both axes (#260): the value type + observer typealias; emitted from HLSSegmentProducer.finalizeAndWriteVideo
-├── AetherEngine+FrameTimes.swift            Public installer for the per-frame time observer, re-armed on each native session
+├── SoftwareVideoFrameTime.swift             Per-enqueued-frame presentation time on the software path (#311): one axis (source == presentation there), plus a flush generation that a seek moves; emitted from SampleBufferRenderer.flushFrame
+├── AetherEngine+FrameTimes.swift            Public installers for both per-frame time observers (native re-armed on each session, software on each host) plus `softwarePresentationTimebase`, the render synchronizer's clock
 ├── PlayerState.swift                        PlaybackState, PlaybackPhase, VideoFormat, PlaybackBackend, LoadOptions, SourceProbe, TrackInfo, FontAttachment, MediaMetadata, SubtitleCue, SubtitleImage
 ├── LiveReloadPolicy.swift                   Pure decision functions for live reloads: rejoin at the live edge (no stale resume position), skip the pre-readiness zero seek
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)
