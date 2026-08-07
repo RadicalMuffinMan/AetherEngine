@@ -12,6 +12,11 @@ extension AetherEngine {
     /// The observer is called on the producer's pump thread and must not block. It survives producer
     /// restarts and outlives a `load()`, so install it once; pass nil to remove it. Use
     /// `presentationAxisMap` to convert positions that are not frames (a cue time, a clock reading).
+    ///
+    /// A load is not a seam a consumer has to reason about: `NativeVideoFrameTime.epoch` keeps rising
+    /// across it (#314), so the same retire-the-older-epoch rule separates the outgoing item's frames
+    /// from the incoming one's. The superseded session is also detached at teardown, so in the ordinary
+    /// case it falls silent rather than racing the new one.
     public func setNativeVideoFrameTimeObserver(_ observer: NativeVideoFrameTimeObserver?) {
         nativeVideoFrameTimeObserver = observer
         nativeVideoSession?.setNativeVideoFrameTimeObserver(observer)
@@ -25,8 +30,9 @@ extension AetherEngine {
     /// to key a table by. See `SoftwareVideoFrameTime`.
     ///
     /// The observer is called on the decode thread and must not block. It outlives a `load()`, so
-    /// install it once; pass nil to remove it. Silent on every other path, including the remote-HLS
-    /// bypass, where AVPlayer owns decode and the engine never sees a frame.
+    /// install it once; pass nil to remove it. `SoftwareVideoFrameTime.generation` keeps rising across
+    /// that load (#314), so the item seam needs no separate handling. Silent on every other path,
+    /// including the remote-HLS bypass, where AVPlayer owns decode and the engine never sees a frame.
     public func setSoftwareVideoFrameTimeObserver(_ observer: SoftwareVideoFrameTimeObserver?) {
         softwareVideoFrameTimeObserver = observer
         softwareHost?.setVideoFrameTimeObserver(observer)

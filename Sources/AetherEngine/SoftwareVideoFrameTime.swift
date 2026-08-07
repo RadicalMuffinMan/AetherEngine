@@ -22,11 +22,16 @@ public struct SoftwareVideoFrameTime: Sendable, Equatable {
     /// `AetherEngine.softwarePresentationTimebase` reads, so no conversion stands between them.
     public let presentation: CMTime
 
-    /// Renderer flush generation. Increments whenever the renderer discards what it holds, which is
-    /// what a seek does, so entries recorded under an older generation describe frames the compositor
-    /// will never show. Drop a table's older generations when this changes. Same role as
+    /// Renderer flush generation. Moves on whenever the renderer discards what it holds, which is what
+    /// a seek does, so entries recorded under an older generation describe frames the compositor will
+    /// never show. Drop a table's older generations when this changes. Same role as
     /// `NativeVideoFrameTime.epoch`, different cause: there a producer restart re-muxes, here a flush
     /// empties the queue.
+    ///
+    /// Strictly increasing process-wide, across `load()` calls as well as within one session (#314). A
+    /// load builds a new renderer, and the sequence continues there rather than restarting, so a frame
+    /// the outgoing renderer still hands over always ranks below the new one's first. Successive
+    /// generations are not consecutive and the values carry no meaning beyond their order.
     public let generation: UInt64
 
     public init(presentation: CMTime, generation: UInt64) {

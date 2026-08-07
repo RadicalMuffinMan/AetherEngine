@@ -12,6 +12,17 @@ the public-API contract.
 
 ### Fixed
 
+- **Frame-time epochs keep rising across a `load()`, so a host can tell one item's frames from the
+  next's.** `NativeVideoFrameTime.epoch` and `SoftwareVideoFrameTime.generation` both document the
+  rule that a higher value retires everything recorded under a lower one, but both were counted per
+  session: a load builds a new `HLSVideoEngine` (and a new software renderer), the counter restarted
+  at zero, and the rule inverted at exactly the seam it exists for. A report still arriving from the
+  outgoing session outranked everything the incoming one would ever emit, so a host that ordered by
+  it discarded the whole new item rather than the stale entries. Both values are now drawn from a
+  process-wide sequence, so the superseded session always ranks below the next one, and a superseded
+  session is also detached from the observer at teardown so in the ordinary case it falls silent
+  instead of racing. Successive values are strictly increasing but no longer consecutive; ordering
+  was always the contract (#314, reported by [@edde746](https://github.com/edde746)).
 - **The software renderer's metrics read builds across SDK generations again.**
   `loadRenderMetrics()` read `displayLayer.sampleBufferRenderer` and then suspended on that
   renderer's async accessor, and no single `await` on it satisfies both ends of the toolchain range:

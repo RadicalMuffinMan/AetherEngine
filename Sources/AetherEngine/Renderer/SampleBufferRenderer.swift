@@ -53,9 +53,16 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.unlock()
     }
 
-    /// #311: incremented by every flush, so a consumer can drop the frame times it recorded for
-    /// frames the compositor has since discarded. Guarded by `reorderLock`.
-    private var _flushGeneration: UInt64 = 0
+    /// #311: moved on by every flush, so a consumer can drop the frame times it recorded for frames the
+    /// compositor has since discarded. Guarded by `reorderLock`.
+    ///
+    /// Drawn from a process-wide allocator rather than counted from zero (#314). A load builds a new
+    /// renderer, and a renderer that started at zero would report below the outgoing one, which is the
+    /// order a consumer reads as "stale". The first value is drawn at init for the same reason: the
+    /// generation a renderer reports before its first flush has to rank above the previous renderer's
+    /// last, not tie with it. Successive values are therefore strictly increasing but not consecutive.
+    private static let flushGenerations = FrameTimeSequence()
+    private var _flushGeneration: UInt64 = SampleBufferRenderer.flushGenerations.next()
     var flushGeneration: UInt64 {
         reorderLock.lock()
         defer { reorderLock.unlock() }
@@ -279,7 +286,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // however far the seek travelled.
         _newestEnqueuedPtsSeconds = nil
         // #311: everything reported before this point describes frames that are now gone.
-        _flushGeneration &+= 1
+        _flushGeneration = SampleBufferRenderer.flushGenerations.next()
         // Invalidate the format description cache; the next load() may open a stream with different colorimetry at the same resolution.
         cachedFormatDesc = nil
         cachedFormatKey = nil

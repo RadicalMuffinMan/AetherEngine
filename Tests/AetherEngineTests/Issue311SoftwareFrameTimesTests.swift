@@ -72,6 +72,10 @@ struct Issue311SoftwareFrameTimesTests {
     /// A seek flushes, and everything recorded before it describes frames the compositor no longer
     /// holds. Without a generation a consumer's table would keep entries that look current, and on a
     /// backward seek the two runs overlap in time, so the timestamps alone cannot separate them.
+    ///
+    /// The assertions are inequalities: since #314 the generation is drawn from a process-wide
+    /// sequence, so a renderer in a parallel test legitimately consumes values in between. Ordering is
+    /// the contract, consecutive values never were.
     @Test("a flush moves the generation, so pre-seek frames are distinguishable")
     func flushMovesTheGeneration() {
         let renderer = SampleBufferRenderer()
@@ -84,7 +88,7 @@ struct Issue311SoftwareFrameTimesTests {
         let before = renderer.flushGeneration
 
         renderer.flush(removingDisplayedImage: false)   // the seek
-        #expect(renderer.flushGeneration == before + 1)
+        #expect(renderer.flushGeneration > before)
 
         // Backward seek: the same timestamp comes round again under the new generation.
         renderer.enqueue(pixelBuffer: Self.makePixelBuffer(),
@@ -93,7 +97,7 @@ struct Issue311SoftwareFrameTimesTests {
 
         #expect(seen.values.count == 2)
         #expect(seen.values[0].presentation == seen.values[1].presentation)
-        #expect(seen.values[1].generation == seen.values[0].generation + 1)
+        #expect(seen.values[1].generation > seen.values[0].generation)
     }
 
     // MARK: - Installation
