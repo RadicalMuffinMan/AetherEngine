@@ -731,6 +731,10 @@ public final class AetherEngine: ObservableObject {
     /// (the prefetcher dying, EOF landing) gets its own line instead of waiting for the 30 s
     /// cadence. nil before the first statement of a session.
     var subtitleResolutionLastFrontier: [SubtitleChannel: SubtitleResolutionStatement.Frontier] = [:]
+    /// #318: channels whose current decoded run has already stated determination at the playhead,
+    /// so the crossing is announced once and not on every tick after it. Cleared per channel by
+    /// every reset, because a fresh run's coverage is a fresh question.
+    var subtitleResolutionCoverageStated: Set<SubtitleChannel> = []
     /// #151: subtitle-only forward side reader filling the session packet store up to
     /// playhead + subtitleDrainLeadSeconds independent of the producer's forward park, so the
     /// drainer's lead window holds cues for host-applied ADVANCE sync offsets (text and bitmap).
