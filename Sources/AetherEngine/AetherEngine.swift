@@ -520,6 +520,43 @@ public final class AetherEngine: ObservableObject {
     /// readiness from currentTime being pinned at 0.
     @Published public internal(set) var isSessionReady = false
 
+    /// #315: the running path has a first frame ready for display, for the media this `load()`
+    /// opened. This is the edge a black cover comes off on; `isSessionReady` is not that edge and
+    /// cannot be made into one.
+    ///
+    /// `isSessionReady` is `AVPlayerItem.readyToPlay`, which AVFoundation reaches before the layer
+    /// holds a picture and which stays true across a seek. Measured on a loopback origin, the
+    /// player's layer reports its first frame ~0.05 s into a load and `timeControlStatus` follows
+    /// at ~0.10 s; on a slow origin those separate by as much as the source is slow, and a load
+    /// opened paused never produces the second one at all. Hosts approximating presentation from
+    /// `phase == .playing/.paused && isSessionReady` therefore lift the cover onto black.
+    ///
+    /// What backs it: `AVPlayerLayer.isReadyForDisplay` on the native path,
+    /// `AVSampleBufferDisplayLayer.isReadyForDisplay` on the software one (below tvOS/iOS 17.4 and
+    /// macOS 14.4, where that property does not exist, the software path falls back to the first
+    /// frame handed to the renderer, one hop earlier than presentation). Audio-only sessions have
+    /// nothing to display and leave it false.
+    ///
+    /// Two things it does NOT claim:
+    ///
+    /// - **Not "the viewer sees it".** It is the pipeline's own statement that a first frame is
+    ///   ready. The engine's layer reaches it even when it is in no view hierarchy (measured), so
+    ///   a host that never bound a surface still gets true here while showing nothing (#298), and
+    ///   an `AVPlayerViewController` host presents through AVKit's own layer a frame or so later.
+    /// - **Not a level.** It is latched for the load: false at every `load()` and at `stop()`, true
+    ///   once and then held. The seams that reuse the running host (media fallback, the wired-HDMI
+    ///   AirPlay master swap, the #93 recovery reload, the AE#158 in-place handover) each drop the
+    ///   layer's picture for a few tens of milliseconds, measured, and this holds true through
+    ///   them: reporting them would make a host re-cover a seam it is deliberately not meant to
+    ///   see, and a falling edge would be ambiguous in exactly the way `SeekEvent` was introduced
+    ///   to fix, since nothing in a level says why it fell. A rebuild that goes back through
+    ///   `load()`, `reloadAtCurrentPosition()` included, does reset it: there the item is genuinely
+    ///   gone and its first frame has to be reached again.
+    ///
+    /// For "has this seek reached the screen", the per-seek answer is `SeekEvent.landed`, not this
+    /// flag: a seek keeps the previous frame up, so the layer never stops being ready for display.
+    @Published public internal(set) var hasFirstFrameReadyForDisplay = false
+
     /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
     var pendingPreReadySeekSeconds: Double?
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
@@ -2342,6 +2379,9 @@ public final class AetherEngine: ObservableObject {
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
         // Scrub/seek/producer-restart never route through load(), so mid-stream #93 detection stays armed.
         hasRenderedFirstFrameMirror.set(false)
+        // The public #315 counterpart is un-latched by the stopInternal() above, which every load()
+        // runs. The seams that reuse the running host call host.load() directly, reach neither, and
+        // keep the latch through their few tens of ms without a picture.
         // Drop disc recognition memoized for the previous media. Track-switch reopens (audio / subtitle
         // side demuxer) deliberately keep it so a remote ISO is parsed once per session (#76); only a
         // genuinely new load clears it, which also keeps custom sources (shared placeholder URL) from
@@ -4627,6 +4667,8 @@ public final class AetherEngine: ObservableObject {
         // #127: readiness + deferred host seeks are session-scoped; the host-side sink can't clear them
         // once nativeCancellables are gone.
         isSessionReady = false
+        // #315: session-scoped for the same reason, and the host mirrors are being cut here.
+        hasFirstFrameReadyForDisplay = false
         pendingPreReadySeekSeconds = nil
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.

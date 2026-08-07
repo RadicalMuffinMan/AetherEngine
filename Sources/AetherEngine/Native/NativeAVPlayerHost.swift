@@ -28,6 +28,18 @@ final class NativeAVPlayerHost {
     private var hasEverPlayed = false
     @Published private(set) var didReachEnd: Bool = false
 
+    /// #315: `AVPlayerLayer.isReadyForDisplay` for the item this host holds, which is the only
+    /// signal on this path for "there is a picture". `isReady` is the item's `readyToPlay`, which
+    /// AVFoundation reaches before the layer has presented anything and which stays true across a
+    /// seek, so a host lifting a black cover on it lifts it onto black.
+    ///
+    /// A LEVEL, not a latch: it falls whenever the layer loses its picture, which every item swap
+    /// does, including the in-place handover (measured: ~40 ms of false around a
+    /// `replaceCurrentItem`, even when the swap is meant to be invisible). The engine folds it into
+    /// the load-scoped `AetherEngine.hasFirstFrameReadyForDisplay`, which is what a host should
+    /// consume; nothing here is worth reacting to on its own.
+    @Published private(set) var isVideoReadyForDisplay: Bool = false
+
     /// Set per load; gates the AE#287 premature-end recovery, which only makes sense for a fixed-length
     /// presentation. A live session has no advertised end to fall short of.
     private var isLiveSession: Bool = false
@@ -265,15 +277,28 @@ final class NativeAVPlayerHost {
 
         EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil") headers=\(httpHeaders.isEmpty ? "none" : "\(httpHeaders.count)")", category: .engine)
 
-        // First-frame-visible diagnostic (see `layerReadyObservation`).
+        // First frame on screen, published as `isVideoReadyForDisplay` and stamped for the
+        // audio-leads-black-video gap (see `layerReadyObservation`).
+        //
+        // The install-time value is logged separately rather than taken through `.initial`, and it
+        // is deliberately not published: on a reused host the layer still reads true here, for the
+        // item this load is replacing. AVFoundation clears it ~40 ms later and raises it again for
+        // the new item, so only CHANGES observed from here on describe this session's picture
+        // (`unloadCurrentItem` has already published false).
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sid) layer.isReadyForDisplay=\(playerLayer.isReadyForDisplay) t+0.00s (carried in from the previous item when true)",
+            category: .engine
+        )
         layerReadyObservation = playerLayer.observe(
-            \.isReadyForDisplay, options: [.new, .initial]
-        ) { layer, change in
+            \.isReadyForDisplay, options: [.new]
+        ) { [weak self] layer, change in
+            let ready = change.newValue ?? layer.isReadyForDisplay
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - loadStart.uptimeNanoseconds) / 1_000_000_000
             EngineLog.emit(
-                "[NativeAVPlayerHost] #\(sid) layer.isReadyForDisplay=\(change.newValue ?? layer.isReadyForDisplay) t+\(String(format: "%.2f", elapsed))s",
+                "[NativeAVPlayerHost] #\(sid) layer.isReadyForDisplay=\(ready) t+\(String(format: "%.2f", elapsed))s",
                 category: .engine
             )
+            Task { @MainActor in self?.isVideoReadyForDisplay = ready }
         }
 
         let asset = AVURLAsset(url: url, options: Self.assetCreationOptions(httpHeaders: httpHeaders))
@@ -1138,6 +1163,10 @@ final class NativeAVPlayerHost {
         // Clear terminal flags: keepNativeHost reload reuses the host and @Published replays on subscribe; stale failureMessage/didReachEnd corrupt the new session (issue #15).
         failureMessage = nil
         didReachEnd = false
+        // #315: same reason. The layer itself still reads true for a few tens of ms past this point
+        // (AVFoundation clears it after the swap), so the published value leads the layer here on
+        // purpose: the outgoing item's picture is not this session's.
+        isVideoReadyForDisplay = false
         // AE#287: the recovery budget is per item, not per host.
         prematureEndRecoveryAttempts = 0
         lastPrematureEndRecoveryPlayhead = nil
