@@ -12,6 +12,25 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.10.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.10.0))
+
+### Added
+
+- **The software path hands out its presentation timebase and reports its frame times.**
+  `softwarePresentationTimebase` exposes the render synchronizer's clock, the master clock for both
+  the audio renderer and the display layer, created unconditionally so it exists even on a source
+  with no audio track. `setSoftwareVideoFrameTimeObserver` reports every enqueued frame as a
+  `SoftwareVideoFrameTime` (`presentation`, `generation`). Both read the source axis, the axis the
+  engine's subtitle cues already live on, so a host pacing a bitmap overlay (libass) against them
+  converts nothing. Reports arrive at the handover to the compositor, past the reorder buffer, which
+  makes them ascending in presentation order and excludes frames refused for an unschedulable
+  timestamp or skipped after a seek. `generation` moves on every renderer flush, so entries recorded
+  before a seek are distinguishable from the ones after it even where the timestamps repeat (#311).
+- **`aetherctl play --frame-times`** installs that observer before `load()` and appends `ft`,
+  `ftLast`, `ftGen`, `ooo` and the timebase reading to the 1 Hz line.
+
 ## [6.9.0] - 2026-08-07
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.9.0))
