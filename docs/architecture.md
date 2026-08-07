@@ -196,7 +196,7 @@ Sources/AetherEngine/
 │   ├── EngineDiagnostics.swift              engine.diagnostics: timer-sampled values (liveTelemetry) as a separate ObservableObject
 │   ├── EngineLog.swift                      Gated OSLog emission with severity levels (.verbose suppressed from default + host handler)
 │   ├── FFmpegLogBridge.swift                av_log_set_callback funnel: FFmpeg's internal warnings surface through EngineLog
-│   ├── LiveTelemetry.swift                  Value type emitted at 1 Hz: instant / avg bitrate, buffer, network, dropped frames, observed FPS, A/V sync gap, plus subsystem byte counters
+│   ├── LiveTelemetry.swift                  Value type emitted at 1 Hz: instant / avg bitrate, buffer, network, dropped frames, observed FPS, A/V sync gap, plus subsystem byte counters. The software path reports its own read bytes, throughput, reader runway (`readerWindowAheadBytes`), decoded cushion (`displayCushionSeconds`) and dropped / late frames (#306); `forwardBufferSeconds` stays nil there because a renderer-back-pressured pump holds no seconds-deep reservoir to report
 │   ├── FourCC.swift                         Printable FourCC rendering for codec-tag diagnostics
 │   ├── LiveTelemetrySampler.swift           @MainActor 1 Hz sampler that reads existing subsystem counters and assembles LiveTelemetry snapshots
 │   ├── PacketBalanceTracker.swift           Process-wide AVPacket alloc/free balance counter for leak diagnostics
