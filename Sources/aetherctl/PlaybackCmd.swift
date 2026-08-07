@@ -239,6 +239,20 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         }
     }.store(in: &cancellables)
 
+    // #315: the cover-lift edge, stamped from the load call. Both transitions are printed: the
+    // false is the load un-latching it, the true is the running path reporting a first frame ready
+    // for display. Nothing here binds a render surface, so a true means the pipeline is ready, not
+    // that anything is on screen (that distinction is the property's own documentation).
+    let loadStart = DispatchTime.now()
+    engine.$hasFirstFrameReadyForDisplay
+        .dropFirst()
+        .sink { ready in
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - loadStart.uptimeNanoseconds) / 1e9
+            print(String(format: "  FIRSTFRAME hasFirstFrameReadyForDisplay=%@ t+%.2fs",
+                         ready ? "true" : "false", elapsed))
+        }
+        .store(in: &cancellables)
+
     let options = LoadOptions(
         suppressDisplayCriteria: true,
         isLive: live,
@@ -347,6 +361,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
                           engine.sourceTime,
                           engine.bufferedPosition,
                           engine.duration)
+        line += " rfd=\(engine.hasFirstFrameReadyForDisplay ? "y" : "n")"
         if let monitor, let end = monitor.lastEndPTS {
             // Decoded-audio lead over the master clock (source axis). Near-zero = renderer starving.
             line += String(format: " alead=%.2f abufs=%d", end - engine.sourceTime, monitor.bufferCount)

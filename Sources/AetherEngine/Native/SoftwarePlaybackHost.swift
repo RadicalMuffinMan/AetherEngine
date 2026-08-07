@@ -55,6 +55,20 @@ final class SoftwarePlaybackHost {
     @Published private(set) var failureMessage: String?
     @Published private(set) var didReachEnd: Bool = false
 
+    /// #315: `AVSampleBufferDisplayLayer.isReadyForDisplay` for the renderer's layer, this path's
+    /// answer to "there is a picture". Frames enqueued is not that answer: it counts what the
+    /// decoder handed over, and #298 is the report where every one of them went into a layer no
+    /// host had bound.
+    ///
+    /// A LEVEL that falls whenever the layer loses its picture; the engine folds it into the
+    /// load-scoped `AetherEngine.hasFirstFrameReadyForDisplay`, which is what hosts consume. A
+    /// session with no video stream never arms the observation and leaves this false.
+    @Published private(set) var isVideoReadyForDisplay: Bool = false
+
+    /// #315: `readyForDisplay` observation on the renderer's layer, re-armed per load and torn down
+    /// with the session.
+    private var readyForDisplayObserver: NSObjectProtocol?
+
     /// Fires (off-main) once per session the first time HDR10+ dynamic
     /// metadata appears on a decoded frame. Hooked by `AetherEngine` to
     /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
@@ -350,6 +364,47 @@ final class SoftwarePlaybackHost {
         }
     }
 
+    /// #315: publish the renderer layer's own `readyForDisplay` as `isVideoReadyForDisplay`.
+    /// AVFoundation posts a notification for it rather than supporting KVO, and it arrived in
+    /// tvOS/iOS 17.4 and macOS 14.4, below the engine's own floor. Where it is missing the fallback
+    /// is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which is one hop
+    /// earlier than presentation and is documented as such on the public property.
+    private func armReadyForDisplayObserver() {
+        disarmReadyForDisplayObserver()
+        guard #available(tvOS 17.4, iOS 17.4, macOS 14.4, *) else { return }
+        let layer = renderer.displayLayer
+        readyForDisplayObserver = NotificationCenter.default.addObserver(
+            forName: .AVSampleBufferDisplayLayerReadyForDisplayDidChange,
+            object: layer,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let ready = self.renderer.displayLayer.isReadyForDisplay
+                guard ready != self.isVideoReadyForDisplay else { return }
+                EngineLog.emit(
+                    "[SWHost] layer.isReadyForDisplay=\(ready) after \(self.framesEnqueued) frames",
+                    category: .swPlayback
+                )
+                self.isVideoReadyForDisplay = ready
+            }
+        }
+    }
+
+    private func disarmReadyForDisplayObserver() {
+        if let readyForDisplayObserver {
+            NotificationCenter.default.removeObserver(readyForDisplayObserver)
+            self.readyForDisplayObserver = nil
+        }
+    }
+
+    /// #315 fallback below tvOS/iOS 17.4 and macOS 14.4: no `readyForDisplay` on the layer, so the
+    /// first frame the decoder hands the renderer is the closest observable. Called off-main.
+    nonisolated private func noteFirstFrameEnqueuedForDisplayFallback() {
+        guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4) else { return }
+        Task { @MainActor [weak self] in self?.isVideoReadyForDisplay = true }
+    }
+
     /// Caching the chosen rate so resume() restores the right speed after a pause without the
     /// host needing to know its history. Lock-guarded: the demux/feeder threads read it at clock
     /// arming so a host rate change between load and arm is not lost (#107).
@@ -451,6 +506,9 @@ final class SoftwarePlaybackHost {
         self.videoStreamIndex = dem.videoStreamIndex
         let vtb = vStream.pointee.time_base
         self.videoTimeBaseSeconds = vtb.den > 0 ? Double(vtb.num) / Double(vtb.den) : 0
+        // #315: armed once there is a video stream to display. A fresh host means a fresh layer, so
+        // there is no carried-in picture to guard against here (the native path's problem).
+        armReadyForDisplayObserver()
 
         // DVR ring scratch dir mirrors SegmentCache's <tmpdir>/aether-segments/<uuid> convention.
         if isLive, let window = dvrWindowSeconds {
@@ -543,6 +601,7 @@ final class SoftwarePlaybackHost {
             self?.renderer.enqueue(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData)
             // First-frame milestone: demux reached a video packet + decoder produced a pixel buffer.
             if self?.bumpFramesEnqueued() == 0 {
+                self?.noteFirstFrameEnqueuedForDisplayFallback()
                 let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
                 EngineLog.emit(
                     "[SWHost] first video frame enqueued: "
@@ -931,6 +990,9 @@ final class SoftwarePlaybackHost {
         demuxer = nil
 
         isReady = false
+        // #315: the session's picture goes with the session. `flush()` above already removed it.
+        disarmReadyForDisplayObserver()
+        isVideoReadyForDisplay = false
     }
 
     var volume: Float {

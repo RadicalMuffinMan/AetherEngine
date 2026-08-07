@@ -89,14 +89,41 @@ extension AetherEngine {
     /// `isReady` always feeds the public `isSessionReady` mirror and replays a deferred pre-ready host
     /// seek (#127); pass `settlePausedAtReadiness: false` for paths that skip the readiness -> .paused
     /// waypoint (autostarting loadRemoteHLS, where the terminal play() runs and readiness is a waypoint).
+    /// #315: fold a host's raw `isVideoReadyForDisplay` level into the load-scoped public latch.
+    ///
+    /// Two operators carry the whole contract. `dropFirst()` discards the value the publisher
+    /// replays on subscribe: every call site wires its sinks BEFORE it loads the host, so on a
+    /// reused native host that replay is still the outgoing item's picture, and taking it would
+    /// latch this load's flag on the previous load's frame. `prefix(1)` is the latch itself: after
+    /// the first rise nothing can lower it again, which is what keeps a host from re-covering the
+    /// few tens of milliseconds an item swap spends without a picture.
+    func latchFirstFrameReadyForDisplay(
+        from publisher: Published<Bool>.Publisher,
+        storeIn cancellables: inout Set<AnyCancellable>
+    ) {
+        publisher
+            .dropFirst()
+            .filter { $0 }
+            .prefix(1)
+            .sink { [weak self] _ in self?.hasFirstFrameReadyForDisplay = true }
+            .store(in: &cancellables)
+    }
+
+    /// `videoReadyForDisplay` is the host's raw layer level (#315); nil on the audio hosts, which
+    /// have nothing to display. It is folded, never mirrored: the engine's published flag is latched
+    /// for the load, so the seams that reuse a host and briefly lose the picture do not surface.
     private func wireCommonHostSinks(
         duration: Published<Double>.Publisher,
         isReady: Published<Bool>.Publisher,
         settlePausedAtReadiness: Bool = true,
         failureMessage: Published<String?>.Publisher,
         didReachEnd: Published<Bool>.Publisher,
+        videoReadyForDisplay: Published<Bool>.Publisher? = nil,
         storeIn cancellables: inout Set<AnyCancellable>
     ) {
+        if let videoReadyForDisplay {
+            latchFirstFrameReadyForDisplay(from: videoReadyForDisplay, storeIn: &cancellables)
+        }
         duration
             .sink { [weak self] value in
                 if value > 0 { self?.duration = value }
@@ -244,6 +271,7 @@ extension AetherEngine {
             settlePausedAtReadiness: !Self.loadPerformsAutostart(options),
             failureMessage: host.$failureMessage,
             didReachEnd: host.$didReachEnd,
+            videoReadyForDisplay: host.$isVideoReadyForDisplay,
             storeIn: &nativeCancellables
         )
         // Track AVPlayer's REAL transport state. Eager .playing caused a ~10 s black screen during Jellyfin transcode spin-up.
@@ -897,6 +925,7 @@ extension AetherEngine {
             isReady: host.$isReady,
             failureMessage: host.$failureMessage,
             didReachEnd: host.$didReachEnd,
+            videoReadyForDisplay: host.$isVideoReadyForDisplay,
             storeIn: &nativeCancellables
         )
         host.$timeControlStatus
@@ -1205,6 +1234,7 @@ extension AetherEngine {
             isReady: host.$isReady,
             failureMessage: host.$failureMessage,
             didReachEnd: host.$didReachEnd,
+            videoReadyForDisplay: host.$isVideoReadyForDisplay,
             storeIn: &softwareCancellables
         )
 

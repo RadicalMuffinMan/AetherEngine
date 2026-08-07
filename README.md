@@ -134,6 +134,13 @@ player.$playbackPhase  // unified: .idle/.loading/.playing/.paused/.seeking/.reb
                        // .stalled(reconnecting:)/.ended/.error. One source of truth for a status
                        // spinner; derived from state + isBuffering + isSeeking + source reconnect.
                        // Prefer this over stitching the raw signals or matching EngineLog text.
+player.$hasFirstFrameReadyForDisplay
+                       // the running path has a first frame ready for display, for the media THIS
+                       // load opened: the edge a black cover comes off on. readyToPlay is not that
+                       // edge (AVFoundation reaches it before the layer holds a picture, and it
+                       // stays true across a seek), so a cover lifted on isSessionReady lifts onto
+                       // black. Latched for the load, false again at the next load() / stop().
+                       // For "has this seek reached the screen" use seekEvents .landed instead.
 player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession)
 
 // System Now-Playing on the native video path (tvOS / iOS). Off by default: an
