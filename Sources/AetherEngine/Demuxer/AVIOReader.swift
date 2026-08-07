@@ -482,9 +482,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let throttleKbps: Int
     /// TEST-ONLY reconnect-backoff scale (1.0 = real timing), captured once from the static hook at init.
     private let backoffScale: Double
-    /// Stall threshold this reader runs with: `connStallTimeoutDefault`, or the TEST-ONLY hook when
-    /// set. One value for both detectors, because they are one policy: a connection that has
-    /// delivered nothing for this long is replaced, whether or not a read is waiting on it (#309).
+    /// Stall threshold this reader runs with, `connStallTimeoutDefault` unless a caller overrides it.
+    /// One value for both detectors, because they are one policy: a connection that has delivered
+    /// nothing for this long is replaced, whether or not a read is waiting on it (#309).
+    ///
+    /// An init parameter rather than a process-wide test hook on purpose. The hooks next to it are
+    /// read at every reader's init, so a test that sets one changes the behaviour of every reader any
+    /// CONCURRENTLY running suite happens to build, and swift-testing runs suites in parallel. A
+    /// shortened stall threshold leaking that way would make other suites reconnect early under
+    /// load. It is not a `LoadOptions` field either: #272 measured that a shorter threshold is worse
+    /// under CPU starvation, and that conclusion is unchanged.
     private let connStallTimeout: TimeInterval
     private var throttleVClockNs: UInt64 = 0
     private let throttleLock = NSLock()
@@ -493,7 +500,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// origin at once and the line used to name none of them.
     private let label: String
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault) {
         self.url = url
         self.label = label
         self.extraHeaders = extraHeaders
@@ -505,8 +512,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.boundedInitialFetch = boundedInitialFetch.map { max(1, $0) }
         self.throttleKbps = AetherEngine.sourceThrottleKbpsForTesting
         self.backoffScale = AetherEngine.reconnectBackoffScaleForTesting
-        let stallOverride = AetherEngine.connStallTimeoutForTesting
-        self.connStallTimeout = stallOverride > 0 ? stallOverride : Self.connStallTimeoutDefault
+        self.connStallTimeout = max(0.05, connStallTimeout)
     }
 
     /// Slow-CDN simulation: hold delivered bytes to `throttleKbps` by sleeping the demux thread before the

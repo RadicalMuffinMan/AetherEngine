@@ -20,7 +20,10 @@ import Foundation
 /// is the reader-observable shape of the field case (URLSession surfaced nothing until the task was
 /// later cancelled).
 ///
-/// `.serialized`: these tests mutate the process-wide stall-timeout, throttle and backoff hooks.
+/// `.serialized`: one case mutates the process-wide backoff-scale hook, and keeping the four off each
+/// other's timing is worth more than running them concurrently. The stall threshold and the consumer
+/// pace are deliberately NOT process-wide hooks: swift-testing runs suites in parallel, and a hook
+/// that every reader reads at init would reach into whatever suite happens to run alongside this one.
 @Suite("Silent transport death (#309)", .serialized)
 struct Issue309SilentTransportDeathTests {
 
@@ -69,8 +72,12 @@ struct Issue309SilentTransportDeathTests {
         }
     }
 
+    /// `bytesPerSecond` paces the CONSUMER inside this loop rather than through
+    /// `AetherEngine.sourceThrottleKbpsForTesting`. That hook is read at every reader's init, so
+    /// setting it would throttle the readers of every suite swift-testing happens to run in parallel
+    /// with this one. Pacing here is local by construction.
     private static func read(_ reader: AVIOReader, bytes target: Int, sliceCap: Int = 256 * 1024,
-                            deadline: TimeInterval = 30) -> Int {
+                            deadline: TimeInterval = 30, bytesPerSecond: Int = 0) -> Int {
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
         defer { buf.deallocate() }
         var got = 0
@@ -79,6 +86,9 @@ struct Issue309SilentTransportDeathTests {
             let n = reader.read(into: buf, size: Int32(min(sliceCap, target - got)))
             if n <= 0 { break }
             got += Int(n)
+            if bytesPerSecond > 0 {
+                Thread.sleep(forTimeInterval: Double(n) / Double(bytesPerSecond))
+            }
         }
         return got
     }
@@ -99,9 +109,6 @@ struct Issue309SilentTransportDeathTests {
           .timeLimit(.minutes(2)))
     func deadFlowIsEndedWithoutAWaitingRead() async throws {
         let stallTimeout: TimeInterval = 0.6
-        AetherEngine.connStallTimeoutForTesting = stallTimeout
-        defer { AetherEngine.connStallTimeoutForTesting = 0 }
-
         let silenceOffset = Self.silenceOffset
         // Built into a local first: `#require` wraps its expression in a @Sendable closure, which a
         // capturing origin closure cannot cross.
@@ -113,7 +120,8 @@ struct Issue309SilentTransportDeathTests {
         let server = try #require(serverMaybe)
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
-                                boundedInitialFetch: Self.firstRange)
+                                boundedInitialFetch: Self.firstRange,
+                                connStallTimeout: stallTimeout)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -144,12 +152,8 @@ struct Issue309SilentTransportDeathTests {
     @Test("a generation that never sees a first byte is ended too", .timeLimit(.minutes(2)))
     func headersWithoutABodyAreEnded() async throws {
         let stallTimeout: TimeInterval = 0.6
-        AetherEngine.connStallTimeoutForTesting = stallTimeout
         AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer {
-            AetherEngine.connStallTimeoutForTesting = 0
-            AetherEngine.reconnectBackoffScaleForTesting = 1.0
-        }
+        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
 
         let silenceOffset = Self.silenceOffset
         let attempts = AttemptCounter()
@@ -162,7 +166,8 @@ struct Issue309SilentTransportDeathTests {
         let server = try #require(serverMaybe)
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
-                                boundedInitialFetch: Self.firstRange)
+                                boundedInitialFetch: Self.firstRange,
+                                connStallTimeout: stallTimeout)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -187,15 +192,10 @@ struct Issue309SilentTransportDeathTests {
           .timeLimit(.minutes(3)))
     func runwayIsRefilledBeforeItDrains() async throws {
         let stallTimeout: TimeInterval = 0.5
-        AetherEngine.connStallTimeoutForTesting = stallTimeout
         // A consumer at ~2 MB/s, so the 6 MB resident at the moment of death is worth seconds of
         // playback rather than the microseconds a loopback memcpy would take. Without a paced
         // consumer this test would measure the harness, not the reader.
-        AetherEngine.sourceThrottleKbpsForTesting = 16_000
-        defer {
-            AetherEngine.connStallTimeoutForTesting = 0
-            AetherEngine.sourceThrottleKbpsForTesting = 0
-        }
+        let consumerBytesPerSecond = 2 * 1024 * 1024
 
         let silenceOffset = Self.silenceOffset
         let silentBytes: Int64 = 4 * 1024 * 1024
@@ -210,7 +210,8 @@ struct Issue309SilentTransportDeathTests {
         let server = try #require(serverMaybe)
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
-                                boundedInitialFetch: Self.firstRange)
+                                boundedInitialFetch: Self.firstRange,
+                                connStallTimeout: stallTimeout)
         defer { reader.markClosed(); reader.close() }
         probe.attach(reader)
         try reader.open()
@@ -218,7 +219,8 @@ struct Issue309SilentTransportDeathTests {
         // Read straight through the death. 7 MB is past everything the silenced generation and the
         // first range delivered (6 MB), so completing it can only happen through a replacement.
         let target = 7 * 1024 * 1024
-        let got = Self.read(reader, bytes: target, deadline: 60)
+        let got = Self.read(reader, bytes: target, deadline: 60,
+                            bytesPerSecond: consumerBytesPerSecond)
         #expect(got == target, "read stopped at \(got / 1024) KB of \(target / 1024) KB")
 
         let runway = try #require(probe.runwayAtRequest,
@@ -232,12 +234,11 @@ struct Issue309SilentTransportDeathTests {
     @Test("a backpressure-parked reader is not treated as a dead flow", .timeLimit(.minutes(2)))
     func parkedIsNotStalled() async throws {
         let stallTimeout: TimeInterval = 0.5
-        AetherEngine.connStallTimeoutForTesting = stallTimeout
-        defer { AetherEngine.connStallTimeoutForTesting = 0 }
 
         let server = try #require(ThrottledOriginServer(totalSize: Self.totalSize))
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                connStallTimeout: stallTimeout)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
