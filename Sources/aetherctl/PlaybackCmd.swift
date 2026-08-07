@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CoreMedia
 import AetherEngine
 
 // MARK: - play
@@ -10,7 +11,7 @@ import AetherEngine
 /// and log every overlay cue that arrives. Repro harness for "loads but never
 /// plays" reports and for live teletext end-to-end validation (#107).
 func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
-                    censusThresholdMB: Int? = nil, censusHz: Double? = nil) -> Int32 {
+                    censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         AetherEngine.setLargeAllocationCensusEnabled(
@@ -24,7 +25,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvr
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition, frameTimes: frameTimes)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -47,6 +48,52 @@ private func networkTelemetryFragment(_ telemetry: LiveTelemetry?) -> String {
     if let dropped = telemetry.droppedFrameCount { out += " drop=\(dropped)" }
     if let delay = telemetry.accumulatedFrameDelaySeconds { out += String(format: " delay=%.2fs", delay) }
     return out
+}
+
+/// #311: records the software path's per-frame reports, from the decode thread. Also checks the
+/// API's own claim while it is at it: these arrive past the reorder buffer, so `ooo` (a report whose
+/// presentation time precedes its predecessor within one generation) must stay 0 on real media.
+final class FrameTimeProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+    private var sinceTick = 0
+    private var last: CMTime?
+    private var lastInGeneration: CMTime?
+    private var generation: UInt64 = 0
+    private var generations: Set<UInt64> = []
+    private var outOfOrder = 0
+
+    func record(_ frame: SoftwareVideoFrameTime) {
+        lock.lock()
+        defer { lock.unlock() }
+        total += 1
+        sinceTick += 1
+        generations.insert(frame.generation)
+        if frame.generation != generation {
+            generation = frame.generation
+            lastInGeneration = nil
+        }
+        if let previous = lastInGeneration, CMTimeCompare(frame.presentation, previous) < 0 {
+            outOfOrder += 1
+        }
+        lastInGeneration = frame.presentation
+        last = frame.presentation
+    }
+
+    /// Frames since the previous call, and the state at this instant.
+    func drainTick() -> (frames: Int, last: CMTime?, generation: UInt64, outOfOrder: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        let n = sinceTick
+        sinceTick = 0
+        return (n, last, generation, outOfOrder)
+    }
+
+    func summary() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return "frames=\(total) outOfOrder=\(outOfOrder) generations=\(generations.sorted())"
+    }
 }
 
 /// Decoded-PCM continuity monitor fed by the engine audio tap (#95 infrastructure).
@@ -156,7 +203,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, frameTimes: Bool = false) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -198,6 +245,15 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         dvrWindowSeconds: dvrWindow,
         nativeRemoteHLS: nativeHLS
     )
+    // #311: installed BEFORE the load on purpose. The engine holds it and arms the host it builds,
+    // which is the documented usage and the part a host would otherwise have to re-do per load.
+    let frameProbe = frameTimes ? FrameTimeProbe() : nil
+    if let frameProbe {
+        engine.setSoftwareVideoFrameTimeObserver { [weak frameProbe] frame in
+            frameProbe?.record(frame)
+        }
+    }
+
     do {
         let probe = try await engine.load(url: url, startPosition: startPosition, options: options)
         // Mirror AetherPlayer's Open URL flow: a probe-flagged live source is reloaded
@@ -249,6 +305,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
 
     print("")
     print("backend=\(engine.playbackBackend.rawValue) duration=\(String(format: "%.1f", engine.duration))s isLive=\(engine.isLive)")
+    if frameTimes {
+        if let timebase = engine.softwarePresentationTimebase {
+            print(String(format: "  timebase: present, time=%.3fs rate=%.2f", timebase.time.seconds, timebase.rate))
+        } else {
+            print("  timebase: nil (not the software path)")
+        }
+    }
     for track in engine.audioTracks {
         print("  audio    id=\(track.id) codec=\(track.codec) lang=\(track.language ?? "?") ch=\(track.channels)\(track.isDefault ? " default" : "")")
     }
@@ -289,6 +352,17 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
             line += String(format: " alead=%.2f abufs=%d", end - engine.sourceTime, monitor.bufferCount)
         }
         line += networkTelemetryFragment(engine.liveTelemetry)
+        if let frameProbe {
+            let tick = frameProbe.drainTick()
+            line += " ft=\(tick.frames)"
+            if let last = tick.last { line += String(format: " ftLast=%.3fs", last.seconds) }
+            line += " ftGen=\(tick.generation) ooo=\(tick.outOfOrder)"
+            // The clock the frames are presented against, read through the public property. Its
+            // proximity to ftLast is the point: one axis, no conversion between them.
+            if let timebase = engine.softwarePresentationTimebase {
+                line += String(format: " tb=%.3fs", timebase.time.seconds)
+            }
+        }
         print(line)
         // DVR-seek smoke: rewind 20 s mid-session, then live-edge return 15 s later, so the
         // telemetry shows whether the clock and the audio look-ahead recover from both.
@@ -391,6 +465,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     }
     if let monitor {
         print("audio continuity: \(monitor.summary)")
+    }
+    if let frameProbe {
+        print("frame times: \(frameProbe.summary())")
     }
     print("final t=\(String(format: "%.2f", finalTime))s state=\(String(describing: endState)) cues=\(cueCount)")
     if case .error(let message) = endState {

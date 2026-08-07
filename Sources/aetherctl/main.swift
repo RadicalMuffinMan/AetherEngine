@@ -471,6 +471,9 @@ if first == "play" {
     // Resume anchor, the same one load(startPosition:) takes. AE#287 needs it: the reporter's hard
     // park only reproduces when a rebuilt session opens exactly at the video-exhaustion boundary.
     let playStartPosition = takeDoubleFlag("--start-position", from: &rest)
+    // #311: install the software frame-time observer and read the presentation timebase, so the
+    // per-frame boundaries and the clock a host would pace an overlay against are both observable.
+    let frameTimes = takeFlag("--frame-times", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -483,7 +486,7 @@ if first == "play" {
         exit(64)
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
-                 censusThresholdMB: censusThresholdMB, censusHz: censusHz))
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

@@ -148,6 +148,24 @@ final class SoftwarePlaybackHost {
                                               sourceClock: sourceClockSeconds)
     }
 
+    /// #311: the timebase the master clock runs on, or nil before the session owns one. This is the
+    /// `AVSampleBufferRenderSynchronizer`'s timebase, and it is created unconditionally, including for
+    /// a source with no audio track, so on this path it exists for the whole session rather than only
+    /// when something is playing.
+    ///
+    /// It reads the SOURCE axis, the same axis as `SoftwareVideoFrameTime.presentation` and as the
+    /// subtitle cues, so an overlay paced against it needs no conversion.
+    var presentationTimebase: CMTimebase? {
+        audioOutput?.synchronizer.timebase
+    }
+
+    /// #311: forwarded to the renderer, which is where a frame is actually handed over. Set through
+    /// the host rather than on the renderer directly so the engine has one place to re-arm it across
+    /// a `load()`, the same shape the native path uses for its own observer.
+    func setVideoFrameTimeObserver(_ observer: SoftwareVideoFrameTimeObserver?) {
+        renderer.setFrameEnqueuedObserver(observer)
+    }
+
     /// #303: the renderer's own view of what reached the display. Async because the AVFoundation
     /// accessor is; the memprobe already runs in an async context, so it is read there rather than
     /// cached, and the line never carries a stale snapshot.
