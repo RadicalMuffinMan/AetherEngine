@@ -1935,8 +1935,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     // MARK: - Persistent Connection (lifecycle + delegate callbacks)
 
-    /// Open a fresh Range: bytes=<offset>- connection. Bumps generation so
-    /// late callbacks from the old connection are ignored.
+    /// Open a fresh Range: bytes=<offset>- connection (live: always `bytes=0-`, see the
+    /// request construction below). Bumps generation so late callbacks from the old
+    /// connection are ignored.
     private func startPersistentConnection(at offset: Int64, boundedTo: Int64? = nil) {
         winCond.lock()
         connGeneration &+= 1
@@ -2005,7 +2006,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let resolvedBound {
             request.setValue("bytes=\(offset)-\(offset + resolvedBound - 1)", forHTTPHeaderField: "Range")
         } else {
-            request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+            // Live: `offset` is reader bookkeeping (the window frontier the delivered bytes
+            // are appended at), not a server-side position — a live origin has no byte
+            // addresses, and panels disagree on what a nonzero offset means: some ignore it
+            // and serve from now (which is why the frontier request ever worked), others
+            // answer 416 to every offset they cannot satisfy, turning each reconnect into an
+            // unrecoverable rejection loop. Ask for the stream the way a join does
+            // (`bytes=0-`, the one shape every origin serves) and let the append anchor the
+            // bytes at the frontier, exactly as it already does.
+            request.setValue("bytes=\(isLive ? 0 : offset)-", forHTTPHeaderField: "Range")
         }
         request.timeoutInterval = 0  // long-lived; stalls handled by the reader
         applyExtraHeaders(&request)

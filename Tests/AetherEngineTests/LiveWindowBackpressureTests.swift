@@ -104,10 +104,52 @@ struct LiveWindowBackpressureTests {
         }
         #expect(got >= target, "only \(got / (1024 * 1024)) MB delivered after the backstop")
         #expect(server.rangeRequestCount >= 2, "the frontier refill never fired")
-        let starts = server.requestedRanges.map(\.start)
-        #expect(starts == starts.sorted(),
-                "a live refill went backwards past the frontier: \(server.requestedRanges)")
+        #expect(server.requestedRanges.allSatisfy { $0.start == 0 },
+                "a live request carried a byte frontier the origin never promised to honour: \(server.requestedRanges)")
         #expect(server.requestedRanges.allSatisfy { $0.end == nil },
                 "every live request must be open-ended: \(server.requestedRanges)")
+    }
+
+    /// The field shape behind the fix's third half: a panel that CLEANLY ends every
+    /// connection after serving its ring-buffer burst, and answers 416 to any request
+    /// with a nonzero byte offset (a live stream has no byte addresses). Reconnecting
+    /// "at the frontier" against such an origin is an unrecoverable rejection loop:
+    /// every retry asks the same unsatisfiable offset until the runway drains and the
+    /// session starves. A live reconnect must ask for the stream the way a join does.
+    @Test("a live reconnect after a completed burst asks like a join, not at a frontier",
+          .timeLimit(.minutes(2)))
+    func liveReconnectAsksLikeAJoin() async throws {
+        // 4 MB per connection: the origin serves its "ring buffer" and completes the
+        // response; anything with offset > 0 is rejected the way the field panel does.
+        let serverMaybe = ThrottledOriginServer(
+            totalSize: 4 * 1024 * 1024,
+            respond: { _, offset, _ in offset > 0 ? .status(416) : .serve206 }
+        )
+        let server = try #require(serverMaybe)
+        defer { server.stop() }
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/live.ts")!,
+                                isLive: true,
+                                connStallTimeout: 600)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        // Read through several burst-reconnect cycles: 10 MB needs at least three
+        // connections against a 4 MB-per-connection origin.
+        let sliceCap = 256 * 1024
+        let target = 10 * 1024 * 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        var got = 0
+        let deadline = Date().addingTimeInterval(30)
+        while got < target && Date() < deadline {
+            let n = reader.read(into: buf, size: Int32(sliceCap))
+            if n <= 0 { break }
+            got += Int(n)
+        }
+        #expect(got >= target,
+                "only \(got / (1024 * 1024)) MB delivered; the reconnect starved on a rejected frontier")
+        #expect(server.rangeRequestCount >= 3, "expected one connection per burst cycle")
+        #expect(server.requestedRanges.allSatisfy { $0.start == 0 },
+                "a live reconnect carried a frontier offset: \(server.requestedRanges)")
     }
 }

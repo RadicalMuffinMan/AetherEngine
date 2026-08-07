@@ -27,6 +27,16 @@ the public-API contract.
   absorbed once, steady state plateaus at burst size with the connection never voluntarily
   ended, and the end-and-refill survives unchanged as the memory backstop for a "live" source
   that sustainedly outruns realtime.
+- **A live reconnect asks for the stream the way a join does, instead of at a byte frontier.**
+  The reconnect request carried `Range: bytes=<frontier>-`, but the frontier is reader
+  bookkeeping — the window position delivered bytes are appended at — not a server-side byte
+  address, because a live origin has none. Panels that ignore the offset and serve "from now"
+  masked this; a panel that answers 416 to every offset it cannot satisfy turned each reconnect
+  into an unrecoverable rejection loop (field trace: a panel that cleanly completes every
+  response after its ~14 MB ring burst then 416'd the same frontier 35 generations in a row,
+  ~1/s, while the runway drained from 8 MB to zero and the session starved). Live requests are
+  now always `bytes=0-` — the one shape every origin serves, and the shape the join already
+  uses — and the append anchors the bytes at the frontier exactly as it always has.
 - **HTTP 509 from a pinned redirect target is treated as metering, not as a dead pin.**
   509 "Bandwidth Limit Exceeded" is what a connection-capped IPTV panel answers while the slot
   the reader is replacing has not been torn down server-side yet. It classified as a hard 5xx,
