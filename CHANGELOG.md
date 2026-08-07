@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.9.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.9.0))
+
+### Added
+
+- **A software session reports its own network telemetry.** `LiveTelemetry` gains
+  `displayCushionSeconds` (decoded video queued past the clock, software path),
+  `readerWindowAheadBytes` (bytes fetched but not yet consumed by the demuxer, both paths) and
+  `accumulatedFrameDelaySeconds` (cumulative late-frame delay, software path). `droppedFrameCount`
+  is now populated on the software path as well, from the render synchronizer's own metrics rather
+  than an `AVPlayerItem` access log that path does not have. `forwardBufferSeconds` deliberately
+  stays nil there: the demux loop reads on renderer back-pressure, so no seconds-deep reservoir of
+  arrived-but-unplayed media exists to report, and publishing the sub-second cushion under that name
+  would read as a near-stall on a healthy session (#306).
+- **`aetherctl play` prints the network half of the snapshot** on its 1 Hz line (`net`, `rx`,
+  `ahead`, `cushion`, `fwd`, `drop`, `delay`), omitting whatever the running path has no answer for.
+
+### Fixed
+
+- **Byte-derived telemetry read zero for an entire software session.** The engine's pump byte
+  counter resolved through the native HLS session, which a software session does not own, so
+  instant bitrate, average bitrate, `networkThroughputMbps`, `networkTransferredBytes` and
+  `LiveTelemetry.demuxerBytesFetched` were a hard zero on the one path that carries VP9, AV1 without
+  hardware decode and MPEG-4 Part 2. It now reads software first and native second, the precedence
+  the memory probe has always used (#306).
+
 ## [6.8.0] - 2026-08-07
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.8.0))
