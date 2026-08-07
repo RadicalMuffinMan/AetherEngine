@@ -121,19 +121,26 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// nil where the metrics cannot be asked for: an OS predating the API, or the pre-tvOS-18 path
     /// where the queue target is the display layer itself rather than an `AVSampleBufferVideoRenderer`.
     ///
-    /// #313: main-actor isolated, which costs no hop because every caller already is
-    /// (`SoftwarePlaybackHost`, the telemetry sampler). It keeps the read of the non-Sendable
-    /// `sampleBufferRenderer` and the suspension on its async accessor in one isolation domain: on an
-    /// SDK that isolates the layer to the main actor, that value otherwise crosses out of the domain
-    /// at the `await`, and region isolation makes that a build error, not a warning.
+    /// #313: main-actor isolated, and reading through the completion-handler accessor rather than
+    /// the async one, because the two halves of that constraint come from different toolchains and
+    /// no single `await` on `videoPerformanceMetrics` satisfies both. An SDK that isolates the layer
+    /// to the main actor refuses to hand `sampleBufferRenderer` to any other domain; a toolchain
+    /// that imports the async accessor as `nonisolated` refuses to take that non-Sendable renderer
+    /// from the main actor. The completion form suspends without moving the renderer anywhere, so it
+    /// holds on both. Every caller is main-actor isolated already, so the annotation costs no hop.
     @MainActor
     func loadRenderMetrics() async -> RenderMetrics? {
         guard #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) else { return nil }
-        guard let m = await displayLayer.sampleBufferRenderer.videoPerformanceMetrics else { return nil }
-        return RenderMetrics(total: m.totalNumberOfFrames,
-                             dropped: m.numberOfDroppedFrames,
-                             corrupted: m.numberOfCorruptedFrames,
-                             accumulatedDelay: m.totalAccumulatedFrameDelay)
+        let renderer = displayLayer.sampleBufferRenderer
+        return await withCheckedContinuation { (cont: CheckedContinuation<RenderMetrics?, Never>) in
+            renderer.loadVideoPerformanceMetrics { m in
+                guard let m else { return cont.resume(returning: nil) }
+                cont.resume(returning: RenderMetrics(total: m.totalNumberOfFrames,
+                                                     dropped: m.numberOfDroppedFrames,
+                                                     corrupted: m.numberOfCorruptedFrames,
+                                                     accumulatedDelay: m.totalAccumulatedFrameDelay))
+            }
+        }
     }
 
     // MARK: - Queue rendering target
