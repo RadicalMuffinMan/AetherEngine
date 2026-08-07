@@ -27,6 +27,16 @@ the public-API contract.
   absorbed once, steady state plateaus at burst size with the connection never voluntarily
   ended, and the end-and-refill survives unchanged as the memory backstop for a "live" source
   that sustainedly outruns realtime.
+- **HTTP 509 from a pinned redirect target is treated as metering, not as a dead pin.**
+  509 "Bandwidth Limit Exceeded" is what a connection-capped IPTV panel answers while the slot
+  the reader is replacing has not been torn down server-side yet. It classified as a hard 5xx,
+  so every attempt dropped the pinned post-redirect URL and re-resolved through the portal —
+  latency per attempt, plus the second request against the very origin that has no room for it,
+  which is the 519ae26e reasoning left incomplete (a permanent 509 ground through 13 attempts
+  with 12 portal re-resolves at zero backoff, because ~8 MB of progress per cycle reset the
+  unproductive streak every time). 509 now keeps the pin and pays the rate-limit streak and
+  backoff alongside 429/503, honouring Retry-After when sent, with the same bounded give-up
+  (#307 follow-up).
 
 ## [6.15.1] - 2026-08-08
 
