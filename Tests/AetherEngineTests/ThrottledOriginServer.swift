@@ -254,7 +254,7 @@ final class ThrottledOriginServer: @unchecked Sendable {
             // established connection with an unfinished body, so the reader sees no bytes, no EOF
             // and no error. `stop()` is what releases this thread and the socket.
             if let silentAfter, served >= silentAfter {
-                while !stopped { usleep(50_000) }
+                while !stopped { usleep(200_000) }
                 return false
             }
             var n = Int(min(Int64(chunkBytes), remaining - served))
