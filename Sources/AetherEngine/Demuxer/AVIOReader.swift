@@ -210,7 +210,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // window peak is now bounded by construction at highWater plus one delivery's in-flight
     // overshoot, which subsumes the former winHardCap escape hatch and the realloc-doubling
     // peak it had to be sized against.
-    private static let winHighWater = 16 * 1024 * 1024
+    //
+    // Live raises the high water instead of changing the mechanism. Live connections are
+    // open-ended by design (no ranges to bound them), so the high-water end is the ONLY
+    // thing that ever terminates a healthy live connection — and "re-request at the
+    // frontier" is a lie to a live origin: the bytes broadcast during the drain are gone,
+    // so every cycle rejoined the stream on a corrupt TS packet. Worse, IPTV panels serve
+    // their ring buffer as a join burst at line rate on EVERY (re)connect, so a 16 MB cap
+    // made each reconnect the cause of the next one: burst to high water, end, drain ~8 MB
+    // losing that much realtime, reconnect, absorb the next burst. The live threshold is
+    // sized to absorb the burst ONCE; steady state then plateaus at burst size (arrival
+    // rate == media rate once the burst is over) with the connection never voluntarily
+    // ended. The end-and-refill stays, unchanged, as the memory backstop for a "live"
+    // source that sustainedly outruns realtime (a misdeclared VOD). 64 MB matches
+    // streamHighWater, the forward bound the engine already accepts for the other reader
+    // that cannot bound by range request.
+    private static let winHighWaterDefault = 16 * 1024 * 1024
+    private static let liveWinHighWaterDefault = 64 * 1024 * 1024
     private static let winLowWater = 8 * 1024 * 1024
     // #220: how much the persistent reader asks for at a time. Bounds a single request's
     // exposure by construction (an origin cannot serve more than it was asked for, whatever
@@ -493,6 +509,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// load. It is not a `LoadOptions` field either: #272 measured that a shorter threshold is worse
     /// under CPU starvation, and that conclusion is unchanged.
     private let connStallTimeout: TimeInterval
+    /// High-water mark this reader ends the connection at. Mode-dependent (live absorbs a
+    /// join burst the VOD value was never sized for — see the backpressure doc block) and
+    /// an init parameter for the same reason `connStallTimeout` is one: a process-wide
+    /// hook would leak into whatever suite runs concurrently. The shipped values are the
+    /// two statics above.
+    private let winHighWater: Int
     private var throttleVClockNs: UInt64 = 0
     private let throttleLock = NSLock()
 
@@ -500,7 +522,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// origin at once and the line used to name none of them.
     private let label: String
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil) {
         self.url = url
         self.label = label
         self.extraHeaders = extraHeaders
@@ -513,6 +535,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.throttleKbps = AetherEngine.sourceThrottleKbpsForTesting
         self.backoffScale = AetherEngine.reconnectBackoffScaleForTesting
         self.connStallTimeout = max(0.05, connStallTimeout)
+        self.winHighWater = max(1, windowHighWater
+            ?? (isLive ? Self.liveWinHighWaterDefault : Self.winHighWaterDefault))
     }
 
     /// Slow-CDN simulation: hold delivered bytes to `throttleKbps` by sleeping the demux thread before the
@@ -2099,7 +2123,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         var overshootToLog: Int64? = nil
         if connEndedByBackpressure {
             postEndDeliveryBytes += Int64(count)
-            if postEndDeliveryBytes > Int64(Self.winHighWater), !postEndOvershootLogged {
+            if postEndDeliveryBytes > Int64(winHighWater), !postEndOvershootLogged {
                 postEndOvershootLogged = true
                 overshootToLog = postEndDeliveryBytes
             }
@@ -2143,7 +2167,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // the frontier once the consumer drains below low water.
         var toCancel: URLSessionDataTask?
         let ahead = window.count - max(0, Int(position - winStart))
-        if ahead > Self.winHighWater, !connEnded, !isClosed, activeTask != nil {
+        if ahead > winHighWater, !connEnded, !isClosed, activeTask != nil {
             connEndedByBackpressure = true
             connEnded = true
             toCancel = activeTask

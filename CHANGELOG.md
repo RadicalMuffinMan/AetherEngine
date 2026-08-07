@@ -10,7 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A live source is no longer stuttered on a steady cycle by the reader's own backpressure.**
+  The 16 MB high-water end (#310) had no live branch, and live connections are open-ended by
+  design, so ending at high water was the only thing that ever terminated a healthy live
+  connection. Each end drained ~8 MB to low water and re-requested "at the frontier" — a byte
+  offset that means nothing to a live origin — so everything broadcast during the drain was lost
+  and the demuxer rejoined on a corrupt TS packet. And it never happened once: IPTV panels serve
+  their ring buffer as a join burst at line rate on every (re)connect, so the burst refilled the
+  window immediately and each reconnect caused the next one, forever (a field trace against an
+  Xtream panel cycled every ~9.5 MB with a `Packet corrupt` and an h264 decode error per cycle;
+  the loopback repro accepts 17 MB of a 24 MB burst, parks at 16.9 MB and holds no connection).
+  Live readers now run a 64 MB high water (matching `streamHighWater`, the bound the engine
+  already accepts for the other reader that cannot bound by range request): the join burst is
+  absorbed once, steady state plateaus at burst size with the connection never voluntarily
+  ended, and the end-and-refill survives unchanged as the memory backstop for a "live" source
+  that sustainedly outruns realtime.
 
 ## [6.15.1] - 2026-08-08
 
