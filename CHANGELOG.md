@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.12.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.12.0))
+
 ### Fixed
 
 - **A source connection that dies silently is now noticed on wall-clock time instead of on
