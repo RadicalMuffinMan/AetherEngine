@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.14.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.14.0))
+
 ### Fixed
 
 - **`LoadOptions.externalSubtitles` was dropped on the `nativeRemoteHLS` bypass (#316).** The branch
