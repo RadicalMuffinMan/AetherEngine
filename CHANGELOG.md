@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.8.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.8.0))
+
 ### Added
 
 - **The subtitle-resolution statement says when determination reaches the playhead, instead of
@@ -22,6 +28,15 @@ the public-API contract.
   prefetch- or EOF-bounded span reaches the playhead, once per decoded run. No claim changed: it
   prints the statement the tick already builds, so `via=pump` still cannot state coverage, and on a
   link that cannot feed both readers the line correctly stays absent (#318).
+
+### Changed
+
+- **The software path's rejected-SAR line names the axis the ratio came from.** A rejected sample
+  aspect ratio never latches, so the latch line that names frame / ctx / stream could not fire for
+  it and the rejection line was the only line a bad ratio produced. It now carries the same three
+  axes. On MPEG-TS, where no container ratio exists, `stream=` is the parser's reading of the SPS
+  VUI at open time and `frame=` is the SPS in force for that frame, so a disagreement between them
+  is the fingerprint of a declaration that moved between the join and the frame (#290).
 
 ## [6.7.0] - 2026-08-04
 
