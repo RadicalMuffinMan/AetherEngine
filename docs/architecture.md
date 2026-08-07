@@ -148,6 +148,7 @@ Sources/AetherEngine/
 ├── NativeVideoFrameTime.swift               Per-muxed-frame presentation times on both axes (#260): the value type + observer typealias; emitted from HLSSegmentProducer.finalizeAndWriteVideo
 ├── SoftwareVideoFrameTime.swift             Per-enqueued-frame presentation time on the software path (#311): one axis (source == presentation there), plus a flush generation that a seek moves; emitted from SampleBufferRenderer.flushFrame
 ├── AetherEngine+FrameTimes.swift            Public installers for both per-frame time observers (native re-armed on each session, software on each host) plus `softwarePresentationTimebase`, the render synchronizer's clock
+├── FrameTimeSequence.swift                  Process-wide monotonic allocator behind NativeVideoFrameTime.epoch and SoftwareVideoFrameTime.generation (#314), so the ordering rule holds across a load() and not only inside one session
 ├── PlayerState.swift                        PlaybackState, PlaybackPhase, VideoFormat, PlaybackBackend, LoadOptions, SourceProbe, TrackInfo, FontAttachment, MediaMetadata, SubtitleCue, SubtitleImage
 ├── LiveReloadPolicy.swift                   Pure decision functions for live reloads: rejoin at the live edge (no stale resume position), skip the pre-readiness zero seek
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)

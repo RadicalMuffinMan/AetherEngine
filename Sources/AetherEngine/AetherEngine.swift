@@ -4610,6 +4610,10 @@ public final class AetherEngine: ObservableObject {
             nativeHost = nil
             currentAVPlayer = nil
         }
+        // #314: detach before stop() so a pump still unwinding does not report frames into a table the
+        // host has already retired for the next item. Only the session's slot is cleared; the engine
+        // keeps the host's observer and re-arms the next session with it in load().
+        nativeVideoSession?.setNativeVideoFrameTimeObserver(nil)
         nativeVideoSession?.stop()
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false
@@ -4633,6 +4637,9 @@ public final class AetherEngine: ObservableObject {
         }
 
         softwareCancellables.removeAll()
+        // #314: same detach on the software path, where the outgoing renderer's decode thread is what
+        // can still hand a frame over while the next host comes up.
+        softwareHost?.setVideoFrameTimeObserver(nil)
         softwareHost?.stop()
         softwarePiPSource = nil
         softwareHost = nil

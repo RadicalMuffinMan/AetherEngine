@@ -216,13 +216,16 @@ player.$currentAVPlayerItem                       // items swap in place; this i
 
 // Per muxed video frame, on both axes at once. Called on the producer's pump thread in DECODE order,
 // so `source` is not monotonic under B-frames; sort before using it as a frame-boundary list.
+// `epoch` rises strictly, process-wide: a restart and a load() both continue the sequence, so
+// "a higher epoch retires my older entries" separates one item's frames from the next's.
 player.setNativeVideoFrameTimeObserver { frame in
     frame.source; frame.item; frame.segmentIndex; frame.isKeyframe; frame.epoch
 }
 
 // The same question on the software path (#311), where the engine decodes and enqueues the source
 // timestamp unchanged: one axis, no segments, and the reports arrive past the reorder buffer in
-// ASCENDING presentation order. `generation` moves on every renderer flush, i.e. on a seek.
+// ASCENDING presentation order. `generation` moves on every renderer flush, i.e. on a seek, and
+// rises across a load() the same way `epoch` does.
 player.softwarePresentationTimebase               // the master clock, on the source axis
 player.setSoftwareVideoFrameTimeObserver { frame in
     frame.presentation; frame.generation
