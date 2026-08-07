@@ -29,6 +29,14 @@ struct RollingWindow<T: AdditiveArithmetic> {
     /// Populated slot count; sampler keeps instant-bitrate nil until count >= 2 (one sample = zero-second delta).
     var count: Int { filled ? capacity : index }
 
+    /// Populated slots carrying a non-zero sample. The playback reader fetches a large range and then
+    /// parks on backpressure until low water, so on a fast link most slots in the window are empty and
+    /// a mean over `count` measures the park rather than the link (#306 follow-up).
+    var activeCount: Int {
+        let active = filled ? buffer : Array(buffer.prefix(index))
+        return active.filter { $0 != .zero }.count
+    }
+
     mutating func reset() {
         for i in 0..<buffer.count { buffer[i] = .zero }
         index = 0
@@ -153,6 +161,25 @@ final class LiveTelemetrySampler {
         task = nil
     }
 
+    /// #306 follow-up: the rate the link delivers at, measured over the seconds bytes actually arrived
+    /// in rather than over wall-clock seconds.
+    ///
+    /// The playback reader fetches a large range and then parks on backpressure until low water, so on
+    /// a fast link most ticks of a window carry nothing at all: measured over a local origin, a healthy
+    /// 2.8 Mbps VP9 session pulled 16.4 MB in one tick and then sat at exactly zero for the next 23,
+    /// while the reader's runway drained from 16.0 to 8.3 MB. A wall-clock mean reports 0.00 Mbps
+    /// through all of that, which is the false-with-confidence zero #306 was filed about, one field
+    /// over. Dividing by the active seconds instead reports the link, and under-reports it at worst,
+    /// since a burst that finishes inside a tick is still charged the whole second.
+    ///
+    /// nil when the window holds fewer than two samples (a single sample spans no time) or when nothing
+    /// arrived in it at all. That mirrors the native path, where `observedBitrate` is published only
+    /// when it is finite and positive: "not measurable right now" is a gap, never a zero.
+    static func observedTransferMbps(windowBytes: Int64, activeSeconds: Int, samples: Int) -> Double? {
+        guard samples >= 2, activeSeconds > 0, windowBytes > 0 else { return nil }
+        return Double(windowBytes) * 8.0 / Double(activeSeconds) / 1_000_000.0
+    }
+
     private func tick() async {
         guard let engine = engine else { return }
 
@@ -171,6 +198,11 @@ final class LiveTelemetrySampler {
         } else {
             instantBitrateMbps = nil
         }
+
+        let observedTransferMbps = Self.observedTransferMbps(
+            windowBytes: byteWindow.sum,
+            activeSeconds: byteWindow.activeCount,
+            samples: byteWindow.count)
 
         let averageBitrateMbps: Double?
         if let start = sessionStartTime {
@@ -258,7 +290,9 @@ final class LiveTelemetrySampler {
             displayCushionSeconds = software.displayCushionSeconds
             accumulatedFrameDelaySeconds = software.accumulatedFrameDelaySeconds
             readerWindowAheadBytes = software.readerWindowAheadBytes
-            networkThroughputMbps = instantBitrateMbps  // SW: demuxer pulls the same bytes
+            // SW: the demuxer pulls the bytes itself, so the rate comes from its counter rather than
+            // from an access log. Over active seconds, not wall-clock ones: see observedTransferMbps.
+            networkThroughputMbps = observedTransferMbps
             networkTransferredBytes = demuxerBytes
             avSyncGapMs = nil          // HLSSegmentProducer doesn't run on SW path
             // Deliberately nil, see LiveTelemetry: the software pump is renderer-back-pressured, so

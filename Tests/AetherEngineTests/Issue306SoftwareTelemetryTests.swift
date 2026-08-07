@@ -46,6 +46,59 @@ struct Issue306SoftwareTelemetryTests {
         #expect(AetherEngine.pumpBytesFetched(software: 0, native: 8_192) == 0)
     }
 
+    // MARK: - The rate the link delivers at
+
+    /// Retest finding: the Network section only read sensibly on a struggling session. The reader
+    /// fetches a large range and parks on backpressure until low water, so on a fast link the window is
+    /// mostly empty. Measured over a local origin, a healthy 2.8 Mbps VP9 session pulled 16.4 MB in one
+    /// tick and then exactly nothing for 23 more, so a wall-clock mean published 0.00 Mbps while the
+    /// stream played perfectly, one field over from the zero #306 was filed about.
+    @Test("a parked reader reports the rate it delivered at, not a wall-clock mean over the park")
+    func burstyLinkReportsItsDeliveredRate() {
+        // The measured shape: 16.4 MB in one tick of a ten-second window, then silence.
+        let burst = LiveTelemetrySampler.observedTransferMbps(
+            windowBytes: 17_196_646, activeSeconds: 1, samples: 10)
+        #expect(burst != nil)
+        #expect((burst ?? 0) > 100.0, "a loopback burst reports its own rate, got \(burst ?? -1) Mbps")
+
+        // The same bytes charged to every second of the window is the reading that used to ship, and
+        // it is the one a host renders as a near-dead link.
+        let wallClockMean = Double(17_196_646) * 8.0 / 10.0 / 1_000_000.0
+        #expect((burst ?? 0) > wallClockMean)
+    }
+
+    /// A paced origin fills every tick, so both readings coincide there. This is the arm that must not
+    /// move: the reporter's throttled run is the one the section was already legible on.
+    @Test("a steadily paced link reads the same either way")
+    func pacedLinkIsUnchanged() {
+        // 2 Mbps for ten seconds: 250 000 bytes in each of ten ticks.
+        let rate = LiveTelemetrySampler.observedTransferMbps(
+            windowBytes: 2_500_000, activeSeconds: 10, samples: 10)
+        #expect(abs((rate ?? 0) - 2.0) < 0.001)
+    }
+
+    /// Nothing arrived in the whole window: that is a gap, not a rate of zero. A host cannot tell a
+    /// confident 0.0 Mbps from a dead link, and the reporter's overlay renders any non-nil number.
+    @Test("an idle window publishes nil rather than zero")
+    func idleWindowPublishesNil() {
+        #expect(LiveTelemetrySampler.observedTransferMbps(
+            windowBytes: 0, activeSeconds: 0, samples: 10) == nil)
+        // And a single sample spans no time at all, whatever it carries.
+        #expect(LiveTelemetrySampler.observedTransferMbps(
+            windowBytes: 4_096, activeSeconds: 1, samples: 1) == nil)
+    }
+
+    /// The window counts the slots that carried bytes, not the slots that exist.
+    @Test("the rolling window separates the seconds that carried bytes")
+    func rollingWindowCountsActiveSlots() {
+        var window = RollingWindow<Int64>(capacity: 10, zero: 0)
+        window.push(17_196_646)
+        for _ in 0..<9 { window.push(0) }
+        #expect(window.count == 10)
+        #expect(window.activeCount == 1)
+        #expect(window.sum == 17_196_646)
+    }
+
     // MARK: - The software snapshot
 
     @Test("a software tick publishes cushion, reader runway and dropped frames")

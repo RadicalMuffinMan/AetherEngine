@@ -28,12 +28,21 @@ public struct LiveTelemetry: Equatable, Sendable {
     /// #306: bytes the playback reader has fetched but the demuxer has not consumed yet, i.e. the
     /// runway that exists ahead of the read cursor. Both paths; nil for sources with no `AVIOReader`
     /// (disc, custom provider). Bytes rather than seconds on purpose: seconds would need a bitrate
-    /// estimate baked in, and a host that wants one can divide by the throughput in this same snapshot.
+    /// estimate baked in, and a host that wants one divides by `averageBitrateMbps` from this same
+    /// snapshot. Not by `networkThroughputMbps`: that is the rate the link delivers at, so it answers
+    /// how long the runway took to fetch, not how long it will last at playback rate.
     public let readerWindowAheadBytes: Int?
     /// #306: the display's accumulated late-frame delay on the software path, nil on native and before
     /// the first metrics read. Cumulative for the session, so a rate comes from differencing two ticks.
     public let accumulatedFrameDelaySeconds: Double?
     public let cachedBytes: Int64?
+    /// The rate the source link delivers at while it is delivering, so it stays comparable between the
+    /// two paths: `observedBitrate` from the access log on native, and on the software path the
+    /// demuxer's own byte counter over the seconds bytes arrived in (#306 follow-up). Not a wall-clock
+    /// mean: the reader fetches a large range and parks on backpressure until low water, so a healthy
+    /// fast link is idle for most of a window and a mean over it would report 0.0 Mbps on a session
+    /// that is playing perfectly. nil when nothing arrived in the window at all, which is the honest
+    /// reading for "not measurable right now"; it is never zero to mean that.
     public let networkThroughputMbps: Double?
     public let networkTransferredBytes: Int64?
     public let avSyncGapMs: Double?
