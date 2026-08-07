@@ -29,6 +29,23 @@ the public-API contract.
 - **A VOD session whose readError revive cap is exhausted surfaces `onVODSourceFailed`**
   instead of dying silently with AVPlayer parked in `waitingToPlay` forever (#169).
 
+### Changed
+
+- **The persistent reader ends its connection at the window high water instead of suspending
+  the data task** (#310). A suspended task holds a dormant established flow whose closed
+  receive window sits unread for as long as the consumer takes to drain, roughly 100 s per
+  cycle at 1 Mbps and indefinitely while paused. On tvOS and iOS, where TCP for
+  Network.framework flows runs in the app process, that dormant state correlates
+  dose-response by media bitrate with 10 to 80 s episodes in which every nw flow in the
+  process goes deaf at once: established WebSockets time out unACKed and no new handshake
+  completes, while raw BSD sockets from the same process keep working. The reader now either
+  has an actively delivering connection or none at all, and the low-water frontier refill
+  re-requests exactly where delivery stopped, so nothing is discarded and nothing is
+  re-fetched. A paused player holds no connection. The cost is one extra range request per
+  drain cycle. The `winHardCap` escape hatch and the suspend machinery are gone with it, and
+  the memprobe reports `Parked=` (backpressure-ended, refill pending) in place of `Susp=` and
+  `PostMB=`. Reported and field-verified over 71 minutes on two Apple TV 4K by @rrgomes.
+
 ## [6.10.0] - 2026-08-07
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.10.0))

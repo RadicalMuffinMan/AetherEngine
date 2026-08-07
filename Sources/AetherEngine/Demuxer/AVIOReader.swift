@@ -333,6 +333,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// winCond-guarded, cleared by `startPersistentConnection`.
     private var connEndedByBackpressure = false
 
+    /// #310: bytes that arrived after `connEndedByBackpressure` was set, i.e. after our own
+    /// cancel, and whether the one-shot "the cancel did not take" line has been emitted for
+    /// this generation. Both winCond-guarded, both cleared by `startPersistentConnection`.
+    private var postEndDeliveryBytes: Int64 = 0
+    private var postEndOvershootLogged = false
+
     /// #220: last byte the live connection was asked for, nil when the request was open-ended
     /// (live sources, and any source whose total size is not resolved yet). winCond-guarded.
     private var connRangeEnd: Int64?
@@ -1835,6 +1841,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connEnded = false
         connEndedByBackpressure = false
         connEndedAtRangeEnd = false
+        postEndDeliveryBytes = 0
+        postEndOvershootLogged = false
         connRangeEnd = resolvedBound.map { offset + $0 - 1 }
         connStatus = 0
         connRetryAfter = 0
@@ -1914,6 +1922,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             lastFirstDataMs = firstDataMs ?? 0
         }
         let count = data.count
+        // #310: delivery that lands with the backpressure end ALREADY recorded, i.e. after our
+        // own cancel. A bounded in-flight tail is expected. A figure that keeps climbing is the
+        // witness that ending is as advisory as suspending was (#174 blocking, #220 suspend:
+        // each mechanism here has failed exactly this way once), and without a line naming it
+        // the next round would start from a memprobe and a guess. Counted before the append so
+        // it is attributable to the transport rather than to our own bookkeeping.
+        var overshootToLog: Int64? = nil
+        if connEndedByBackpressure {
+            postEndDeliveryBytes += Int64(count)
+            if postEndDeliveryBytes > Int64(Self.winHighWater), !postEndOvershootLogged {
+                postEndOvershootLogged = true
+                overshootToLog = postEndDeliveryBytes
+            }
+        }
         let base = window.count
         window.count = base + count
         window.withUnsafeMutableBytes { dst in
@@ -1967,6 +1989,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 + "connection, will re-request at the frontier once the consumer drains",
                 category: .demux)
             toCancel.cancel()
+        }
+        if let overshootToLog {
+            EngineLog.emit(
+                "[AVIOReader] \(label) gen=\(generation) \(overshootToLog / 1024 / 1024)MB delivered "
+                + "AFTER the backpressure end; the cancel is not stopping this transport",
+                category: .demux)
         }
         if let firstDataMs {
             // #93/#96 residual: a slow first-data gap is release-visible so a device trace can pair it
