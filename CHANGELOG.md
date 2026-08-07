@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **An origin refusing every range refill no longer spins the reader in an unbounded
+  reconnect spiral.** A connection that ended in error without delivering a byte of its
+  generation was treated as a benign reposition: `seekReconnect` cleared the unproductive
+  streak and applied no backoff, so a connection-capped origin answering 500 at a 32 MiB
+  range boundary produced ~15 reconnects/s (925 in 60 s observed) until the segment
+  provider tore the demuxer down from outside. Such connections now take the failure
+  ladder: status accounting, Retry-After, exponential backoff, a `.reconnecting` network
+  phase, and a bounded give-up. The previously silent non-200/206 response rejection is
+  now logged with its status and offset.
+- **A pinned post-redirect URL is dropped on hard 5xx answers and on repeated zero-byte
+  failures.** Redirect targets that expire per connection (Xtream-style aggregators)
+  answered every later range with 500 from the pinned URL; only auth-expiry statuses
+  (401/403/404/410) invalidated the pin. The reader now falls back to the source URL for
+  a fresh redirect (503 keeps the pin — that is rate limiting, #71).
+- **A VOD session whose readError revive cap is exhausted surfaces `onVODSourceFailed`**
+  instead of dying silently with AVPlayer parked in `waitingToPlay` forever (#169).
 
 ## [6.10.0] - 2026-08-07
 
