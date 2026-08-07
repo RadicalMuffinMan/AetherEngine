@@ -65,6 +65,39 @@ struct Issue316BypassExternalSubtitleTests {
         #expect(merged.map(\.isExternal) == [true, false])
     }
 
+    /// With a proxy standing, the sidecar is AVPlayer's to draw. Starting the overlay decode as well
+    /// would render the same cues twice, and only the rendition survives PiP / AirPlay.
+    @Test("Selecting a proxied sidecar drives media selection, not the overlay decode")
+    func selectingAnInjectedTrackSkipsTheSidecarDecode() async throws {
+        let engine = try AetherEngine()
+        _ = try await engine.load(
+            url: Self.deadEndURL,
+            options: LoadOptions(nativeRemoteHLS: true, externalSubtitles: [Self.sidecar("English", "en")]))
+        let id = AetherEngine.externalSubtitleTrackIDBase
+        engine.injectedSubtitleRenditionNames = [id: "English"]
+
+        engine.selectSubtitleTrack(index: id)
+
+        #expect(engine.activeSubtitleTrackIndex == id)
+        #expect(engine.isSubtitleActive)
+        #expect(engine.loadedSidecarURL == nil, "the overlay decode must not have started")
+        #expect(!engine.isLoadingSubtitles)
+    }
+
+    /// Contrast: without a proxy the same track is the overlay's, exactly as #88 has always had it.
+    @Test("Without a proxy the same selection still takes the sidecar path")
+    func selectingWithoutProxyUsesTheSidecar() async throws {
+        let engine = try AetherEngine()
+        _ = try await engine.load(
+            url: Self.deadEndURL,
+            options: LoadOptions(nativeRemoteHLS: true, externalSubtitles: [Self.sidecar("English", "en")]))
+
+        engine.selectSubtitleTrack(index: AetherEngine.externalSubtitleTrackIDBase)
+
+        #expect(engine.loadedSidecarURL?.lastPathComponent == "en.srt")
+        #expect(engine.isLoadingSubtitles)
+    }
+
     /// A second surfacing (the readiness retry) must not stack duplicate renditions.
     @Test("Re-surfacing replaces the previous renditions instead of appending to them")
     func resurfacingReplacesRenditions() {
