@@ -12,6 +12,32 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.13.0] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.13.0))
+
+### Added
+
+- **`hasFirstFrameReadyForDisplay`: the running path has a picture, which readiness never said.**
+  `isSessionReady` is `AVPlayerItem.readyToPlay`, which AVFoundation reaches before the layer holds
+  a frame and which stays true across a seek, so a host approximating presentation from it lifts
+  its black cover onto black, and a load opened paused lifts it before there is anything to see.
+  The signal that can answer the question was internal: `nativeHost` is not public, and the
+  software path had no equivalent at all. The new `@Published` property folds
+  `AVPlayerLayer.isReadyForDisplay` on the native path and
+  `AVSampleBufferDisplayLayer.isReadyForDisplay` on the software one (not KVO-observable there,
+  AVFoundation posts a notification for it; below tvOS/iOS 17.4 and macOS 14.4 the property does
+  not exist and the fallback is the first frame handed to the renderer, one hop earlier).
+  It is latched for the load rather than mirrored as a level: an item swap costs the layer its
+  picture for ~40 ms even when the swap is the in-place handover that exists to be invisible, so
+  the seams that reuse a running host hold the latch, while a rebuild through `load()` resets it
+  with the item. And it states that the pipeline has a frame ready, not that a viewer sees one:
+  both layers reach `isReadyForDisplay` while in no view hierarchy at all, which is the case
+  #298 is about. For "has this seek reached the screen", `SeekEvent.landed` remains the answer,
+  since a seek keeps the previous frame up and the layer never stops being ready for display
+  (#315, reported by [@edde746](https://github.com/edde746)).
+  `aetherctl play` prints the edge (`FIRSTFRAME ... t+`) and carries `rfd=y/n` per telemetry tick.
+
 ## [6.12.1] - 2026-08-07
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.12.1))
