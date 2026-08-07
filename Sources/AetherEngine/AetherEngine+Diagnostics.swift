@@ -137,8 +137,7 @@ extension AetherEngine {
                 // shape that lets a connection ignoring the suspend keep filling the window,
                 // and the #174 field crash it was built against (HTTPS origin, boringssl in
                 // the stack) was on this path. Reporting software-only hid that.
-                let pumpWin = self.softwareHost?.ioWindowDiagnostics
-                    ?? self.nativeVideoSession?.demuxer?.ioWindowDiagnostics
+                let pumpWin = self.pumpIOWindow
                 let prefetchWin = self.subtitleForwardPrefetchDemuxer?.ioWindowDiagnostics
                 let readerStr = Self.readerWindowFragment(
                     pump: pumpWin, prefetch: prefetchWin,
@@ -329,9 +328,30 @@ extension AetherEngine {
     }
 
 
-    /// `Demuxer.avioBytesFetched` via HLSVideoEngine. Used by `LiveTelemetrySampler` for instant + average bitrate. 0 on SW path or pre-start.
+    /// Lifetime bytes the session's playback reader pulled from the source. Feeds the sampler's
+    /// instant + average bitrate and `LiveTelemetry.demuxerBytesFetched`. 0 before a reader exists.
+    ///
+    /// #306: software first, native second, the same precedence the memprobe has always read the pump
+    /// with. A software session owns no `HLSVideoEngine`, so the native-only form returned 0 for the
+    /// whole session and every byte-derived figure a host can show (bitrate, throughput, transferred)
+    /// read zero on the one path that carries the exotic content.
     var demuxerBytesFetched: Int64 {
-        nativeVideoSession?.demuxerBytesFetched ?? 0
+        Self.pumpBytesFetched(software: softwareHost?.demuxerBytesFetched,
+                              native: nativeVideoSession?.demuxerBytesFetched)
+    }
+
+    /// #306: the precedence itself, as a function, so the ordering is assertable without a live
+    /// session on either path. Software first: only one of the two exists per session, and a
+    /// software session's counter is the one that used to be dropped.
+    nonisolated static func pumpBytesFetched(software: Int64?, native: Int64?) -> Int64 {
+        software ?? native ?? 0
+    }
+
+    /// The playback pump reader's sliding-window snapshot, from whichever path owns the reader.
+    /// nil for sources with no `AVIOReader` (disc, custom provider) and before the reader exists.
+    /// Named for the pump to keep it apart from the subtitle side reader, which has a window of its own.
+    var pumpIOWindow: (windowBytes: Int, aheadBytes: Int, suspended: Bool, postSuspendBytes: Int64)? {
+        softwareHost?.ioWindowDiagnostics ?? nativeVideoSession?.demuxer?.ioWindowDiagnostics
     }
 
     /// Resident bytes in the loopback HLS segment cache. nil when no native session is active.

@@ -31,6 +31,24 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvr
     return box.value ?? 1
 }
 
+/// #306: the network half of the 1 Hz snapshot, appended to the transport line. Every field is
+/// omitted where the snapshot has none, so the software path's numbers can be read off a run instead
+/// of inferred from a memprobe half a minute wide. `rx` is the reader's lifetime pull, `ahead` the
+/// part of it the demuxer has not consumed, and `cushion` the decoded video queued past the clock.
+@MainActor
+private func networkTelemetryFragment(_ telemetry: LiveTelemetry?) -> String {
+    guard let telemetry else { return "" }
+    var out = ""
+    if let mbps = telemetry.networkThroughputMbps { out += String(format: " net=%.2fMbps", mbps) }
+    if let rx = telemetry.networkTransferredBytes { out += String(format: " rx=%.1fMB", Double(rx) / 1_048_576) }
+    if let ahead = telemetry.readerWindowAheadBytes { out += String(format: " ahead=%.1fMB", Double(ahead) / 1_048_576) }
+    if let cushion = telemetry.displayCushionSeconds { out += String(format: " cushion=%.2fs", cushion) }
+    if let fwd = telemetry.forwardBufferSeconds { out += String(format: " fwd=%.1fs", fwd) }
+    if let dropped = telemetry.droppedFrameCount { out += " drop=\(dropped)" }
+    if let delay = telemetry.accumulatedFrameDelaySeconds { out += String(format: " delay=%.2fs", delay) }
+    return out
+}
+
 /// Decoded-PCM continuity monitor fed by the engine audio tap (#95 infrastructure).
 /// Tracks per-buffer source-PTS abutment (gap = next.start - prev.end) and the running
 /// end-of-enqueued-audio position, so the telemetry loop can print the audio lead
@@ -270,6 +288,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
             // Decoded-audio lead over the master clock (source axis). Near-zero = renderer starving.
             line += String(format: " alead=%.2f abufs=%d", end - engine.sourceTime, monitor.bufferCount)
         }
+        line += networkTelemetryFragment(engine.liveTelemetry)
         print(line)
         // DVR-seek smoke: rewind 20 s mid-session, then live-edge return 15 s later, so the
         // telemetry shows whether the clock and the audio look-ahead recover from both.
