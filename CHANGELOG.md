@@ -10,7 +10,25 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A source connection that dies silently is now noticed on wall-clock time instead of on
+  consumer cadence.** `connStallTimeout` was evaluated in exactly one place, the read loop's
+  forward wait, so a transport that died while the sliding window could still serve reads was
+  detected only once a consumer happened to block on it: `bytesFetched` sat frozen for 4.5
+  minutes across a pause in the field report, and the reconnect fired only after the window had
+  drained. A generation with an installed transfer and no delivery for `connStallTimeout` is now
+  ended by a delivery-gap watchdog, whether or not a read is waiting on it, and the gap is named
+  in the log. The watchdog only ENDS: opening connections stays with the read thread, so a paused
+  player still holds no flow and cannot be driven into a timer-paced reconnect loop (#309).
+- **A faulted connection is replaced while read-ahead remains, not once it is spent.** The
+  frontier refill fired only for planned ends (a range delivered in full, a high-water end), so a
+  generation that ended in fault was replaced only after the window hit empty. The reader spent
+  its entire read-ahead before asking for a replacement and playback rejoined the clock with a
+  burst (+17 MB in one interval, 389 dropped frames in the field trace). Any reason for having no
+  flow now refills at low water; a fault additionally pays the failure ladder (status accounting,
+  pin invalidation, bounded give-up) with its backoff expressed as a next-attempt time rather than
+  as a sleep, so the demuxer keeps being served from the window between attempts (#309).
 
 ## [6.11.0] - 2026-08-07
 

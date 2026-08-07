@@ -224,8 +224,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private static let winTrimBatch = 4 * 1024 * 1024
     // Forward seeks within this distance keep the live connection; beyond it, reconnect.
     private static let seekKeepForwardLimit = 8 * 1024 * 1024
-    // CDN stall threshold: no bytes for this long triggers reconnect.
-    private static let connStallTimeout: TimeInterval = 20
+    // CDN stall threshold: no bytes for this long triggers reconnect. Instance-captured (see
+    // `connStallTimeout`) so tests can shorten it; the shipped value is this one.
+    private static let connStallTimeoutDefault: TimeInterval = 20
     // A reconnect that delivers at least this much counts as progress; resets streak.
     private static let minReconnectProgress: Int64 = 512 * 1024
     // Cap on CONSECUTIVE unproductive reconnects; resets on real progress.
@@ -338,6 +339,22 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// this generation. Both winCond-guarded, both cleared by `startPersistentConnection`.
     private var postEndDeliveryBytes: Int64 = 0
     private var postEndOvershootLogged = false
+
+    /// #309: when the current generation last delivered a byte, or when it started if it has
+    /// delivered none yet. The single input to the delivery-gap watchdog, and the reason that
+    /// watchdog can exist at all: the read loop's forward wait used to be the only place
+    /// `connStallTimeout` was ever evaluated, so a flow that died while the window could still
+    /// serve reads was noticed only once a consumer happened to block on it (observed in the field:
+    /// 4.5 minutes across a pause). The transport does not fill that gap either, since the
+    /// persistent request runs with `timeoutInterval = 0` on purpose. winCond-guarded.
+    private var lastDeliveryAt = DispatchTime.now()
+
+    /// #309: earliest time the read loop may replace a FAULTED connection from the serve path.
+    /// The failure ladder there cannot sleep (see `chargeFaultedRunwayRefill`), so its backoff is
+    /// a timestamp instead. `.distantPast` = attempt now, `.distantFuture` = the bounded give-up
+    /// has fired and only the empty-window path may still act. winCond-guarded, reset by
+    /// `startPersistentConnection`.
+    private var nextFaultedRefillAt = Date.distantPast
 
     /// #220: last byte the live connection was asked for, nil when the request was open-ended
     /// (live sources, and any source whose total size is not resolved yet). winCond-guarded.
@@ -465,6 +482,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let throttleKbps: Int
     /// TEST-ONLY reconnect-backoff scale (1.0 = real timing), captured once from the static hook at init.
     private let backoffScale: Double
+    /// Stall threshold this reader runs with: `connStallTimeoutDefault`, or the TEST-ONLY hook when
+    /// set. One value for both detectors, because they are one policy: a connection that has
+    /// delivered nothing for this long is replaced, whether or not a read is waiting on it (#309).
+    private let connStallTimeout: TimeInterval
     private var throttleVClockNs: UInt64 = 0
     private let throttleLock = NSLock()
 
@@ -484,6 +505,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.boundedInitialFetch = boundedInitialFetch.map { max(1, $0) }
         self.throttleKbps = AetherEngine.sourceThrottleKbpsForTesting
         self.backoffScale = AetherEngine.reconnectBackoffScaleForTesting
+        let stallOverride = AetherEngine.connStallTimeoutForTesting
+        self.connStallTimeout = stallOverride > 0 ? stallOverride : Self.connStallTimeoutDefault
     }
 
     /// Slow-CDN simulation: hold delivered bytes to `throttleKbps` by sleeping the demux thread before the
@@ -1284,30 +1307,49 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 unproductiveReconnects = 0      // real progress
                 rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
                 emitNetworkPhase(.flowing)      // recovered: source delivering again (#85)
-                // #220/#310: the connection ended on purpose — its range was delivered in
-                // full, or it was ended at high water so no suspended flow sits dormant —
-                // and the consumer has now drawn down far enough that the next one should
-                // already be in flight. Requesting at the frontier rather than at the read
-                // position keeps every delivered byte, and doing it here rather than on an
-                // empty window is what stops a planned end from becoming a stall.
-                // A frontier AT the end of the file is not a frontier. The range that ended was the
-                // last one, and requesting `bytes=<fileSize>-` asks for nothing: origins answer it
-                // with an empty 206, the reconnect resets `winStart` past the last byte, and the
-                // window that was about to be read is dropped for it. On a trailing `moov` that
-                // turned one connection into three, since the parse then had to re-fetch what it
-                // had just been handed. Live keeps the old behaviour: its length is not
-                // authoritative and its end moves.
+                // No flow installed and the consumer has drawn down to low water: request at the
+                // frontier. #220/#310 built this for PLANNED ends (a range delivered in full, a
+                // high-water end); #309 made it the rule for every reason there is no flow, because
+                // the exception was the second half of that report. A generation that ended in
+                // FAULT was replaced only once the window hit EMPTY, so the reader spent its whole
+                // read-ahead first and playback rejoined the clock with a burst (the field trace's
+                // +17 MB interval and 389 dropped frames). Which reason it was still decides the
+                // POLICY: a planned end costs nothing, a fault pays the ladder
+                // (`chargeFaultedRunwayRefill`).
+                //
+                // Requesting at the frontier rather than at the read position keeps every delivered
+                // byte. A frontier AT the end of the file is not a frontier: the range that ended
+                // was the last one, and requesting `bytes=<fileSize>-` asks for nothing: origins
+                // answer it with an empty 206, the reconnect resets `winStart` past the last byte,
+                // and the window that was about to be read is dropped for it. On a trailing `moov`
+                // that turned one connection into three. Live keeps the old behaviour: its length is
+                // not authoritative and its end moves.
                 var refillFrom: Int64? = nil
+                var refillFaulted = false
+                var refillStatus = 0
+                var refillRetryAfter: TimeInterval = 0
                 let undrained = window.count - max(0, Int(position - winStart))
                 let frontier = winStart + Int64(window.count)
-                if connEndedAtRangeEnd || connEndedByBackpressure, activeTask == nil,
-                   undrained <= Self.winLowWater,
+                if activeTask == nil, undrained <= Self.winLowWater,
                    isLive || fileSize <= 0 || frontier < fileSize {
-                    refillFrom = frontier
+                    if connEndedAtRangeEnd || connEndedByBackpressure {
+                        refillFrom = frontier
+                    } else if connEnded, Date() >= nextFaultedRefillAt {
+                        refillFrom = frontier
+                        refillFaulted = true
+                        refillStatus = connStatus
+                        refillRetryAfter = connRetryAfter
+                    }
                 }
                 winCond.broadcast()
                 winCond.unlock()
-                if let refillFrom { timedReconnect(seek: false, at: refillFrom) }
+                if let refillFrom {
+                    if !refillFaulted || chargeFaultedRunwayRefill(at: refillFrom, ahead: undrained,
+                                                                   status: refillStatus,
+                                                                   retryAfter: refillRetryAfter) {
+                        timedReconnect(seek: false, at: refillFrom)
+                    }
+                }
                 continue
             }
 
@@ -1348,7 +1390,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // Wait for the live connection to fill forward. A false return
                 // means connStallTimeout elapsed with no data (socket stall).
                 let waitStart = DispatchTime.now()
-                let signaled = winCond.wait(until: min(Date(timeIntervalSinceNow: Self.connStallTimeout), readDeadline))
+                let signaled = winCond.wait(until: min(Date(timeIntervalSinceNow: connStallTimeout), readDeadline))
                 winCond.unlock()
                 diag.recordStallWait(ms: msSince(waitStart), signaled: signaled)
                 // Check deadline before stall handling to avoid misrouting a
@@ -1489,11 +1531,68 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // without grinding a dead tuner for minutes.
     private static let reconnectMaxUnproductiveNeverProductive = 4
 
-    /// Exponential backoff (0.5s..8s) growing with streak; immediate on streak=0.
-    /// Sleeps in 0.1s slices so a close is honoured promptly.
-    private func backoffBeforeReconnect(streak: Int, retryAfter: TimeInterval) {
+    /// Exponential backoff (0.5s..8s) growing with streak; immediate on streak=0. How long the
+    /// ladder waits before its next attempt. Shared by the blocking backoff below and the
+    /// non-blocking one in `chargeFaultedRunwayRefill`, so both pace an origin identically.
+    private func backoffDelay(streak: Int, retryAfter: TimeInterval) -> TimeInterval {
         let expo = streak <= 0 ? 0.0 : min(Double(1 << min(streak, 4)) * 0.5, 8.0)
-        let total = min(max(expo, retryAfter), 15.0) * backoffScale
+        return min(max(expo, retryAfter), 15.0) * backoffScale
+    }
+
+    /// #309: account for replacing a FAULTED connection from the serve path, i.e. while the window
+    /// still holds read-ahead. Returns true when the caller should open the replacement.
+    ///
+    /// This is the same ladder the empty-window path runs (status accounting, pin invalidation,
+    /// bounded give-up), because a free reconnect off the books is exactly what #307 paid for. Two
+    /// deliberate differences:
+    ///
+    /// - It does not SLEEP. It runs on the demux thread with megabytes still resident, and a backoff
+    ///   sleep there would starve the demuxer of the very read-ahead that replacing early exists to
+    ///   protect. The wait is a next-attempt timestamp instead, so reads keep being served at full
+    ///   speed between attempts.
+    /// - It never returns the read as failed. A window that can still serve must not kill a session
+    ///   that still holds seconds of playback. At the cap it stops attempting (`.distantFuture`) and
+    ///   leaves termination to the empty-window ladder, where it has always lived.
+    ///
+    /// It also emits no `.reconnecting` phase: playback is uninterrupted here, and a phase that
+    /// flapped between `.flowing` and `.reconnecting` on every read would describe the reader's
+    /// bookkeeping rather than what the viewer sees. The empty-window path still emits it, which is
+    /// when playback genuinely starves. Demux-thread-only.
+    private func chargeFaultedRunwayRefill(at frontier: Int64, ahead: Int,
+                                           status: Int, retryAfter: TimeInterval) -> Bool {
+        let isRateLimited = (status == 429 || status == 503)
+        let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
+                                   : recordReconnectAndShouldGiveUp(status: status)
+        if giveUp {
+            winCond.lock()
+            nextFaultedRefillAt = .distantFuture
+            winCond.unlock()
+            EngineLog.emit(
+                "[AVIOReader] \(label) faulted refill exhausted at offset \(frontier) status=\(status);"
+                + " serving the remaining \(ahead / 1024)KB, then the read will fail",
+                category: .demux)
+            return false
+        }
+        let streak = isRateLimited ? rateLimitStreak : unproductiveReconnects
+        if !isRateLimited, unproductiveReconnects >= 2 {
+            invalidateResolvedURL(reason: "unproductive reconnect streak")
+        }
+        lastUnplannedReconnectAt = Date()
+        let delay = backoffDelay(streak: streak, retryAfter: retryAfter)
+        winCond.lock()
+        nextFaultedRefillAt = Date().addingTimeInterval(delay)
+        winCond.unlock()
+        EngineLog.emit(
+            "[AVIOReader] \(label) replacing a faulted connection at offset \(frontier) with"
+            + " \(ahead / 1024)KB of read-ahead left (streak=\(streak) status=\(status),"
+            + " next attempt in \(String(format: "%.1f", delay))s)",
+            category: .demux)
+        return true
+    }
+
+    /// Blocking form of the wait above: sleeps in 0.1s slices so a close is honoured promptly.
+    private func backoffBeforeReconnect(streak: Int, retryAfter: TimeInterval) {
+        let total = backoffDelay(streak: streak, retryAfter: retryAfter)
         if total <= 0 { return }
         var slept = 0.0
         while slept < total {
@@ -1848,6 +1947,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connRetryAfter = 0
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
+        lastDeliveryAt = connStartedAt       // #309: the gap is measured from here until data lands
+        nextFaultedRefillAt = .distantPast
         let oldTask = activeTask
         activeTask = nil
         winCond.broadcast()
@@ -1888,6 +1989,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.unlock()
 
         task.resume()
+        // #309: from here the generation is watched on wall-clock time, not on consumer cadence.
+        armDeliveryGapWatchdog(generation: generation, after: connStallTimeout)
         // #240: not DEBUG-only any more, and it names its reader. This is the line a field report
         // needs to answer "who is on the link": with bounded ranges every 32 MiB refill starts a
         // generation, so an unlabelled sequence of them reads like several concurrent connections
@@ -1895,6 +1998,64 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         EngineLog.emit(
             "[AVIOReader] \(label) conn start gen=\(generation) offset=\(offset)"
             + (resolvedBound.map { " len=\($0 / 1024 / 1024)MB" } ?? " open-ended"),
+            category: .demux)
+    }
+
+    /// #309: timer queue for the delivery-gap watchdog. Shared and serial: the work is one
+    /// timestamp comparison per armed generation and never touches the network.
+    private static let deliveryGapQueue = DispatchQueue(label: "aether.avio.delivery-gap")
+
+    /// #309: schedule the delivery-gap check for `generation`. One pending closure at a time per
+    /// generation: it either ends the connection or re-arms itself for the remaining gap, so a
+    /// healthy transfer costs one comparison per `connStallTimeout` instead of a repeating timer,
+    /// and a generation that has already ended arms nothing at all.
+    private func armDeliveryGapWatchdog(generation: Int, after delay: TimeInterval) {
+        Self.deliveryGapQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.checkDeliveryGap(generation: generation)
+        }
+    }
+
+    /// #309: end a generation that has an installed transfer and no delivery for
+    /// `connStallTimeout`. Same threshold and same action as the read loop's forward wait, with the
+    /// one precondition removed that made the field case invisible: that a consumer be blocked on
+    /// it. A window holding read-ahead, or a paused player holding all of it, no longer defers the
+    /// verdict.
+    ///
+    /// It ENDS, it never reconnects. Opening connections stays with the read thread, so a parked
+    /// consumer cannot be turned into a timer-driven reconnect loop (the #307 failure mode), and a
+    /// pause continues to hold no flow at all (the #310 invariant). The replacement is issued by
+    /// the read loop: at low water while read-ahead remains, immediately once the window is empty.
+    private func checkDeliveryGap(generation: Int) {
+        if isClosed { return }
+        winCond.lock()
+        // Nothing to watch: a newer generation owns the link, the connection already ended
+        // (delivered range, high-water end, transport error), or no transfer is installed.
+        guard generation == connGeneration, !connEnded, let task = activeTask else {
+            winCond.unlock()
+            return
+        }
+        let gap = Double(DispatchTime.now().uptimeNanoseconds - lastDeliveryAt.uptimeNanoseconds)
+            / 1_000_000_000
+        if gap < connStallTimeout {
+            winCond.unlock()
+            // Data landed since this closure was scheduled; wait out what is left of the window.
+            armDeliveryGapWatchdog(generation: generation, after: max(0.02, connStallTimeout - gap))
+            return
+        }
+        connEnded = true
+        activeTask = nil
+        let frontier = winStart + Int64(window.count)
+        let ahead = window.count - max(0, Int(position - winStart))
+        let sawData = connFirstDataSeen
+        winCond.broadcast()
+        winCond.unlock()
+        task.cancel()
+        // The witness the field case had no line for: `bytesFetched` sat frozen for minutes and
+        // nothing said so. Release-visible, and rare by construction (one per faulted generation).
+        EngineLog.emit(
+            "[AVIOReader] \(label) gen=\(generation) no delivery for \(String(format: "%.1f", gap))s"
+            + " at offset \(frontier) (\(ahead / 1024)KB read-ahead held,"
+            + " \(sawData ? "had delivered" : "never delivered") data); ending it",
             category: .demux)
     }
 
@@ -1913,6 +2074,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             winCond.unlock()
             return
         }
+        lastDeliveryAt = DispatchTime.now()   // #309: the delivery-gap watchdog's only input
         var firstDataMs: Double? = nil
         if !connFirstDataSeen {
             connFirstDataSeen = true

@@ -18,6 +18,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
         case status(Int, retryAfter: Int? = nil)
         case redirect(to: String)
         case dropConnection
+        /// #309: answer with the 206 header, deliver `afterBytes` of the promised body, then stop
+        /// writing WITHOUT closing the socket and without a FIN. The client keeps an established
+        /// connection that delivers nothing and never errors, which is the reader-observable state
+        /// behind #309 (the field case was a transport that died with URLSession surfacing nothing).
+        /// `afterBytes: 0` is the headers-but-no-body variant, i.e. a generation that never sees a
+        /// first byte.
+        case serveThenGoSilent(afterBytes: Int64)
     }
 
     let port: UInt16
@@ -191,9 +198,12 @@ final class ThrottledOriginServer: @unchecked Sendable {
         let requestIndex = _requestLog.count - 1
         lock.unlock()
 
+        var silentAfter: Int64? = nil
         switch respond(requestIndex, offset, path) {
         case .serve206:
             break
+        case .serveThenGoSilent(let afterBytes):
+            silentAfter = max(0, afterBytes)
         case .status(let code, let retryAfter):
             let header = "HTTP/1.1 \(code) Status\r\n"
                 + (retryAfter.map { "Retry-After: \($0)\r\n" } ?? "")
@@ -240,7 +250,15 @@ final class ThrottledOriginServer: @unchecked Sendable {
         let chunk = [UInt8](repeating: 0x55, count: chunkBytes)
         var served: Int64 = 0
         while served < remaining && !stopped {
-            let n = Int(min(Int64(chunkBytes), remaining - served))
+            // #309: the silent-death point. Neither close() nor shutdown(): the peer must keep an
+            // established connection with an unfinished body, so the reader sees no bytes, no EOF
+            // and no error. `stop()` is what releases this thread and the socket.
+            if let silentAfter, served >= silentAfter {
+                while !stopped { usleep(50_000) }
+                return false
+            }
+            var n = Int(min(Int64(chunkBytes), remaining - served))
+            if let silentAfter { n = Int(min(Int64(n), silentAfter - served)) }
             guard writeBody(fd, Array(chunk[0..<n])) else { return false }
             served += Int64(n)
             if throttleUs > 0 { usleep(throttleUs) }
