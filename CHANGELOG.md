@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.12.1] - 2026-08-07
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.12.1))
+
 ### Fixed
 
 - **The software path no longer reports 0.0 Mbps of throughput on a healthy session.**
