@@ -893,6 +893,14 @@ public final class AetherEngine: ObservableObject {
     /// ~13 exponential backoffs finish in test time instead of a minute of real sleeping.
     nonisolated(unsafe) static var reconnectBackoffScaleForTesting = 1.0
 
+    /// TEST-ONLY: overrides the reader's connection stall threshold in seconds (0 = the shipped
+    /// default). Read once by each `AVIOReader` at init, so set it before `load`/`start`. Lets the
+    /// #309 delivery-gap watchdog be exercised in test time instead of 20 s per case. Deliberately
+    /// NOT a `LoadOptions` field: #272 measured that a shorter threshold is WORSE under CPU
+    /// starvation (it redials exactly when there are no cycles to spare), and that conclusion is
+    /// unchanged. This is a test clock, not a tuning knob.
+    nonisolated(unsafe) static var connStallTimeoutForTesting: TimeInterval = 0
+
     /// Reads `AVPlayer.eligibleForHDRPlayback` and `AVPlayer.availableHDRModes` at call time.
     /// Eligibility is display-configuration aware on all platforms (its change notification fires
     /// on display connection/disconnection), so per-load reads pick up monitor changes; the value
