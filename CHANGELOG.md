@@ -10,7 +10,33 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`LoadOptions.externalSubtitles` was dropped on the `nativeRemoteHLS` bypass (#316).** The branch
+  returns from `load()` before the probe path registers the declaration, so a host that declared
+  sidecars on a remote HLS source got an empty `subtitleTracks` back, with no error and no log line
+  to tell a dropped option from a source that has no subtitles. The AE#154 reroute onto the same
+  bypass dropped them too, and the legible-group discovery would have overwritten them anyway: it
+  assigned `subtitleTracks` wholesale instead of merging.
+
+### Added
+
+- **Sidecar subtitles become real renditions on the `nativeRemoteHLS` bypass (#316).** Media
+  selection on an HLS asset comes from the playlist and nowhere else, so `addExternalSubtitleTrack`
+  could only ever drive the host overlay, which is not drawn once the picture leaves the host's view
+  hierarchy: PiP, AirPlay and a wired external display lost the subtitle, and for a Plex or Jellyfin
+  transcode told `subtitles=none` the sidecar is the only copy there is. For a VOD source the engine
+  now fetches the origin master, absolutises every variant, audio and key URI against it, adds one
+  `EXT-X-MEDIA:TYPE=SUBTITLES` per text sidecar (joining the origin's own group when it has one) and
+  serves that master from the loopback origin. The media never moves: AVPlayer still fetches all A/V
+  bytes from the origin, which is the property the bypass exists for (E-AC-3 / Atmos passthrough).
+  The tracks keep the external ids they were registered under, and selecting one drives
+  `AVMediaSelection` rather than the overlay, so the two cannot draw at once. Live playlists, bitmap
+  sidecars, an unrewritable playlist and a slow origin all keep the origin URL and overlay-only
+  subtitles; the load is never failed over this.
+- **`aetherctl play --sidecar <lang>=<path>`** declares sidecars at load, so the whole chain is
+  observable from the CLI (served master body, injected count, the `subs_N.m3u8` / `.vtt` fetches).
+  The end-of-run summary now also prints the settled subtitle track list and the active selection.
 
 ## [6.13.0] - 2026-08-07
 
