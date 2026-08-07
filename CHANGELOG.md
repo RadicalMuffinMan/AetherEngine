@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The software renderer's metrics read no longer fails to build against an SDK that isolates
+  `AVSampleBufferDisplayLayer` to the main actor.** `loadRenderMetrics()` read
+  `displayLayer.sampleBufferRenderer` and then suspended on that renderer's async accessor, so the
+  non-Sendable renderer left the main actor at the `await`, which region isolation rejects outright.
+  The accessor is main-actor isolated now. Every caller already was, so playback and telemetry
+  behave exactly as before (#313, reported and fixed by [@jihongboo](https://github.com/jihongboo)).
 
 ## [6.12.0] - 2026-08-07
 

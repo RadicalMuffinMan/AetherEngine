@@ -120,6 +120,12 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     /// nil where the metrics cannot be asked for: an OS predating the API, or the pre-tvOS-18 path
     /// where the queue target is the display layer itself rather than an `AVSampleBufferVideoRenderer`.
+    ///
+    /// #313: main-actor isolated, which costs no hop because every caller already is
+    /// (`SoftwarePlaybackHost`, the telemetry sampler). It keeps the read of the non-Sendable
+    /// `sampleBufferRenderer` and the suspension on its async accessor in one isolation domain: on an
+    /// SDK that isolates the layer to the main actor, that value otherwise crosses out of the domain
+    /// at the `await`, and region isolation makes that a build error, not a warning.
     @MainActor
     func loadRenderMetrics() async -> RenderMetrics? {
         guard #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) else { return nil }
