@@ -72,7 +72,9 @@ extension HLSVideoEngine {
         case .eof, .readError, .keyframeStarvation:
             return !sourceReopenable
         case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime:
-            // AE#222 rebuilds into the same provider with a primed muxer, so production continues.
+            // muxerFailed / needsAudioSampleEntryPrime: handleLiveMuxerFailure and the AE#222 arm rebuild
+            // the producer into the SAME provider, so an eager halt here would 503 the very provider the
+            // rebuild is about to serve; both arms halt themselves once their budget is exhausted.
             return false
         }
     }
@@ -95,6 +97,21 @@ extension HLSVideoEngine {
         return .none
     }
 
+    /// Live muxerFailed pure decision: the muxer died but the connection is healthy, so the arm rebuilds
+    /// the producer in place — bounded by PROGRESS, not per session: a rebuild that cut new segments since
+    /// the last death earns a fresh budget (an hours-long channel legitimately crosses several encoder
+    /// restarts), while `cap` consecutive barren deaths mean the source is not muxable as-is and the
+    /// session must halt production and delegate to host retune.
+    static func liveMuxerRebuildDecision(
+        continuationIndex: Int,
+        lastContinuationIndex: Int,
+        barrenCycles: Int,
+        cap: Int
+    ) -> (rebuild: Bool, newBarrenCycles: Int) {
+        let cycles = continuationIndex == lastContinuationIndex ? barrenCycles + 1 : 0
+        return (cycles < cap, cycles)
+    }
+
     func handlePumpFinished(_ prod: HLSSegmentProducer,
                                     reason: HLSSegmentProducer.PumpExitReason) {
         // #65 (VOD only): a broken backpressure wedge means AVPlayer is stuck behind a parked producer.
@@ -111,12 +128,17 @@ extension HLSVideoEngine {
             handleAudioSampleEntryPrimeNeeded(prod)
             return
         }
-        // #99 failure mode B: a VOD muxer death (e.g. first cut before any bridged audio packet, so
+        // #99 failure mode B: a muxer death (e.g. first cut before any bridged audio packet, so
         // mov_write_moov cannot build the dec3 box) previously had NO recovery arm; the session sat
-        // starved forever. Bounded revive through the normal restart path, which rebuilds the muxer
-        // and re-arms (post-EOF: rebuilds) the audio bridge.
-        if case .muxerFailed = reason, !isLiveSession {
-            handleVODMuxerFailure()
+        // starved forever. VOD: bounded revive through the normal restart path, which rebuilds the muxer
+        // and re-arms (post-EOF: rebuilds) the audio bridge. Live: the restart path is VOD-only (empty
+        // segmentPlan), so the live arm rebuilds the producer in place on the same connection instead.
+        if case .muxerFailed = reason {
+            if isLiveSession {
+                handleLiveMuxerFailure(prod)
+            } else {
+                handleVODMuxerFailure()
+            }
             return
         }
         // #126: a VOD pump that dies on a read error having produced NOTHING (no packets
@@ -168,7 +190,7 @@ extension HLSVideoEngine {
         }
         switch reason {
         case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime:
-            // needsAudioSampleEntryPrime never reaches here (its arm above returns first).
+            // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
             return
         case .sourceReplay:
             // Server restarted stream from beginning (Jellyfin transcode respawn); URL reopen would replay stale content. Delegate to host for fresh negotiation.
@@ -332,8 +354,11 @@ extension HLSVideoEngine {
                 + "falling back to the muxerFailed recovery",
                 category: .session
             )
-            if isLiveSession { return }
-            handleVODMuxerFailure()
+            if isLiveSession {
+                handleLiveMuxerFailure(prod)
+            } else {
+                handleVODMuxerFailure()
+            }
             return
         }
 
@@ -350,8 +375,26 @@ extension HLSVideoEngine {
                 + "falling back to the muxerFailed recovery",
                 category: .session
             )
-            if isLiveSession { return }
-            handleVODMuxerFailure()
+            if isLiveSession {
+                handleLiveMuxerFailure(prod)
+            } else {
+                handleVODMuxerFailure()
+            }
+            return
+        }
+
+        // Live: requestRestart is VOD-only (performRestart bails on the empty live segmentPlan, so the
+        // old code path silently rebuilt NOTHING and the session zombified). Rebuild in place instead;
+        // the stored session prime flows in through makeProducer.
+        if isLiveSession {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#222 rebuilding live producer in place with a \(prime.count) B "
+                + "audio moov prime (audio stream-copy preserved)",
+                category: .session
+            )
+            Task.detached(priority: .userInitiated) { [weak self] in
+                self?.rebuildLiveProducerInPlace(failed: prod)
+            }
             return
         }
 
@@ -398,6 +441,86 @@ extension HLSVideoEngine {
             category: .session
         )
         requestRestart(at: idx, authoritative: true)
+    }
+
+    /// Live arm for a pump death with `muxerFailed` — previously a bare return: the provider kept serving
+    /// a frozen playlist, AVPlayer parked on it, and the session zombified until the viewer zapped away.
+    /// The connection is healthy (the muxer died, not the socket), so the recovery rebuilds the producer
+    /// IN PLACE on the same demuxer and provider at the live continuation point. A reopen is the wrong
+    /// tool here: `performLiveReopen` opens its fresh connection BEFORE closing the old demuxer, which
+    /// double-connects against a healthy socket and breaks single-connection portals.
+    func handleLiveMuxerFailure(_ prod: HLSSegmentProducer) {
+        restartLock.lock()
+        let nextNow = provider?.liveContinuationPoint().nextIndex ?? 0
+        let decision = Self.liveMuxerRebuildDecision(
+            continuationIndex: nextNow,
+            lastContinuationIndex: lastMuxerRebuildSegmentCount,
+            barrenCycles: liveMuxerRebuildCycles,
+            cap: Self.maxLiveMuxerRebuildCycles
+        )
+        liveMuxerRebuildCycles = decision.newBarrenCycles
+        lastMuxerRebuildSegmentCount = nextNow
+        restartLock.unlock()
+
+        guard decision.rebuild else {
+            EngineLog.emit(
+                "[HLSVideoEngine] live muxer died \(decision.newBarrenCycles) times with no new segment; "
+                + "halting production and requesting host retune",
+                category: .session
+            )
+            provider?.markLiveProductionHalted()
+            onLiveSourceReset?()
+            return
+        }
+        EngineLog.emit(
+            "[HLSVideoEngine] live pump died with muxerFailed; rebuilding producer in place at "
+            + "seg\(nextNow) (barren cycle \(decision.newBarrenCycles)/\(Self.maxLiveMuxerRebuildCycles))",
+            category: .session
+        )
+        // handlePumpFinished runs on the dying pump thread; hop off it like the reopen path does.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            self?.rebuildLiveProducerInPlace(failed: prod)
+        }
+    }
+
+    /// `finishLiveReopen` minus the fresh connection: same demuxer, same provider, produced timeline
+    /// continues at the live continuation point behind #EXT-X-DISCONTINUITY (the dead pump dropped its
+    /// pending look-behind packets; the join gate re-syncs at the next IDR). `sessionAudioMoovPrimeFrame`
+    /// flows in through `makeProducer`.
+    func rebuildLiveProducerInPlace(failed: HLSSegmentProducer) {
+        restartLock.lock()
+        guard producer === failed, let prov = provider else {
+            restartLock.unlock()
+            return
+        }
+        let (nextIndex, outputEnd) = prov.liveContinuationPoint()
+        do {
+            let newProd = try makeProducer(
+                baseIndex: nextIndex,
+                liveReopenOutputEndSeconds: outputEnd
+            )
+            newProd.firstSegmentDiscontinuous = true
+            newProd.onVideoShiftKnown = { [weak self] shiftPts, _ in
+                self?.handleLiveTimelineRebase(shiftPts, seamOutputSeconds: outputEnd)
+            }
+            producer = newProd
+            restartLock.unlock()
+            newProd.start()
+            EngineLog.emit(
+                "[HLSVideoEngine] live producer rebuilt in place: continuing at seg\(nextIndex) "
+                + "(outputEnd=\(String(format: "%.1f", outputEnd))s)",
+                category: .session
+            )
+        } catch {
+            restartLock.unlock()
+            EngineLog.emit(
+                "[HLSVideoEngine] live in-place producer rebuild failed (\(error)); "
+                + "halting production and requesting host retune",
+                category: .session
+            )
+            provider?.markLiveProductionHalted()
+            onLiveSourceReset?()
+        }
     }
 
     /// #65: re-base the producer onto AVPlayer's real (lagging) position after a VOD backpressure wedge.
