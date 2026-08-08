@@ -1038,17 +1038,43 @@ extension AetherEngine {
                 let fetchesAtStall = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
                 self.stallReengageTask?.cancel()
                 self.stallReengageTask = Task { @MainActor [weak self, weak host] in
+                    // Level re-watch (#65): fetch activity inside the grace window used to disarm
+                    // this watchdog permanently — but a player that drains its remaining TAIL
+                    // segments and then parks on a frozen playlist (fwd buffer non-empty, so
+                    // playbackStalled never re-fires) was exactly that case, and nothing ever
+                    // re-armed. Re-baseline and keep watching instead, bounded so trickling
+                    // fetches on a merely slow session hand back to the producer-side arms.
+                    var baseline = fetchesAtStall
+                    var passes = 0
+                    watch: while true {
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(Self.stallReengageGraceSeconds * 1_000_000_000))
+                        guard !Task.isCancelled, let self, let host,
+                              host.stallCount == count,
+                              let player = self.currentAVPlayer else { return }
+                        let fetchesNow = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                        switch Self.stallWatchVerdict(
+                            fetchesNow: fetchesNow,
+                            baseline: baseline,
+                            isWaitingToPlay:
+                                player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                            itemFailed: player.currentItem?.status == .failed,
+                            passesSoFar: passes,
+                            cap: Self.maxStallWatchPasses
+                        ) {
+                        case .disarm:
+                            return
+                        case .escalate:
+                            break watch
+                        case .rewatch:
+                            passes += 1
+                            baseline = fetchesNow
+                        }
+                    }
+                    guard let self, let host,
+                          let player = self.currentAVPlayer else { return }
                     // Stage 1: nudge seek. Device-proven to reach AVPlayer (rate re-asserts)
                     // but NOT always to revive its loader; stage 2 covers that.
-                    try? await Task.sleep(
-                        nanoseconds: UInt64(Self.stallReengageGraceSeconds * 1_000_000_000))
-                    guard !Task.isCancelled, let self, let host,
-                          host.stallCount == count else { return }
-                    let fetchesNow = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
-                    guard fetchesNow == fetchesAtStall,
-                          let player = self.currentAVPlayer,
-                          player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
-                          player.currentItem?.status != .failed else { return }
                     self.reengageStalledConsumer(
                         position: player.currentTime().seconds,
                         trigger: "stall + \(Int(Self.stallReengageGraceSeconds))s without fetches")
@@ -1063,7 +1089,42 @@ extension AetherEngine {
                           let player2 = self.currentAVPlayer,
                           player2.timeControlStatus == .waitingToPlayAtSpecifiedRate,
                           player2.currentItem?.status != .failed else { return }
-                    self.reloadStalledConsumerItem(position: player2.currentTime().seconds)
+                    // Storm shape of the final rung: on a frozen live playlist each reload replays
+                    // the tail and re-stalls within seconds, and the fresh stall supersedes this
+                    // task BEFORE the post-reload rung below can run. The persistent gate spans
+                    // stall events: reloads at the same frozen position exhaust it, then the only
+                    // remaining move is the host's (fresh session against the server route).
+                    let reloadPosition = player2.currentTime().seconds
+                    if self.isLive, !self.stallReloadReviveGate.admit(position: reloadPosition) {
+                        EngineLog.emit(
+                            "[AetherEngine] #65 stage-2 reload budget exhausted at frozen "
+                            + "\(String(format: "%.2f", reloadPosition))s; "
+                            + "publishing liveSourceReset to host",
+                            category: .engine)
+                        self.liveSourceReset.send()
+                        return
+                    }
+                    self.reloadStalledConsumerItem(position: reloadPosition)
+                    // Final rung (#65, live only): a reload against a FROZEN playlist refills the
+                    // same tail and parks again, with no notification left to re-fire. A rendered
+                    // clock that has not moved a whole post-reload window later means the local
+                    // session is unrecoverable consumer-side; only the host can retune.
+                    let clockAtReload = host.renderedTime
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(2 * Self.stallReengageGraceSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, host.stallCount == count,
+                          Self.shouldPublishLiveSourceReset(
+                              isLive: self.isLive,
+                              clockAtReload: clockAtReload,
+                              clockNow: host.renderedTime,
+                              isWaitingToPlay: self.currentAVPlayer?.timeControlStatus
+                                  == .waitingToPlayAtSpecifiedRate
+                          ) else { return }
+                    EngineLog.emit(
+                        "[AetherEngine] #65 stage-2 reload did not move a frozen live clock; "
+                        + "publishing liveSourceReset to host",
+                        category: .engine)
+                    self.liveSourceReset.send()
                 }
             }
             .store(in: &nativeCancellables)

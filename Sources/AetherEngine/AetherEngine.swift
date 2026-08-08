@@ -1394,12 +1394,59 @@ public final class AetherEngine: ObservableObject {
     /// of the playbackStalled notification. Cancelled on load reset; superseded by newer stalls.
     var stallReengageTask: Task<Void, Never>? = nil
     nonisolated static let stallReengageGraceSeconds: TimeInterval = 6.0
+    /// #65 level re-watch: fetch activity inside the grace window used to disarm the watchdog
+    /// PERMANENTLY (single instantaneous check), which parked a player that drained its tail
+    /// segments and then waited forever on a frozen playlist — playbackStalled never re-fires
+    /// while the buffer is non-empty, so nothing re-armed. The loop re-baselines instead, capped
+    /// so trickling fetches on a merely slow session hand back to the producer-side arms.
+    nonisolated static let maxStallWatchPasses = 10
+
+    /// #65 level re-watch verdict, one grace window at a time: silence escalates into the
+    /// nudge/reload ladder, fetch activity re-arms the watch (bounded by `cap`), a recovered,
+    /// paused, or failed player disarms it (recovery has other owners for those states).
+    enum StallWatchVerdict: Equatable {
+        case escalate
+        case rewatch
+        case disarm
+    }
+
+    nonisolated static func stallWatchVerdict(
+        fetchesNow: UInt64,
+        baseline: UInt64,
+        isWaitingToPlay: Bool,
+        itemFailed: Bool,
+        passesSoFar: Int,
+        cap: Int
+    ) -> StallWatchVerdict {
+        guard isWaitingToPlay, !itemFailed else { return .disarm }
+        if fetchesNow == baseline { return .escalate }
+        return passesSoFar + 1 < cap ? .rewatch : .disarm
+    }
+
+    /// #65 final rung: a stage-2 reload against a FROZEN live playlist refills nothing — AVPlayer
+    /// re-buffers the same tail and parks again, and no notification ever re-fires. If the rendered
+    /// clock has not moved a whole post-reload window later and the player still waits, the local
+    /// session is unrecoverable consumer-side and only the host can retune (liveSourceReset).
+    nonisolated static func shouldPublishLiveSourceReset(
+        isLive: Bool,
+        clockAtReload: Double,
+        clockNow: Double,
+        isWaitingToPlay: Bool
+    ) -> Bool {
+        isLive && clockNow == clockAtReload && isWaitingToPlay
+    }
 
     /// #93 round 3: item death (failedToPlayToEndTime after -12889 strikes) escalation.
     /// Deferred-confirm task (a transient that resumes within the window self-clears) plus the
     /// bounded reload budget. Cancelled on load reset; superseded by newer deaths.
     var itemDeathConfirmTask: Task<Void, Never>? = nil
     var itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
+    /// #65 final rung, storm shape: on a frozen live playlist each stage-2 reload replays the tail,
+    /// re-stalls within seconds, and the fresh stall SUPERSEDES the ladder task before its
+    /// post-reload rung can run — so the reload cycle alone would loop forever. This gate persists
+    /// across stall events: stage-2 reloads at the same frozen position exhaust it (then the ladder
+    /// publishes liveSourceReset instead of reloading again); real progress restores the budget.
+    var stallReloadReviveGate = ItemDeathReviveGate(maxAttempts: 2)
 
     /// #199: masters whose #168 carriage verdict fired; consulted at the top of `load(source:)` to
     /// route known cases straight onto the live-ingest loopback. Engine-lifetime by design: it must
@@ -2482,6 +2529,7 @@ public final class AetherEngine: ObservableObject {
         itemDeathConfirmTask?.cancel()
         itemDeathConfirmTask = nil
         itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
+        stallReloadReviveGate = ItemDeathReviveGate(maxAttempts: 2)
         masterFallbackUsed = false
         nativeSubtitleReanchorTask?.cancel()
         nativeSubtitleReanchorTask = nil
