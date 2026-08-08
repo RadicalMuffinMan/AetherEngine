@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.15.0] - 2026-08-08
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.15.0))
+
 ### Added
 
 - **`AetherEngine.videoRoute`: the pipeline actually serving the session (#321).** `LoadOptions
