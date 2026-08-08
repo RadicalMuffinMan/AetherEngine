@@ -104,8 +104,12 @@ struct LiveWindowBackpressureTests {
         }
         #expect(got >= target, "only \(got / (1024 * 1024)) MB delivered after the backstop")
         #expect(server.rangeRequestCount >= 2, "the frontier refill never fired")
-        #expect(server.requestedRanges.allSatisfy { $0.start == 0 },
-                "a live request carried a byte frontier the origin never promised to honour: \(server.requestedRanges)")
+        // #331 follow-up: this origin answers every offset it is given, which is the shape of a
+        // live source that is a growing file. The refill must RESUME at the frontier there, because
+        // asking a byte-addressable live origin for zero re-delivers its whole buffer on top of
+        // the window. The join shape is reserved for an origin that has rejected an offset.
+        #expect(server.requestedRanges.dropFirst().allSatisfy { $0.start > 0 },
+                "a refill against a range-honouring live origin restarted at byte zero: \(server.requestedRanges)")
         #expect(server.requestedRanges.allSatisfy { $0.end == nil },
                 "every live request must be open-ended: \(server.requestedRanges)")
     }
@@ -115,8 +119,9 @@ struct LiveWindowBackpressureTests {
     /// with a nonzero byte offset (a live stream has no byte addresses). Reconnecting
     /// "at the frontier" against such an origin is an unrecoverable rejection loop:
     /// every retry asks the same unsatisfiable offset until the runway drains and the
-    /// session starves. A live reconnect must ask for the stream the way a join does.
-    @Test("a live reconnect after a completed burst asks like a join, not at a frontier",
+    /// session starves. The rejection is the signal: one 416 latches the join shape for
+    /// the rest of the session, so the loop costs a single request and never repeats.
+    @Test("a rejected live frontier latches the join shape for the rest of the session",
           .timeLimit(.minutes(2)))
     func liveReconnectAsksLikeAJoin() async throws {
         // 4 MB per connection: the origin serves its "ring buffer" and completes the
@@ -149,7 +154,13 @@ struct LiveWindowBackpressureTests {
         #expect(got >= target,
                 "only \(got / (1024 * 1024)) MB delivered; the reconnect starved on a rejected frontier")
         #expect(server.rangeRequestCount >= 3, "expected one connection per burst cycle")
-        #expect(server.requestedRanges.allSatisfy { $0.start == 0 },
-                "a live reconnect carried a frontier offset: \(server.requestedRanges)")
+        // The latch costs exactly one rejected request per reader: the first reconnect asks at
+        // the frontier (right for a byte-addressable live source), is told 416, and every
+        // request after it is the join shape. Two or more rejections means the latch never took.
+        let rejected = server.requestedRanges.filter { $0.start > 0 }
+        #expect(rejected.count == 1,
+                "the join shape must be latched by the first rejection: \(server.requestedRanges)")
+        #expect(server.requestedRanges.last?.start == 0,
+                "a live reconnect went on carrying a frontier offset: \(server.requestedRanges)")
     }
 }

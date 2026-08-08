@@ -396,6 +396,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// did, and the checks that need the REQUESTED offset (a 200 that ignored Range, the size
     /// derived from a from-zero response) must not read the window's start instead. winCond-guarded.
     private var connRequestedOffset: Int64 = 0
+    /// #331: latched once a live origin answers 416 to a nonzero offset, i.e. proves it has no
+    /// byte addresses to resume at. From there every live request is the join shape (`bytes=0-`).
+    /// Latched rather than unconditional because the two live origin shapes want opposite things:
+    /// an IPTV panel serving a ring buffer cannot satisfy a frontier and rejects it outright,
+    /// while a live source that IS a growing file (a Jellyfin live stream file, a misdeclared VOD)
+    /// honours the frontier and resumes exactly where delivery stopped, and asking that one for
+    /// byte zero re-delivers the whole buffer on top of the window. One rejected request per reader
+    /// tells the two apart; guessing cannot. winCond-guarded.
+    private var liveOffsetsUnsatisfiable = false
 
     /// #220: winCond-guarded snapshot of the sliding window for the periodic memprobe.
     /// `ahead` is the undrained forward extent, the quantity `appendPersistentData` gates the
@@ -1978,6 +1987,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             window = Data()
         }
         connRequestedOffset = offset
+        let askAsJoin = isLive && liveOffsetsUnsatisfiable
         connEnded = false
         connEndedByBackpressure = false
         connEndedAtRangeEnd = false
@@ -2006,15 +2016,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let resolvedBound {
             request.setValue("bytes=\(offset)-\(offset + resolvedBound - 1)", forHTTPHeaderField: "Range")
         } else {
-            // Live: `offset` is reader bookkeeping (the window frontier the delivered bytes
-            // are appended at), not a server-side position — a live origin has no byte
-            // addresses, and panels disagree on what a nonzero offset means: some ignore it
-            // and serve from now (which is why the frontier request ever worked), others
-            // answer 416 to every offset they cannot satisfy, turning each reconnect into an
-            // unrecoverable rejection loop. Ask for the stream the way a join does
-            // (`bytes=0-`, the one shape every origin serves) and let the append anchor the
-            // bytes at the frontier, exactly as it already does.
-            request.setValue("bytes=\(isLive ? 0 : offset)-", forHTTPHeaderField: "Range")
+            // Live: `offset` is reader bookkeeping (the window frontier the delivered bytes are
+            // appended at), and whether it means anything server-side depends on the origin.
+            // Panels serving a ring buffer have no byte addresses at all: some ignore the offset
+            // and serve from now (which is why the frontier request ever worked), others answer
+            // 416 to every offset they cannot satisfy, which turned each reconnect into an
+            // unrecoverable rejection loop (#331). A live source that is a growing FILE resumes
+            // at the frontier correctly, and asking it for byte zero would re-deliver its whole
+            // buffer on top of the window. So keep the frontier until an origin rejects it, then
+            // ask the way a join does for the rest of the session; the append anchors the bytes
+            // at the frontier either way.
+            request.setValue("bytes=\(askAsJoin ? 0 : offset)-", forHTTPHeaderField: "Range")
         }
         request.timeoutInterval = 0  // long-lived; stalls handled by the reader
         applyExtraHeaders(&request)
@@ -2250,6 +2262,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // from byte 0 (silent corruption). Reject it. Live is exempt: transcode
         // reconnect legitimately answers 200 with "from now".
         let requestedOffset = (generation == connGeneration) ? connRequestedOffset : 0
+        // #331: the origin just told us its live stream has no byte address to resume at. Latch
+        // it, so every later request in this session is the join shape instead of repeating an
+        // offset that can only ever be rejected again. Nonzero offsets only: a 416 at zero is a
+        // different fault and must not silently change the request shape.
+        var latchedJoinShape = false
+        if generation == connGeneration, isLive, status == 416, requestedOffset > 0,
+           !liveOffsetsUnsatisfiable {
+            liveOffsetsUnsatisfiable = true
+            latchedJoinShape = true
+        }
         // Issue #70: the first from-0 data connection doubles as the size probe, so the
         // playback open skips probeFileSize() entirely. Derive the total from this
         // response (206 Content-Range, or Content-Length on a from-0 2xx). Write-once
@@ -2270,6 +2292,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let headerMs, headerMs > 2000 {
             EngineLog.emit(
                 "[AVIOReader] gen=\(generation) response headers after \(Int(headerMs))ms status=\(status)",
+                category: .demux
+            )
+        }
+        // #331: name the latch once. A field capture that shows the reconnect shape change is the
+        // difference between "the origin has no byte addresses" and "the reconnect is broken".
+        if latchedJoinShape {
+            EngineLog.emit(
+                "[AVIOReader] \(label) live origin rejected offset \(requestedOffset) (416); "
+                + "requesting the stream as a join from here",
                 category: .demux
             )
         }
