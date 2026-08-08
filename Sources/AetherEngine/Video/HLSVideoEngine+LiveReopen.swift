@@ -95,6 +95,17 @@ extension HLSVideoEngine {
         return .none
     }
 
+    /// #199 follow-up pure decision: EVERY in-engine reopen transport that exhausts its budget must
+    /// halt production (dropping the blocking-reload advert, releasing held ?_HLS_msn= waiters) and
+    /// surface the loss to the host via onLiveSourceReset. #199 scoped that escalation to the factory
+    /// transport it introduced, which left a URL source's exhaustion as a zombie session: provider
+    /// un-halted, playlist frozen, host never told to retune. `.none` never reaches an exhaustion
+    /// site — it delegates to host retune before any reopen begins — and must stay out so a future
+    /// call-site reshuffle cannot double-signal that path.
+    static func liveReopenExhaustionEscalatesToHost(transport: LiveReopenTransport) -> Bool {
+        transport != .none
+    }
+
     func handlePumpFinished(_ prod: HLSSegmentProducer,
                                     reason: HLSSegmentProducer.PumpExitReason) {
         // #65 (VOD only): a broken backpressure wedge means AVPlayer is stuck behind a parked producer.
@@ -219,10 +230,10 @@ extension HLSVideoEngine {
                 + "\(barrenNow) reopen cycles; giving up (source considered dead)",
                 category: .session
             )
-            if reopenTransport == .customFactory {
-                // #199: same last-resort surface as reopen exhaustion; without it the recoverable
-                // exit reason skipped the halt above and the zombie session would hold blocking
-                // reloads it can never satisfy.
+            if Self.liveReopenExhaustionEscalatesToHost(transport: reopenTransport) {
+                // #199 follow-up: same last-resort surface for EVERY reopenable transport; the
+                // recoverable exit reason skipped the halt above, so without this the zombie
+                // session holds blocking reloads it can never satisfy and the host is never told.
                 provider?.markLiveProductionHalted()
                 onLiveSourceReset?()
             }
@@ -549,10 +560,10 @@ extension HLSVideoEngine {
             + "source considered permanently lost",
             category: .session
         )
-        if transport == .customFactory {
-            // #199: the in-engine transport is exhausted; surface the loss the way a factory-less
-            // custom source would have immediately, so the host can retune instead of holding a
-            // zombie session whose blocking-reload advert can never be satisfied.
+        if Self.liveReopenExhaustionEscalatesToHost(transport: transport) {
+            // #199 follow-up: the in-engine transport is exhausted; surface the loss the way a
+            // factory-less custom source would have immediately, so the host can retune instead of
+            // holding a zombie session whose blocking-reload advert can never be satisfied.
             provider?.markLiveProductionHalted()
             onLiveSourceReset?()
         }
