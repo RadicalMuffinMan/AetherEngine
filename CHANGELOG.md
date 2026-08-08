@@ -27,16 +27,19 @@ the public-API contract.
   absorbed once, steady state plateaus at burst size with the connection never voluntarily
   ended, and the end-and-refill survives unchanged as the memory backstop for a "live" source
   that sustainedly outruns realtime.
-- **A live reconnect asks for the stream the way a join does, instead of at a byte frontier.**
+- **A live reconnect that the origin cannot satisfy asks for the stream the way a join does.**
   The reconnect request carried `Range: bytes=<frontier>-`, but the frontier is reader
-  bookkeeping — the window position delivered bytes are appended at — not a server-side byte
-  address, because a live origin has none. Panels that ignore the offset and serve "from now"
+  bookkeeping (the window position delivered bytes are appended at), and whether it means
+  anything server-side depends on the origin. Panels that ignore the offset and serve "from now"
   masked this; a panel that answers 416 to every offset it cannot satisfy turned each reconnect
   into an unrecoverable rejection loop (field trace: a panel that cleanly completes every
   response after its ~14 MB ring burst then 416'd the same frontier 35 generations in a row,
-  ~1/s, while the runway drained from 8 MB to zero and the session starved). Live requests are
-  now always `bytes=0-` — the one shape every origin serves, and the shape the join already
-  uses — and the append anchors the bytes at the frontier exactly as it always has.
+  ~1/s, while the runway drained from 8 MB to zero and the session starved). The rejection is
+  now the signal: the first 416 on a nonzero live offset latches the join shape (`bytes=0-`,
+  what every origin serves) for the rest of the session, so the loop costs one request and never
+  repeats. A live source that IS byte-addressable (a growing stream file, a misdeclared VOD)
+  keeps resuming at the frontier, which is what it answers correctly and where asking for byte
+  zero would re-deliver its whole buffer on top of the window.
 - **HTTP 509 from a pinned redirect target is treated as metering, not as a dead pin.**
   509 "Bandwidth Limit Exceeded" is what a connection-capped IPTV panel answers while the slot
   the reader is replacing has not been torn down server-side yet. It classified as a hard 5xx,
