@@ -140,6 +140,15 @@ final class MP4SegmentMuxer {
     /// from codecpar alone, so they never wedge, and gating the #64 RAM-cap flush on them would needlessly
     /// weaken that memory bound. Latched at init from the audio codec_id.
     private let audioNeedsParsedPacketForMoov: Bool
+
+    /// Only AC-3 / E-AC-3 / TrueHD build their mp4 sample entry from a parsed packet (dac3/dec3/dmlp),
+    /// so only they can hit the "moov before audio parsed" wedge and need the #64-flush guard. Shared with
+    /// the producer, which uses it to decide whether retaining a moov-prime frame copy buys anything.
+    static func audioNeedsParsedPacketForMoov(_ codecID: AVCodecID) -> Bool {
+        codecID == AV_CODEC_ID_AC3 ||
+        codecID == AV_CODEC_ID_EAC3 ||
+        codecID == AV_CODEC_ID_TRUEHD
+    }
     /// Latched when the next staging file open fails; producer must stop the pump.
     private(set) var isWedged: Bool = false
     /// Latched after avformat_write_header; mp4 muxer rewrites time_base to its own pick
@@ -183,16 +192,8 @@ final class MP4SegmentMuxer {
         self.currentSegmentIndex = initialSegmentIndex
         self.sessionDir = sessionDir
         self.haveAudio = audio != nil
-        // Only AC-3 / E-AC-3 / TrueHD build their mp4 sample entry from a parsed packet (dac3/dec3/dmlp),
-        // so only they can hit the "moov before audio parsed" wedge and need the #64-flush guard.
-        if let audioCodecID = audio?.codecpar.pointee.codec_id {
-            self.audioNeedsParsedPacketForMoov =
-                audioCodecID == AV_CODEC_ID_AC3 ||
-                audioCodecID == AV_CODEC_ID_EAC3 ||
-                audioCodecID == AV_CODEC_ID_TRUEHD
-        } else {
-            self.audioNeedsParsedPacketForMoov = false
-        }
+        self.audioNeedsParsedPacketForMoov =
+            audio.map { Self.audioNeedsParsedPacketForMoov($0.codecpar.pointee.codec_id) } ?? false
 
         let firstPath = Self.stagingPath(forSegmentIndex: initialSegmentIndex,
                                          in: sessionDir)
