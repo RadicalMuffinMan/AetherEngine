@@ -70,27 +70,44 @@ final class DisplayCriteriaController {
         /// Nothing can be pending; return before touching the display manager.
         case skip
         /// 200 ms: only a rate-only switch could still start (the pre-#274 budget, sized for a synchronous
-        /// engine write). The engine already declines to pre-flight its own rate-only writes on the premise
-        /// that they are sub-second, which is an assumption from d87b54d that no log has ever measured: the
-        /// settle times it would have been read off were inflated by the whole Stage 1 budget (Sodalite#49).
-        /// `timingSuffix` now reports the real number, so this budget can be confirmed or corrected.
+        /// engine write). The engine declines to pre-flight its own rate-only writes on the d87b54d premise
+        /// that they are sub-second.
+        ///
+        /// That premise is now contradicted, though not yet by a run that also juddered: on the Sodalite#49
+        /// reporter's Apple TV a rate-only SDR switch was measured at ~2.9 s end to end, and two further
+        /// runs never reported an end at all inside Stage 2's cap. Reading that as "shorten nothing, widen
+        /// nothing" is deliberate: one panel is not grounds for making every session's cold start wait
+        /// longer, and the runs that produced these numbers played cleanly.
         case brief
         /// 1000 ms: a dynamic-range switch may still be inbound from a writer whose timing we don't control
         /// (AVKit's auto-criteria path fires from the AVPlayerItem formatDescription). DV P5 cold start
         /// depends on this budget.
         case full
 
-        var ticks: Int {
+        /// The budget both as the log lines report it and as Stage 1 spends it. Latency fixes are verified
+        /// off the number they moved, so both the spent-time line and the #289 skip line name it (#274).
+        var budgetMs: Int {
             switch self {
             case .skip:  0
-            case .brief: 20
-            case .full:  100
+            case .brief: 200
+            case .full:  1000
             }
         }
+    }
 
-        /// The budget as the log lines report it: one tick is a 10 ms poll. Latency fixes are verified off
-        /// the number they moved, so both the spent-time line and the #289 skip line name it (#274).
-        var budgetMs: Int { ticks * 10 }
+    /// Stage 2's ceiling: long enough that an unobservable DV switch does not gate the first frame the way
+    /// the old fixed 5 s poll did, short enough to stay a startup cost. The reporter's panel has been
+    /// measured taking ~2.9 s end to end, so this cap is knowingly exceeded there; raising it trades every
+    /// session's cold start against one panel and wants its own evidence (Sodalite#49).
+    nonisolated static let stage2CapMs = 2000
+
+    /// Both stages spend a deadline, not a poll count. `n` sleeps of `m` ms is only `n * m` on an idle
+    /// scheduler: the same 40 x 50 ms Stage 2 ran 2082 ms in one of the reporter's runs and 2862 ms in
+    /// another, on a device reporting `thermal=serious` throughout. A budget that stretches 40 % under the
+    /// load it exists to survive is not a budget, and it was the second measurement defect in a row to make
+    /// #49's logs unreadable (Sodalite#49).
+    nonisolated static func isBudgetSpent(elapsedMs: Int, budgetMs: Int) -> Bool {
+        elapsedMs >= budgetMs
     }
 
     /// #289: with Match Content off, nothing can start a switch, so waiting for one is pure startup latency
@@ -162,20 +179,39 @@ final class DisplayCriteriaController {
     /// ordering question Sodalite#49 was filed on and which no log line could answer. The observers are
     /// registered on entry, so a switch that began earlier is only visible through the in-progress flag;
     /// a start notification means it began inside the gate.
+    ///
+    /// The flag alone only carries that meaning on the *first* poll. Reading it later conflates two
+    /// different events, and the reporter's second round hit exactly that: a run whose flag was false at
+    /// entry and rose 376 ms in was logged `pre-gate`, i.e. as a switch older than the gate it demonstrably
+    /// postdated. `inGateFlagOnly` is that case, kept separate because it indicts the observer registration
+    /// point rather than the panel.
     enum StartSignal: String, Equatable {
-        /// In-progress flag already set when polling began: the switch started before the gate, i.e. during
+        /// In-progress flag already set on the first poll: the switch started before the gate, i.e. during
         /// the load that built the item.
         case preGate = "pre-gate"
         /// Mode-switch-start notification arrived while the gate was polling.
         case inGate = "in-gate"
+        /// The flag rose after the first poll and no start notification ever arrived. The switch began
+        /// inside the gate either way; what is missing is the notification, not the ordering.
+        case inGateFlagOnly = "in-gate (flag only, start notification missed)"
         /// Nothing observed within the budget.
         case none = "none"
     }
 
+    /// Stage 1's per-poll verdict, `nil` while nothing has been observed yet. Pure so the distinction the
+    /// whole of #49 rests on is covered by tests rather than by reading a device log.
+    nonisolated static func classifyStart(isFirstPoll: Bool,
+                                          startNotificationFired: Bool,
+                                          switchInProgress: Bool) -> StartSignal? {
+        if startNotificationFired { return .inGate }
+        guard switchInProgress else { return nil }
+        return isFirstPoll ? .preGate : .inGateFlagOnly
+    }
+
     /// The two numbers a settle log needs to be usable: when Stage 1 saw the switch start, and how long the
-    /// whole gate took. Both used to be reported as `startGrace.ticks * 10 + stage2Ticks * 50`, which counts
-    /// the Stage 1 *budget* rather than the time actually spent in it, so every settle in every log read up
-    /// to a full second slower than it was and no measurement of real switch latency was possible (#49).
+    /// whole gate took. Both used to be derived from the stage budgets rather than measured, so every settle
+    /// in every log read up to a full second slower than it was and no measurement of real switch latency
+    /// was possible (#49).
     nonisolated static func timingSuffix(startSignal: StartSignal, stage1Ms: Int, totalMs: Int) -> String {
         "start \(startSignal.rawValue) after \(stage1Ms)ms, total \(totalMs)ms"
     }
@@ -369,18 +405,26 @@ final class DisplayCriteriaController {
         // before the DV asset loads; starting the decode mid-write races an
         // AVPlayer error on DV Profile 8.1.
         //
-        // Which of the two signals ends this stage is recorded, not just that one did: the in-progress flag
-        // being set on the first poll means the panel was already switching while the item was built, which
-        // is the ordering Sodalite#49 suspected and which nothing in the log used to distinguish from a
-        // switch that started inside the gate.
+        // Which signal ends this stage is recorded, not just that one did: the in-progress flag being set on
+        // the *first* poll means the panel was already switching while the item was built, which is the
+        // ordering Sodalite#49 suspected. Reading that same flag on a later poll says the opposite (the
+        // switch began after entry) and used to be logged as if it said the same, which is why the second
+        // round of reporter logs still could not answer the question. `classifyStart` holds that line.
         var startSignal = StartSignal.none
-        for _ in 0..<startGrace.ticks {
+        var isFirstPoll = true
+        while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: entry), budgetMs: startGrace.budgetMs) {
             if switchEnded.fired || observeHeadroom(screen) {
                 EngineLog.emit("[DisplayCriteria] settled during start phase (after \(Self.elapsedMs(since: entry))ms, EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 return
             }
-            if switchStarted.fired { startSignal = .inGate; break }
-            if displayManager.isDisplayModeSwitchInProgress { startSignal = .preGate; break }
+            if let signal = Self.classifyStart(
+                isFirstPoll: isFirstPoll,
+                startNotificationFired: switchStarted.fired,
+                switchInProgress: displayManager.isDisplayModeSwitchInProgress) {
+                startSignal = signal
+                break
+            }
+            isFirstPoll = false
             try? await Task.sleep(for: .milliseconds(10))
         }
         // Time spent, not the budget: the polls carry scheduler overhead, and everything downstream is
@@ -399,12 +443,12 @@ final class DisplayCriteriaController {
         // in-progress flag clearing), else a bounded ~2s cap so a panel whose DV
         // switch is unobservable to the app can't gate the first frame the way the
         // old fixed 5s poll did.
-        let capTicks = 40  // 40 x 50ms = 2000ms
+        let stage2Entry = DispatchTime.now()
         func timing() -> String {
             Self.timingSuffix(startSignal: startSignal, stage1Ms: stage1Ms,
                               totalMs: Self.elapsedMs(since: entry))
         }
-        for _ in 0..<capTicks {
+        while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: Self.stage2CapMs) {
             try? await Task.sleep(for: .milliseconds(50))
             if switchEnded.fired {
                 EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()))", category: .engine)
@@ -441,7 +485,8 @@ final class DisplayCriteriaController {
         // Cap reached: the in-progress flag never cleared. "Unobservable DV panel" was the blanket
         // explanation, but it only fits an HDR write; an engine rate-only write sitting here for two
         // seconds contradicts the sub-second premise the .brief budget rests on and is worth reading as
-        // its own event (Sodalite#49).
+        // its own event (Sodalite#49). Two of the reporter's three second-round runs landed here, both
+        // rate-only SDR, so this is the common outcome on that panel rather than an edge case.
         let headroom = String(format: "%.2f", screen.currentEDRHeadroom)
         switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
         case .engineRateOnly:
