@@ -23,19 +23,19 @@ struct RemoteHLSSubtitleProxyTests {
                                           httpHeaders: headers, sourceStreamIndex: streamIndex))
     }
 
-    private static func get(_ path: String, port: UInt16) throws -> (status: Int, body: String) {
+    /// Async on purpose: the callback form parked a cooperative thread on a semaphore for the whole
+    /// round trip, and every one of these tests runs inside a several-hundred-test parallel run. A
+    /// transport error is thrown rather than folded into status 0, so a failure names itself instead
+    /// of arriving as "expected 200, got 0".
+    private static func get(_ path: String, port: UInt16) async throws -> (status: Int, body: String) {
         let url = try #require(URL(string: "http://127.0.0.1:\(port)\(path)"))
         var request = URLRequest(url: url)
-        request.timeoutInterval = 10
-        let done = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var result: (Int, String) = (0, "")
-        URLSession(configuration: .ephemeral).dataTask(with: request) { data, response, _ in
-            result = ((response as? HTTPURLResponse)?.statusCode ?? 0,
-                      data.flatMap { String(data: $0, encoding: .utf8) } ?? "")
-            done.signal()
-        }.resume()
-        _ = done.wait(timeout: .now() + 15)
-        return result
+        request.timeoutInterval = 30
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(for: request)
+        return ((response as? HTTPURLResponse)?.statusCode ?? 0,
+                String(data: data, encoding: .utf8) ?? "")
     }
 
     // MARK: - Fill jobs
@@ -75,7 +75,7 @@ struct RemoteHLSSubtitleProxyTests {
     // MARK: - Served endpoints
 
     @Test("The rewritten master is served verbatim, not rebuilt from provider metadata")
-    func masterIsServedVerbatim() throws {
+    func masterIsServedVerbatim() async throws {
         let provider = RemoteHLSSubtitleProvider(
             tracks: [Self.track(100_000, url: URL(string: "https://origin.test/en.srt")!)],
             masterBody: Self.master, programDuration: 1200, defaultHeaders: [:])
@@ -83,7 +83,7 @@ struct RemoteHLSSubtitleProxyTests {
         try server.start()
         defer { server.stop() }
 
-        let (status, body) = try Self.get("/master.m3u8", port: server.port)
+        let (status, body) = try await Self.get("/master.m3u8", port: server.port)
         #expect(status == 200)
         #expect(body == Self.master)
     }
@@ -101,7 +101,7 @@ struct RemoteHLSSubtitleProxyTests {
     }
 
     @Test("The rendition playlist is a finished whole-program VOD playlist")
-    func subtitlePlaylistIsWholeProgram() throws {
+    func subtitlePlaylistIsWholeProgram() async throws {
         let provider = RemoteHLSSubtitleProvider(
             tracks: [Self.track(100_000, url: URL(string: "https://origin.test/en.srt")!)],
             masterBody: Self.master, programDuration: 1234.5, defaultHeaders: [:])
@@ -109,7 +109,7 @@ struct RemoteHLSSubtitleProxyTests {
         try server.start()
         defer { server.stop() }
 
-        let (status, body) = try Self.get("/subs_0.m3u8", port: server.port)
+        let (status, body) = try await Self.get("/subs_0.m3u8", port: server.port)
         #expect(status == 200)
         #expect(body.contains("#EXT-X-PLAYLIST-TYPE:VOD"))
         #expect(body.contains("#EXT-X-TARGETDURATION:1235"))
@@ -119,7 +119,7 @@ struct RemoteHLSSubtitleProxyTests {
     }
 
     @Test("The proxy origin serves no media: a segment request is a 404, not a redirect to the origin")
-    func mediaIsNotServed() throws {
+    func mediaIsNotServed() async throws {
         let provider = RemoteHLSSubtitleProvider(
             tracks: [Self.track(100_000, url: URL(string: "https://origin.test/en.srt")!)],
             masterBody: Self.master, programDuration: 1200, defaultHeaders: [:])
@@ -127,12 +127,12 @@ struct RemoteHLSSubtitleProxyTests {
         try server.start()
         defer { server.stop() }
 
-        #expect(try Self.get("/seg0.mp4", port: server.port).status == 404)
-        #expect(try Self.get("/init.mp4", port: server.port).status == 404)
+        #expect(try await Self.get("/seg0.mp4", port: server.port).status == 404)
+        #expect(try await Self.get("/init.mp4", port: server.port).status == 404)
     }
 
-    @Test("A decoded sidecar is served as whole-program WebVTT")
-    func sidecarBecomesWebVTT() throws {
+    @Test("A decoded sidecar is served as whole-program WebVTT", .timeLimit(.minutes(2)))
+    func sidecarBecomesWebVTT() async throws {
         let srt = """
         1
         00:00:01,000 --> 00:00:03,000
@@ -155,9 +155,13 @@ struct RemoteHLSSubtitleProxyTests {
         let server = HLSLocalServer(provider: provider)
         try server.start()
         defer { server.stop(); provider.cancelFill() }
+        // Await the fill instead of letting the handler's budget race it. The decode is a detached
+        // Task, so on a saturated cooperative pool (a parallel test run on a 3-core CI box, 2026-08-08)
+        // it gets no thread for tens of seconds, the budget expires, and the request comes back empty.
         provider.startFill()
+        await provider.awaitFill()
 
-        let (status, body) = try Self.get("/subs_0_0.vtt", port: server.port)
+        let (status, body) = try await Self.get("/subs_0_0.vtt", port: server.port)
         #expect(status == 200)
         #expect(body.hasPrefix("WEBVTT"))
         #expect(body.contains("Erste Zeile"))

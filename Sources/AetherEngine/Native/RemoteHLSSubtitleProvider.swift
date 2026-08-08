@@ -84,6 +84,21 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         task?.cancel()
     }
 
+    /// Wait for the started fill to finish. Nothing in the session waits for it, the `.vtt` handler
+    /// polls the store instead; this exists so a test can assert on a finished store without racing
+    /// the wall clock. `nativeSubtitleVTT`'s wait is a budget, and a budget loses under a saturated
+    /// cooperative pool, where the detached decode does not get a thread at all.
+    func awaitFill() async {
+        await currentFillTask()?.value
+    }
+
+    /// Reading the handle stays synchronous: `NSLock` is unavailable from an async context.
+    private func currentFillTask() -> Task<Void, Never>? {
+        fillLock.lock()
+        defer { fillLock.unlock() }
+        return fillTask
+    }
+
     /// One job per (url, headers) pair, in first-appearance order. Mirrors
     /// `AetherEngine.externalSubtitleFillJobs`, which keys off the loopback's rendition table.
     static func fillJobs(tracks: [Track],
