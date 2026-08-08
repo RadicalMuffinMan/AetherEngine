@@ -12,6 +12,23 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.15.3] - 2026-08-08
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.15.3))
+
+### Fixed
+
+- **The display-criteria gate no longer reports a switch that started inside it as one that
+  started before it.** Stage 1 read `isDisplayModeSwitchInProgress` on every poll while drawing
+  the conclusion that only holds on the first one, so a switch whose flag rose 376 ms after entry
+  was logged `start pre-gate`, the exact opposite of what it showed. A late flag with no start
+  notification now reads as its own signal, which points at where the engine starts listening
+  rather than at the panel (Sodalite#49, follow-up in #339).
+- **Stage 1 and Stage 2 spend deadlines rather than poll counts.** `n` sleeps of `m` ms is only
+  `n * m` on an idle scheduler: the same 40 x 50 ms Stage 2 was measured at 2082 ms in one run and
+  2862 ms in another on a thermally throttled Apple TV. Note that this makes Stage 1's `.full`
+  budget exactly 1000 ms where load could previously stretch it further.
+
 ## [6.15.2] - 2026-08-08
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.15.2))
