@@ -148,7 +148,13 @@ player.$hasFirstFrameReadyForDisplay
                        // stays true across a seek), so a cover lifted on isSessionReady lifts onto
                        // black. Latched for the load, false again at the next load() / stop().
                        // For "has this seek reached the screen" use seekEvents .landed instead.
-player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession)
+player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession).
+                       // nil on the .software route: that pipeline renders into its own display
+                       // layer, and the property is cleared so AVKit cannot hold a player nothing
+                       // feeds any more. A host that only ever hands currentAVPlayer to an
+                       // AVPlayerViewController therefore gets audio and AVKit's own spinner over an
+                       // empty video plane on that route (#298). Bind a surface for it, and pick the
+                       // presentation off $videoRoute rather than off the source's codec.
 
 // System Now-Playing on the native video path (tvOS / iOS). Off by default: an
 // AVPlayerViewController host already gets this from AVKit and must NOT opt in.
