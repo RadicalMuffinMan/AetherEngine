@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.15.1] - 2026-08-08
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.15.1))
+
 ### Fixed
 
 - **A `nativeRemoteHLS` session that never reached `readyToPlay` had no terminal state (#334).** An
