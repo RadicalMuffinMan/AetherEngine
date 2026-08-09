@@ -146,6 +146,27 @@ extension AetherEngine {
         hasFirstFrameReadyForDisplay = true
     }
 
+    /// #353: mirror a software host's settled picture size onto the public `softwareDisplaySize`.
+    ///
+    /// A mirror rather than the latch `hasFirstFrameReadyForDisplay` gets, because the two answer
+    /// different questions. A picture that exists cannot stop existing for the rest of the load, but
+    /// the size it presents at can change under it: a live source that switches resolution
+    /// mid-stream re-shapes the rectangle a host already laid out against, and a latched first value
+    /// would keep the overlay on the old one.
+    ///
+    /// No `dropFirst()` here either, and that is a property of this path rather than a style choice:
+    /// the software path builds a new host per load (one construction site, and `stopInternal` nils
+    /// it), so what a fresh mirror replays is that host's own nil and not the outgoing item's size.
+    /// The native hosts, which are the ones reused across a load, have no size to mirror.
+    func mirrorSoftwareDisplaySize(
+        from publisher: Published<CGSize?>.Publisher,
+        storeIn cancellables: inout Set<AnyCancellable>
+    ) {
+        publisher
+            .sink { [weak self] size in self?.softwareDisplaySize = size }
+            .store(in: &cancellables)
+    }
+
     /// `videoReadyForDisplay` is the host's raw layer level (#315); nil on the audio hosts, which
     /// have nothing to display. It is folded, never mirrored: the engine's published flag is latched
     /// for the load, so the seams that reuse a host and briefly lose the picture do not surface.
@@ -1235,6 +1256,11 @@ extension AetherEngine {
         }
 
         activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        // Drop the previous session's sinks BEFORE anything wires this one's. Standing further down,
+        // between two groups of `.store(in:)` calls, this cancelled everything wired above it: the
+        // SW-PiP cue mirror never delivered a cue after the frame compositor was armed. Both halves
+        // of such a wiring work in isolation, which is why a dead sink here reads as a working one.
+        softwareCancellables.removeAll()
         let host = SoftwarePlaybackHost()
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
@@ -1251,6 +1277,9 @@ extension AetherEngine {
         // #311: a load builds a new host and a new renderer, so an observer installed once by the
         // host app has to be carried across the seam, exactly as the native session does at load.
         host.setVideoFrameTimeObserver(softwareVideoFrameTimeObserver)
+        // #353: the settled picture size, wired next to the frame times because a host laying out an
+        // overlay needs the rectangle as well as the clock, and both come off this renderer.
+        mirrorSoftwareDisplaySize(from: host.$videoDisplaySize, storeIn: &softwareCancellables)
         // SW-PiP: publish the bridge once the session owns its layer (the layer object is stable for
         // the session; the host attaches it to the view and, on PiP start, to the system window).
         softwarePiPSource = SoftwarePiPSource(layer: host.displayLayer, isLive: isLive, engine: self)
@@ -1296,7 +1325,6 @@ extension AetherEngine {
         self.playlistShiftSeconds = 0
         self.setPresentationAxis(PresentationAxisMap())
 
-        softwareCancellables.removeAll()
         host.$currentTime
             .sink { [weak self] value in
                 guard let self = self else { return }

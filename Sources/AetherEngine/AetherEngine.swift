@@ -604,6 +604,30 @@ public final class AetherEngine: ObservableObject {
     /// display layer, nil on teardown. Hosts build their sample-buffer PiP ContentSource from it.
     @Published public internal(set) var softwarePiPSource: SoftwarePiPSource?
 
+    /// #353: the size the software path's picture presents at, in pixels: the coded frame under the
+    /// pixel aspect ratio the decoder attached. nil on every other path, before the first frame is
+    /// built, and on sources with no video.
+    ///
+    /// What it is for is laying something out over the picture. A host derives the picture rect from
+    /// an aspect under the active `videoGravity`, and `sourceVideoWidth`/`sourceVideoHeight` are the
+    /// CODED dimensions, so anamorphic content lays out against the wrong rectangle: 720x576 at
+    /// 64:45 presents as 1024x576, and an overlay sized 5:4 sits inside a 16:9 picture. There is
+    /// nothing to measure on the layer either, since `AVSampleBufferDisplayLayer` has no `videoRect`
+    /// the way `AVPlayerLayer` does.
+    ///
+    /// Nor can a host compute it. The ratio is resolved per frame across three sources, first sane
+    /// wins (#177), and one whose display aspect is impossible is dropped in favour of square pixels
+    /// (#290), so a host reconstructing it from container metadata disagrees with the screen in
+    /// exactly the cases that policy exists for. This is read off the format description the
+    /// renderer enqueues, so it is what the layer was handed rather than a second opinion about it.
+    ///
+    /// Mirrored, not latched, unlike `hasFirstFrameReadyForDisplay`: a live source that switches
+    /// resolution mid-stream changes the shape of the picture under a host that already laid out
+    /// against it, and it is cleared with the session so the next source cannot be laid out against
+    /// this one's rectangle. The native and bypass paths mount an `AVPlayerLayer`, which measures its
+    /// own `videoRect` and carries `AVPlayerItem.presentationSize`; this stays nil there.
+    @Published public internal(set) var softwareDisplaySize: CGSize?
+
     /// #288: the native-path counterpart of `softwarePiPSource.layer`. `AVPictureInPictureController`
     /// wants the layer, not the player, so a host presenting its own PiP on the native path (tvOS has
     /// no reachable AVKit affordance behind suppressed chrome) cannot get there from `currentAVPlayer`.
@@ -4769,6 +4793,9 @@ public final class AetherEngine: ObservableObject {
         }
 
         softwareCancellables.removeAll()
+        // #353: the picture belongs to the session. Left standing, the next source would be laid out
+        // against this one's rectangle for as long as it takes its own first frame to arrive.
+        softwareDisplaySize = nil
         // #314: same detach on the software path, where the outgoing renderer's decode thread is what
         // can still hand a frame over while the next host comes up.
         softwareHost?.setVideoFrameTimeObserver(nil)

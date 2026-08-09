@@ -69,6 +69,12 @@ final class SoftwarePlaybackHost {
     /// with the session.
     private var readyForDisplayObserver: NSObjectProtocol?
 
+    /// #353: the size this session's picture presents at, coded dimensions under the pixel aspect
+    /// ratio the decoder attached; nil until the renderer builds its first sample buffer and on
+    /// sources with no video. The engine mirrors it as `AetherEngine.softwareDisplaySize`, which is
+    /// what hosts read; this host is built per load, so it starts unknown by construction.
+    @Published private(set) var videoDisplaySize: CGSize?
+
     /// Fires (off-main) once per session the first time HDR10+ dynamic
     /// metadata appears on a decoded frame. Hooked by `AetherEngine` to
     /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
@@ -458,6 +464,24 @@ final class SoftwarePlaybackHost {
         // Default to the software decoder; load() swaps it for the
         // VT-backed one when the source's video codec is HEVC.
         self.videoDecoder = SoftwareVideoDecoder()
+        armDisplaySizeObserver()
+    }
+
+    /// #353: the renderer settles the picture size on the decode thread, where it builds the format
+    /// description; publish it on the main actor like every other mirror on this host. Armed in init
+    /// rather than at load: the renderer is this host's own and lives exactly as long as it does.
+    private func armDisplaySizeObserver() {
+        renderer.setDisplaySizeObserver { [weak self] size in
+            Task { @MainActor in
+                guard let self, self.videoDisplaySize != size else { return }
+                self.videoDisplaySize = size
+                EngineLog.emit(
+                    "[SWHost] picture settles at \(Int(size.width))x\(Int(size.height)) "
+                    + "after \(self.framesEnqueued) frames",
+                    category: .swPlayback
+                )
+            }
+        }
     }
 
     // MARK: - Audio stream resolution (#133)

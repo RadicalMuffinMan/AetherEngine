@@ -10,7 +10,38 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- `AetherEngine.softwareDisplaySize`: the size the software path's picture
+  presents at, the coded frame under the pixel aspect ratio the decoder attached
+  (#353). A host laying an overlay out over the picture had only
+  `sourceVideoWidth` / `sourceVideoHeight`, which are the CODED size, so
+  anamorphic content was laid out against the wrong rectangle (720x576 at 64:45
+  presents as 1024x576), and `AVSampleBufferDisplayLayer` carries no `videoRect`
+  to measure instead. Nor could a host compute it: the ratio is resolved per
+  frame across three sources (#177) and one whose display aspect is impossible
+  is dropped in favour of square pixels (#290). Read off the format description
+  the renderer enqueues rather than recomputed from the SAR, so it cannot
+  disagree with the screen. nil off the software path and before the first
+  frame; it follows a mid-stream format change and is cleared with the session.
+
+### Fixed
+
+- Anamorphic HEVC on the software host rendered at its coded dimensions (#354).
+  The VT-backed decoder attached no pixel aspect ratio, and the renderer builds
+  its format description from the delivered pixel buffer, so nothing carried the
+  ratio to the layer: 720x576 declaring 64:45 presented as 720x576, a 16:9
+  picture squashed into 5:4. The libavcodec decoder on the same host has
+  attached it since #177, so the gap was one decoder wide. Resolved once at open
+  from the bitstream ratio and the container's, through the same #177 and #290
+  gates, and attached next to the colour metadata that is re-applied there for
+  the same reason. Reached in production by the interlaced-content detour and by
+  forward-only sources, which is where broadcast SD lands.
+- The software load path cancelled every Combine sink it had already wired.
+  `softwareCancellables.removeAll()` stood between two groups of `.store(in:)`
+  calls, so the SW-PiP cue mirror never delivered a cue after the frame
+  compositor was armed, and subtitles in a software-path PiP window froze at
+  whatever was on screen when PiP started.
 
 ## [6.16.2] - 2026-08-09
 
