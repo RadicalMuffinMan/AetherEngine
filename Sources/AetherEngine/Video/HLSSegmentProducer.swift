@@ -174,6 +174,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Fires synchronously on the pump thread per finalized live segment (index, duration, startSeconds, discontinuous).
     var onLiveSegmentFinalized: (@Sendable (Int, Double, Double, Bool) -> Void)?
 
+    /// Sequential-VOD twin of `onLiveSegmentFinalized` (index, real duration in seconds): feeds
+    /// the append playlist whose EXTINF must match the media actually muxed. Set only for
+    /// sequential-origin sessions; nil keeps the historical VOD behavior byte-identical.
+    var onSequentialSegmentFinalized: (@Sendable (Int, Double) -> Void)?
+    /// Fired once when the pump reaches true source EOF (not a stop/teardown): the append
+    /// playlist completes with ENDLIST.
+    var onSequentialSourceEnded: (@Sendable () -> Void)?
+    /// Item-axis start (seconds) per VOD segment, recorded at the #65 ledger site as each
+    /// segment opens; consumed by `reportSequentialSegmentFinalized`. Pump-thread only.
+    private var vodSegmentStartByIndex: [Int: Double] = [:]
+
     /// Forward discontinuity threshold. Distinct from NOPTS-dts repair (+1 tick scale); only fires on genuine multi-second leaps.
     static let discontinuityThresholdSeconds: Double = 10.0
 
@@ -1460,6 +1471,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
             if isLive {
                 reportLiveSegmentFinalized(index: currentMuxerSegmentIndex,
                                            nextIndex: newIdx)
+            } else if onSequentialSegmentFinalized != nil {
+                reportSequentialSegmentFinalized(index: currentMuxerSegmentIndex,
+                                                 nextIndex: newIdx)
             }
             // Cut succeeded but muxer failed to open the next staging fd: silently discards every subsequent byte.
             if muxer.isWedged {
@@ -1510,6 +1524,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return muxer
     }
 
+    /// Sequential-VOD finalize report: real duration = next segment's item-axis start minus this
+    /// one's, both recorded at the #65 ledger site. Falls back to the cut target when a start is
+    /// missing (NOPTS dts at the boundary) - one estimated EXTINF beats a stalled playlist.
+    private func reportSequentialSegmentFinalized(index: Int, nextIndex: Int?) {
+        let duration: Double
+        if let start = vodSegmentStartByIndex[index],
+           let nextIndex, let nextStart = vodSegmentStartByIndex[nextIndex],
+           nextStart > start {
+            duration = nextStart - start
+        } else {
+            duration = targetSegmentDurationSeconds
+        }
+        vodSegmentStartByIndex.removeValue(forKey: index)
+        onSequentialSegmentFinalized?(index, duration)
+    }
+
     private func reportLiveSegmentFinalized(index: Int, nextIndex: Int?) {
         guard let startSeconds = liveSegmentStartByIndex[index] else {
             EngineLog.emit(
@@ -1550,6 +1580,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         byteCount: result.bytesWritten)
             if isLive {
                 reportLiveSegmentFinalized(index: idx, nextIndex: nil)
+            } else if onSequentialSegmentFinalized != nil {
+                reportSequentialSegmentFinalized(index: idx, nextIndex: nil)
             }
         } else {
             EngineLog.emit(
@@ -2759,6 +2791,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             vodLedgerLastRoutedSeg = prevSeg
                             let shiftTicks = videoShiftPts == Int64.min ? 0 : videoShiftPts
                             let outDts = prev.pointee.dts
+                            if onSequentialSegmentFinalized != nil {
+                                vodSegmentStartByIndex[prevSeg] = Double(outDts) * sourceVideoTbSeconds
+                            }
                             let srcDts = outDts &+ shiftTicks
                             let localI = prevSeg - baseIndex
                             let planSrc: Int64? = (localI >= 0 && localI < segmentBoundaries.count)

@@ -170,6 +170,12 @@ extension HLSVideoEngine {
             handleVODGateStarvationExit(prod)
             return
         }
+        // Sequential append playlist: TRUE source EOF (not a stop, not a re-anchor) completes
+        // the playlist with ENDLIST so AVPlayer can reach end-of-media - a growing playlist
+        // without ENDLIST never ends.
+        if case .eof = reason, !isLiveSession, sequentialOrigin {
+            provider?.markSequentialEnded()
+        }
         guard isLiveSession else { return }
         let reopenTransport = Self.liveReopenTransport(
             sourceReopenableByURL: sourceReopenableByURL,

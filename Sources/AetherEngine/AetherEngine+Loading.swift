@@ -126,7 +126,15 @@ extension AetherEngine {
         }
         duration
             .sink { [weak self] value in
-                if value > 0 { self?.duration = value }
+                guard let self else { return }
+                // A caller-declared duration outranks the host's: a sequential session's append
+                // playlist grows while it plays, so the item duration is the produced span, not
+                // the window length the host UI should scale its scrubber to.
+                if let declared = self.loadedOptions.declaredDurationSeconds, declared > 0 {
+                    self.duration = declared
+                } else if value > 0 {
+                    self.duration = value
+                }
             }
             .store(in: &cancellables)
         isReady
@@ -1125,6 +1133,14 @@ extension AetherEngine {
         // forwardBufferDuration default (4 s): deep buffer lets AVPlayer race to the live edge and hit the transcode warm-up gap head-on (-12888); 4 s PACES consumption. Verified: 8 s worsened startup pause (8-10 s vs ~1 s).
         // Live REJOIN: skip initial seek so AVPlayer picks edge-minus-holdback instead; seek-to-0 against the re-served backlog wedged the reloaded item in waitingToPlay (device repro: tvOS 26, Jellyfin stream.ts). See LiveReloadPolicy.
         lastNativeVideoStartPosition = startPosition ?? 0
+        // Sequential append playlist: AVPlayer treats the growing playlist as an EVENT and
+        // defaults to edge-minus-holdback (~6 s in on a fresh session, more once the producer
+        // has raced ahead). The load-time seek to 0 fires before readyToPlay and the item
+        // re-anchors to the edge default afterwards, so queue a post-readiness seek through
+        // the #127 replay instead - every segment stays retained, so 0 is always reachable.
+        if !isLive, loadedOptions.sequentialOrigin, startPosition == nil {
+            pendingPreReadySeekSeconds = 0.0
+        }
         // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch
         // and recovery reloads keep their own contracts.
         let inPlaceHandover = pendingInPlaceItemHandover

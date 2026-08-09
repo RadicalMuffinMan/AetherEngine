@@ -1414,6 +1414,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
             isLive: isLiveSession,
+            // Sequential archives: playlist grows with the producer's REAL cut durations. The
+            // static plan's uniform EXTINF lies whenever the archive's GOP cadence does not
+            // divide the cut target (1.92 s GOPs vs a 4.0 s plan put every segment's media up
+            // to 1.9 s outside its advertised window; AVPlayer visibly jumped at each resync).
+            sequentialAppendPlaylist: sequentialOrigin && !isLiveSession,
             liveWindowSizing: LiveWindowSizing(
                 targetSegmentDurationSeconds: liveCutTargetSeconds,
                 dvrWindowSeconds: dvrWindowSeconds
@@ -1453,6 +1458,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
                                         startSeconds: startPtsSeconds,
                                         durationSeconds: durationSeconds,
                                         discontinuous: discontinuous)
+            }
+        } else if sequentialOrigin {
+            prod.onSequentialSegmentFinalized = { [weak prov] index, durationSeconds in
+                prov?.appendSequentialSegmentDuration(index: index, durationSeconds: durationSeconds)
             }
         }
 
