@@ -5,6 +5,15 @@ import AetherEngine
 
 // MARK: - play
 
+/// A host's post-play audio-track pick, replayed on the CLI (#337). The delay is the whole
+/// point: a host that applies a viewer's preferred language milliseconds after `play()`
+/// rebuilds the session at `resumeAt = 0`, which is the only shape where the rebuilt
+/// session's renderer can fill before the newly selected stream's first packet arrives.
+struct AudioSwitchRequest {
+    let index: Int
+    let delayMilliseconds: Int
+}
+
 /// Full playback-session smoke test: load a URL exactly like a host app (VOD by
 /// default, `--live` for the live path), autoplay, print 1 Hz transport telemetry,
 /// and optionally activate an embedded subtitle track (`--subs <codec-or-lang>`)
@@ -12,7 +21,7 @@ import AetherEngine
 /// plays" reports and for live teletext end-to-end validation (#107).
 func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
                     censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false,
-                    sidecars: [ExternalSubtitleTrack] = []) -> Int32 {
+                    sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         AetherEngine.setLargeAllocationCensusEnabled(
@@ -21,12 +30,16 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvr
             triggerPollHz: censusHz ?? 8)
     }
     if forceSoftware { AetherEngine.setForceSoftwarePathForTesting(true) }
+    if let audioSwitch {
+        print("[aetherctl] audio switch: selectAudioTrack(index: \(audioSwitch.index)) "
+              + "\(audioSwitch.delayMilliseconds) ms after the load returns")
+    }
     print("aetherctl play: \(url.absoluteString) (seconds=\(seconds) live=\(live) nativeHLS=\(nativeHLS) dvrWindow=\(dvrWindow.map { String($0) } ?? "nil") subs=\(subsPick ?? "off") hostCalls=\(hostCalls.isEmpty ? "none" : hostCalls.joined(separator: "+")) audioStats=\(audioStats) seekEvery=\(seekEvery.map { String($0) } ?? "off") seekPattern=\(seekPattern.isEmpty ? "off" : seekPattern.map { String($0) }.joined(separator: "/")) startPosition=\(startPosition.map { String($0) } ?? "0"))")
     print("")
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition, frameTimes: frameTimes, sidecars: sidecars)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition, frameTimes: frameTimes, sidecars: sidecars, audioSwitch: audioSwitch)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -204,7 +217,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, frameTimes: Bool = false, sidecars: [ExternalSubtitleTrack] = []) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, frameTimes: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -324,6 +337,31 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         print("  AUDIOTAP installed (deliverySource=\(engine.audioTapHasDeliverySource))")
         tapTask = Task { @MainActor in
             for await buf in stream { mon.consume(buf) }
+        }
+    }
+
+    // #337: the host's language preference, applied while the session is still coming up. Fired
+    // from a detached task so the delay is real elapsed time next to the running session, not a
+    // gap the harness sleeps through before the engine ever starts.
+    if let audioSwitch {
+        let mon = monitor
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, audioSwitch.delayMilliseconds)) * 1_000_000)
+            print("  HOSTCALL selectAudioTrack(index: \(audioSwitch.index)) "
+                  + "at +\(audioSwitch.delayMilliseconds) ms (was \(engine.activeAudioTrackIndex.map(String.init) ?? "none"))")
+            engine.selectAudioTrack(index: audioSwitch.index)
+            // The tap is bound to the software host that was live when it was installed, and the
+            // switch rebuilds that host, so a run that does not re-install reports silence for the
+            // whole session and cannot tell a wedge from working audio.
+            if let mon {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let restream = engine.installAudioTap()
+                print("  AUDIOTAP re-installed after the switch "
+                      + "(deliverySource=\(engine.audioTapHasDeliverySource))")
+                Task { @MainActor in
+                    for await buf in restream { mon.consume(buf) }
+                }
+            }
         }
     }
 
@@ -547,8 +585,20 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         }
     }
     if finalTime <= 3.0 {
+        if let audioSwitch {
+            // #337: the wedge signature. state stays .playing with a first frame on screen, so the
+            // only thing that separates it from a healthy session is this clock.
+            print("VERDICT: clock never left \(String(format: "%.2f", finalTime))s after "
+                  + "selectAudioTrack(index: \(audioSwitch.index)) at +\(audioSwitch.delayMilliseconds) ms "
+                  + "(state=\(String(describing: endState))); the rebuilt session never armed its clock")
+            return 2
+        }
         print("VERDICT: clock did not advance (t=\(String(format: "%.2f", finalTime))s); transport stalled after load")
         return 2
+    }
+    if let audioSwitch {
+        print("audio switch: index=\(audioSwitch.index) at +\(audioSwitch.delayMilliseconds) ms, "
+              + "clock reached \(String(format: "%.2f", finalTime))s")
     }
     if subsPick != nil && !subsSelected {
         print("VERDICT: playback OK but requested subtitle track was never found")
