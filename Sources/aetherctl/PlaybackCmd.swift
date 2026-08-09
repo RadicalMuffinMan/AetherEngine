@@ -337,6 +337,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         print("  AUDIOTAP installed (deliverySource=\(engine.audioTapHasDeliverySource))")
         tapTask = Task { @MainActor in
             for await buf in stream { mon.consume(buf) }
+            // A finished stream and a stream that stopped yielding look identical from the
+            // buffer counter, and they are different defects (#356).
+            print("  AUDIOTAP stream finished (buffers=\(mon.bufferCount))")
         }
     }
 
