@@ -109,6 +109,43 @@ extension AetherEngine {
             .store(in: &cancellables)
     }
 
+    /// #315, measured on a device (iPhone -> Apple TV, 2026-08-09): while external playback is active the
+    /// local `AVPlayerLayer` never reaches `isReadyForDisplay`. Not once in four external loads, two of them
+    /// titles started while the receiver already held the route, while the three loads either side of them
+    /// reached it in 0.16 to 0.22 s. Folding only the layer therefore leaves the latch false for the whole
+    /// AirPlay session, and a host lifting a cover on it covers the session instead of the load.
+    ///
+    /// There is no local first frame coming there and no way to see the receiver's screen, so the readiness
+    /// of the item is the honest edge: past it the picture is the receiver's business. Deliberately NOT the
+    /// clock advancing, which would hang the paused mount this signal exists for.
+    ///
+    /// Split into a pure decision so the matrix is testable without an AVPlayer and a receiver.
+    nonisolated static func shouldLatchFirstFrameForExternalPlayback(
+        alreadyLatched: Bool,
+        hasVideoDisplaySignal: Bool,
+        isSessionReady: Bool,
+        externalPlaybackHoldsThePicture: Bool
+    ) -> Bool {
+        guard !alreadyLatched else { return false }
+        // Audio-only has a picture nowhere, so nothing about a receiver makes a first frame exist.
+        guard hasVideoDisplaySignal else { return false }
+        return isSessionReady && externalPlaybackHoldsThePicture
+    }
+
+    func latchFirstFrameForExternalPlaybackIfNeeded() {
+        guard Self.shouldLatchFirstFrameForExternalPlayback(
+            alreadyLatched: hasFirstFrameReadyForDisplay,
+            hasVideoDisplaySignal: sessionPublishesVideoDisplaySignal,
+            isSessionReady: isSessionReady,
+            externalPlaybackHoldsThePicture: externalPlaybackHoldsThePicture) else { return }
+        EngineLog.emit(
+            "[AetherEngine] #315: an external screen holds the picture, so no local first frame is coming; "
+            + "latching hasFirstFrameReadyForDisplay at readiness",
+            category: .engine
+        )
+        hasFirstFrameReadyForDisplay = true
+    }
+
     /// `videoReadyForDisplay` is the host's raw layer level (#315); nil on the audio hosts, which
     /// have nothing to display. It is folded, never mirrored: the engine's published flag is latched
     /// for the load, so the seams that reuse a host and briefly lose the picture do not surface.
@@ -122,6 +159,7 @@ extension AetherEngine {
         storeIn cancellables: inout Set<AnyCancellable>
     ) {
         if let videoReadyForDisplay {
+            sessionPublishesVideoDisplaySignal = true
             latchFirstFrameReadyForDisplay(from: videoReadyForDisplay, storeIn: &cancellables)
         }
         duration
@@ -136,6 +174,8 @@ extension AetherEngine {
                 if ready, settlePausedAtReadiness, self.state == .loading {
                     self.state = .paused
                 }
+                // #315: on an external screen this readiness IS the edge; the local layer never rises.
+                if ready { self.latchFirstFrameForExternalPlaybackIfNeeded() }
                 // #127: replay the latest host seek that arrived while the item was pre-ready.
                 // #178: not while still .loading (autostart paths hold .loading past readiness);
                 // replaying now would just re-stash. The state didSet resolves that case.

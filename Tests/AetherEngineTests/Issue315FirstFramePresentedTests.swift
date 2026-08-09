@@ -88,6 +88,43 @@ struct Issue315FirstFramePresentedTests {
         #expect(engine.hasFirstFrameReadyForDisplay == false)
     }
 
+    /// Device measurement (iPhone -> Apple TV, 2026-08-09): four loads with external playback active, none of
+    /// them ever reaching `layer.isReadyForDisplay`, against three local loads reaching it in 0.16 to 0.22 s.
+    /// The layer fold alone therefore cannot carry an AirPlay session, and readiness has to.
+    @Test("Readiness is the latch edge while an external screen holds the picture")
+    func externalPlaybackLatchesAtReadiness() {
+        func decide(video: Bool, ready: Bool, external: Bool, latched: Bool = false) -> Bool {
+            AetherEngine.shouldLatchFirstFrameForExternalPlayback(
+                alreadyLatched: latched,
+                hasVideoDisplaySignal: video,
+                isSessionReady: ready,
+                externalPlaybackHoldsThePicture: external)
+        }
+
+        #expect(decide(video: true, ready: true, external: true))
+        // Audio-only: no picture anywhere, and a gate waiting on this flag must keep waiting forever
+        // rather than be told a frame exists on a receiver that was handed audio.
+        #expect(decide(video: false, ready: true, external: true) == false)
+        // Pre-ready: the receiver has not been handed a playable item yet.
+        #expect(decide(video: true, ready: false, external: true) == false)
+        // Local: the layer fold owns this case and reaches it a beat later than readiness.
+        #expect(decide(video: true, ready: true, external: false) == false)
+        // Latched: the seam rules stay the layer's, this only ever adds a rise.
+        #expect(decide(video: true, ready: true, external: true, latched: true) == false)
+    }
+
+    @MainActor
+    @Test("An audio-only session is not latched by an external route")
+    func audioOnlySessionIgnoresExternalPlayback() async throws {
+        let engine = try AetherEngine()
+        engine.isSessionReady = true
+        // No host wired a video display signal, which is what an audio load looks like.
+        #expect(engine.sessionPublishesVideoDisplaySignal == false)
+
+        engine.latchFirstFrameForExternalPlaybackIfNeeded()
+        #expect(engine.hasFirstFrameReadyForDisplay == false)
+    }
+
     @MainActor
     @Test("stop() un-latches it")
     func stopClearsTheLatch() async throws {

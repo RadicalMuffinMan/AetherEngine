@@ -578,9 +578,22 @@ public final class AetherEngine: ObservableObject {
     ///   PiP window survives, but its content is new and has to reach its own first frame; holding
     ///   the latch across it would lift a host's cover onto the previous episode's frozen frame.
     ///
+    /// - **Not a local frame while an external screen holds the picture.** Measured on a device
+    ///   (iPhone -> Apple TV, 2026-08-09): with `isExternalPlaybackActive` true the local
+    ///   `AVPlayerLayer` never reaches `isReadyForDisplay`, on any load of the session, so folding
+    ///   only the layer would leave this false for the whole AirPlay session and hang a host that
+    ///   waits for it. There is no local first frame coming and the engine cannot see the
+    ///   receiver's screen, so past the item's readiness the picture is the receiver's business and
+    ///   the flag latches there instead. Audio-only sessions still never arm it.
+    ///
     /// For "has this seek reached the screen", the per-seek answer is `SeekEvent.landed`, not this
     /// flag: a seek keeps the previous frame up, so the layer never stops being ready for display.
     @Published public internal(set) var hasFirstFrameReadyForDisplay = false
+
+    /// True while the running session has a host video-display signal to fold (#315). Set with the
+    /// host sinks, cleared with the session, and what keeps the external-playback latch from arming
+    /// an audio-only session, which has a picture nowhere.
+    var sessionPublishesVideoDisplaySignal = false
 
     /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
     var pendingPreReadySeekSeconds: Double?
@@ -4054,6 +4067,13 @@ public final class AetherEngine: ObservableObject {
     private(set) var airPlayActive = false
     private var externalPlaybackObservation: NSKeyValueObservation?
 
+    /// True when the picture is on something other than this device's own layer: a wireless receiver or
+    /// a wired external screen. The player flag alone is not trustworthy right after an item rebuild
+    /// (#227), so the audio route, which survives the teardown, carries the wireless half.
+    var externalPlaybackHoldsThePicture: Bool {
+        isExternalPlaybackActiveNow || Self.isWirelessAirPlayRoute()
+    }
+
     /// Current external-playback state, or false where the platform has no such route.
     /// `AVPlayer.isExternalPlaybackActive` is unavailable on visionOS: video goes to the wearer's
     /// displays, there is no receiver to hand the stream to, so the whole #86 / #227 serve-the-loopback-
@@ -4215,6 +4235,9 @@ public final class AetherEngine: ObservableObject {
                            + "holding the edge until the rebuilt item settles", category: .engine)
             return
         }
+        // #315: an already-ready session that only now loses the picture to an external screen gets no further
+        // readiness edge, and on the wired path no reload either, so latch here too. No-op once latched.
+        if active { latchFirstFrameForExternalPlaybackIfNeeded() }
         // A wired HDMI external display (USB-C/Lightning-to-HDMI adapter, Sodalite#34) keeps the device as the
         // stream origin: 127.0.0.1 loopback stays reachable and the panel carries DV/HDR (DrHurt measured his
         // adapter exposing SDR/HDR/DV in Display & Brightness), so AVPlayer just pushes the already-master
@@ -4248,7 +4271,7 @@ public final class AetherEngine: ObservableObject {
     func reconcileExternalPlaybackAfterReload() {
         guard externalPlaybackEdgeHeld else { return }
         externalPlaybackEdgeHeld = false
-        let active = isExternalPlaybackActiveNow || Self.isWirelessAirPlayRoute()
+        let active = externalPlaybackHoldsThePicture
         EngineLog.emit("[AirPlay] reconciling the held edge after the reload: active=\(active) "
                        + "(player=\(isExternalPlaybackActiveNow) "
                        + "route=\(Self.isWirelessAirPlayRoute()))", category: .engine)
@@ -4735,6 +4758,7 @@ public final class AetherEngine: ObservableObject {
         isSessionReady = false
         // #315: session-scoped for the same reason, and the host mirrors are being cut here.
         hasFirstFrameReadyForDisplay = false
+        sessionPublishesVideoDisplaySignal = false
         pendingPreReadySeekSeconds = nil
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.
