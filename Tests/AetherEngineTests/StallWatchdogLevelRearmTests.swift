@@ -1,7 +1,7 @@
 import XCTest
 @testable import AetherEngine
 
-/// #65 follow-up: the stall re-engage watchdog was one-shot and edge-triggered — armed per
+/// #65 follow-up: the stall re-engage watchdog was one-shot and edge-triggered, armed per
 /// playbackStalled notification, then a SINGLE instantaneous check 6 s later. Any fetch activity
 /// inside that grace window disarmed it permanently, which parked a live player that drained its
 /// remaining tail segments and then waited forever on a frozen playlist: with a non-empty forward
@@ -65,9 +65,30 @@ final class StallWatchdogLevelRearmTests: XCTestCase {
             "a reload against a frozen playlist refills the same tail; only the host can retune")
     }
 
-    func testMovedClockMeansTheReloadTookAndNothingFires() {
+    /// One variable at a time: the clock advanced, everything else held at the firing values.
+    func testAdvancedClockAloneWithholdsTheReset() {
         XCTAssertFalse(AetherEngine.shouldPublishLiveSourceReset(
-            isLive: true, clockAtReload: 62.89, clockNow: 68.11, isWaitingToPlay: false))
+            isLive: true, clockAtReload: 62.89, clockNow: 68.11, isWaitingToPlay: true),
+            "the reload took: the rendered clock moved past the dead spot")
+    }
+
+    /// And the player state alone, with the clock held frozen.
+    func testRecoveredPlayerAloneWithholdsTheReset() {
+        XCTAssertFalse(AetherEngine.shouldPublishLiveSourceReset(
+            isLive: true, clockAtReload: 62.89, clockNow: 62.89, isWaitingToPlay: false),
+            "a player that is no longer waiting owns its own state; this rung is for the parked one")
+    }
+
+    /// The shape an equality test misses: the in-place swap took the item but not the playback, so
+    /// the fresh item parks on ITS clock (own timeline, or zero before it is ready). Just as dead,
+    /// and the rung has to see it.
+    func testSwapThatParkedOnADifferentClockStillPublishesReset() {
+        XCTAssertTrue(AetherEngine.shouldPublishLiveSourceReset(
+            isLive: true, clockAtReload: 62.89, clockNow: 0, isWaitingToPlay: true),
+            "the fresh item never got ready; a clock at zero is not progress")
+        XCTAssertTrue(AetherEngine.shouldPublishLiveSourceReset(
+            isLive: true, clockAtReload: 62.89, clockNow: 63.2, isWaitingToPlay: true),
+            "sub-epsilon drift is the same dead spot, not a reload that took")
     }
 
     func testVODNeverPublishesLiveSourceReset() {

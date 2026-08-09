@@ -31,6 +31,17 @@ the public-API contract.
   prime rebuild takes the same in-place path for live, where it used to run
   through the VOD-only restart and rebuild nothing. Contributed by @tschuegy
   (#341).
+- The stall re-engage watchdog no longer disarms itself for good when the player
+  fetches anything inside its grace window. It was one-shot and edge-triggered,
+  so a player that drained its remaining tail segments and then parked on a
+  frozen playlist was unreachable: `playbackStalled` does not re-fire while the
+  forward buffer is non-empty, a waiting player never posts
+  `failedToPlayToEndTime`, and the producer-side wedge detector died with the
+  pump. The watchdog now re-baselines and keeps watching for up to a minute, the
+  stage-2 reload carries a budget that spans stall events (a reload storm at one
+  frozen position no longer loops forever), and a live session whose clock has
+  not advanced after the reload publishes `liveSourceReset` so the host can
+  retune. Contributed by @tschuegy (#342).
 
 ## [6.18.1] - 2026-08-09
 
