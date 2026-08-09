@@ -2122,6 +2122,7 @@ final class SoftwarePlaybackHost {
     private var diagPrevClock = Double.nan
     private var diagPrevDropped = 0
     private var diagPrevEnqueued = 0
+    private var diagPrevDelay: TimeInterval = 0
 
     /// 1 Hz [SWDiag] line: clock + clock delta, decoded-audio lead over the clock, parked
     /// video FIFO depth, rebuffer state, and the display layer's OWN drop counter with its
@@ -2144,13 +2145,33 @@ final class SoftwarePlaybackHost {
             let dropped = m?.dropped ?? -1
             let dDrop = dropped >= 0 ? dropped - self.diagPrevDropped : 0
             if dropped >= 0 { self.diagPrevDropped = dropped }
+            // Accumulated render delay is the one metric that shows frames displayed LATE:
+            // a layer that stalls a few seconds and then catches up (picture leaps forward,
+            // audio uninterrupted) drops nothing and enqueues on pace - only this grows.
+            let delay = m?.accumulatedDelay ?? -1
+            let dDelay = delay >= 0 ? delay - self.diagPrevDelay : 0
+            if delay >= 0 { self.diagPrevDelay = delay }
             let dclk = clock.isFinite && prevClock.isFinite ? clock - prevClock : Double.nan
+            let layer = self.renderer.displayLayer
+            let surface = layer.superlayer != nil
+                ? "\(Int(layer.bounds.width))x\(Int(layer.bounds.height))" : "DETACHED"
+            let r4d: String
+            if #available(tvOS 17.4, iOS 17.4, macOS 14.4, *) {
+                r4d = layer.isReadyForDisplay ? "y" : "n"
+            } else {
+                r4d = "-"
+            }
             EngineLog.emit(
                 "[SWDiag] clk=\(String(format: "%.2f", clock)) "
                 + "dclk=\(dclk.isFinite ? String(format: "%.2f", dclk) : "-") "
                 + "aLead=\(lead.isFinite ? String(format: "%.2f", lead) : "-") "
                 + "parked=\(d.parked) rebuf=\(d.rebuffering ? "y" : "n") "
-                + "enq=+\(dEnq) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop))",
+                + "enq=+\(dEnq) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop)) "
+                + "delay=\(delay >= 0 ? String(format: "%.2f", delay) : "-")"
+                + "(\(dDelay >= 0 ? "+" : "")\(String(format: "%.2f", dDelay))) "
+                + "corr=\(m?.corrupted ?? -1) "
+                + "status=\(self.renderer.diagStatusName) surf=\(surface) "
+                + "r4d=\(r4d)",
                 category: .swPlayback
             )
         }

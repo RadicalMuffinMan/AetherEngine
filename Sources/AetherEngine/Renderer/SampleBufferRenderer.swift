@@ -378,6 +378,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
     }
 
+    /// [SWDiag] surface: current queue-target status for the 1 Hz diagnostic line. A mid-session
+    /// flip away from `rendering` is the layer-side stall the per-frame counters cannot show.
+    var diagStatusName: String { statusName }
+
     /// Internal (not private) for #177 regression tests: the PAR-keyed cache behavior is the fix.
     func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         // Cache hit avoids CMVideoFormatDescriptionCreateForImageBuffer allocation + CF refcount churn on every frame.
