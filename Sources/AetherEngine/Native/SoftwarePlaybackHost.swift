@@ -486,6 +486,16 @@ final class SoftwarePlaybackHost {
         isLive && codecID == AV_CODEC_ID_AAC && sampleRate == 0
     }
 
+    /// Pure decision: whether the demux loop folds PTS discontinuities into one continuous
+    /// timeline. Live always folds (encoder restarts mid-session). A forward-only non-live
+    /// source folds too: sequential-origin IPTV timeshift archives are chunked recordings
+    /// whose every chunk restarts at PTS ~0, FFmpeg's wrap correction turns that backward
+    /// jump into a ~26.5 h forward one, and a non-seekable pb offers no seek-based recovery.
+    /// Seekable VOD keeps its trusted container timeline untouched.
+    nonisolated static func shouldFoldTimeline(isLive: Bool, sourceSeekable: Bool) -> Bool {
+        isLive || !sourceSeekable
+    }
+
     // MARK: - Load
 
     func load(
@@ -1152,6 +1162,8 @@ final class SoftwarePlaybackHost {
                 videoTimeBaseSeconds: vTbSec,
                 audioTimeBaseSeconds: aTbSec,
                 isLive: liveSession,
+                foldTimeline: Self.shouldFoldTimeline(
+                    isLive: liveSession, sourceSeekable: dem.isSourceSeekable),
                 noteEdge: noteEdge,
                 isPlaying: getIsPlaying,
                 stopRequested: getStopRequested,
@@ -1623,6 +1635,7 @@ final class SoftwarePlaybackHost {
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
         isLive: Bool,
+        foldTimeline: Bool,
         noteEdge: @Sendable (Double) -> Void,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
@@ -1641,12 +1654,18 @@ final class SoftwarePlaybackHost {
     ) {
         // Clock arming: one-shot latch (seekClock is not idempotent -- re-calling snaps clock back to initialClockTime). Shared with host so a seek before first audio isn't overridden by a late re-arm.
 
-        // Live PTS-discontinuity (SW): accrue (jumpedPts - expectedContinuation) into discontinuityOffset; subtract from all subsequent PTS so the whole pipeline sees one continuous timeline. Threshold 10s (mirrors native producer); flush decoders at the seam.
+        // PTS-discontinuity fold (SW): accrue (jumpedPts - expectedContinuation) into discontinuityOffset; subtract from all subsequent PTS so the whole pipeline sees one continuous timeline. Threshold 10s (mirrors native producer); flush decoders at the seam.
+        // Runs for live AND for forward-only (sequential-origin) VOD: IPTV timeshift archives are
+        // chunked recordings whose every chunk restarts at PTS ~0 (device trace: 89 s chunk ending
+        // at raw 2717.9 s, next chunk at 0.04 s; FFmpeg's 33-bit wrap correction turned that -2718 s
+        // into +92726 s, the renderer then waited 25 h for the frame's display time and died with
+        // -12080). Seekable VOD keeps the fold off: its timeline is trusted, and a threshold-sized
+        // jump there is a container seek artifact the native path also leaves alone.
         let discontinuityThresholdSeconds = 10.0
         var prevRawVideoPtsSec = Double.nan
         var frameIntervalSec = 0.0
         var discontinuityOffsetSec = 0.0
-        var loggedSWDiscontinuity = false
+        var loggedSeamCount = 0
 
         // Clock-arming fallback bookkeeping: a declared audio track whose
         // decoder never produces buffers (corrupt stream) must not leave
@@ -1693,8 +1712,8 @@ final class SoftwarePlaybackHost {
 
             let streamIdx = packet.pointee.stream_index
 
-            // Discontinuity runs before any timestamp read; offset applied to both streams. Non-live SW skips.
-            if isLive, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+            // Discontinuity runs before any timestamp read; offset applied to both streams.
+            if foldTimeline, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
                packet.pointee.pts != Int64.min {
                 let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
                 if !prevRawVideoPtsSec.isNaN {
@@ -1707,15 +1726,19 @@ final class SoftwarePlaybackHost {
                         videoDecoder.flush()
                         audioDecoder?.flush()
                         renderer.drainReorderBuffer()
-                        if !loggedSWDiscontinuity {
-                            loggedSWDiscontinuity = true
+                        // Chunked archives seam every minute or two; log each seam (bounded by the
+                        // 10 s threshold to at most one line per 10 s of content) with a soft cap
+                        // so a pathological source cannot flood the log.
+                        if loggedSeamCount < 20 {
+                            loggedSeamCount += 1
                             EngineLog.emit(
-                                "[SWHost] live PTS discontinuity: prevPts="
+                                "[SWHost] PTS discontinuity #\(loggedSeamCount): prevPts="
                                 + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
                                 + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
                                 + "delta=\(String(format: "%.2f", deltaSec))s -> "
                                 + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
-                                + "(timeline held continuous)",
+                                + "(timeline held continuous)"
+                                + (loggedSeamCount == 20 ? " [further seams unlogged]" : ""),
                                 category: .swPlayback
                             )
                         }
@@ -1726,8 +1749,8 @@ final class SoftwarePlaybackHost {
                 prevRawVideoPtsSec = rawPtsSec
             }
 
-            // Apply discontinuity offset to timestamps in-place (live only); converts seconds to stream TB ticks.
-            if isLive, discontinuityOffsetSec != 0 {
+            // Apply discontinuity offset to timestamps in-place; converts seconds to stream TB ticks.
+            if foldTimeline, discontinuityOffsetSec != 0 {
                 let tbSec = (streamIdx == videoStreamIndex)
                     ? videoTimeBaseSeconds : audioTimeBaseSeconds
                 if tbSec > 0 {
