@@ -2998,9 +2998,27 @@ public final class AetherEngine: ObservableObject {
         // the forward-only streaming reader (#126: unknown-length HTTP MP4 produced zero segments).
         // Live sources are exempt: the live producer never seeks backward, scrub previews come from
         // the DVR segment cache, and audio-switch is already no-op for forward-only sources.
+        // An explicit sequential-origin declaration is exempt for the same reasons a live session
+        // is: the producer reads the archive linearly from byte 0, the duration is caller-declared
+        // (no tail estimate), the segment plan is the uniform-stride fallback, restarts/revives are
+        // gated off, and the cue prewarm fails fast on the non-seekable pb. Forcing those archives
+        // onto the software path traded AVPlayer's buffering and hardware decode for nothing
+        // (device trace: a 720p50 timeshift archive played clean on the native path and visibly
+        // stuttered on the software one). Declared-interlaced archives still route software via
+        // the field-order policy above - the #232 refute probe cannot run without a rewind.
         if !probe.isSourceSeekable && !options.isLive {
-            useSoftwarePath = true
-            EngineLog.emit("[AetherEngine] source is forward-only, forcing software path", category: .engine)
+            if options.sequentialOrigin {
+                if !useSoftwarePath {
+                    EngineLog.emit(
+                        "[AetherEngine] sequential origin keeps the native path (linear read, "
+                        + "declared duration, seeks unavailable)",
+                        category: .engine
+                    )
+                }
+            } else {
+                useSoftwarePath = true
+                EngineLog.emit("[AetherEngine] source is forward-only, forcing software path", category: .engine)
+            }
         }
         // TEST-ONLY: forces SW path for aetherctl live --sw; unset in shipping builds.
         if Self.forceSoftwarePathForTesting {
