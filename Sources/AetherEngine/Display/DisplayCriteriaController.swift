@@ -124,6 +124,37 @@ final class DisplayCriteriaController {
     /// one of them is written on it.
     nonisolated static let stage2CapMs = 2000
 
+    /// What the settle wait is allowed to cost, decided by what else is waiting on it.
+    enum SettleCap: Equatable {
+        /// `stage2CapMs`. For a gate that runs *before* the item is built, where breaking out early is what
+        /// releases the load, and for live, where a zap must not sit behind a panel handshake.
+        case standard
+        /// Wait for the end that was observed to be coming, up to `observedEndCapMs`. For a gate that runs
+        /// after the item is ready: nothing else is pending, so the wait costs only itself.
+        case awaitObservedEnd
+    }
+
+    /// Ceiling for `awaitObservedEnd`. Only reachable when a start notification was recorded and its end
+    /// never arrives, which did not happen once across sixteen device switches; the real numbers are 2.8 s
+    /// for a dynamic-range switch and 3.55 s for a rate switch.
+    nonisolated static let observedEndCapMs = 6000
+
+    /// A gate that ran after the load, on a switch it saw start, waits for that switch to end.
+    ///
+    /// The measurement that decides this (Apple TV 4K 3rd gen, tvOS 26.5, 2026-08-09, SDR 25p on a 60 Hz
+    /// system, so a rate-only write with no pre-flight): the item was ready at +443 ms, the cap released
+    /// `play()` at +2130 ms, and the panel finished switching at +3555 ms. **The panel blanks throughout**,
+    /// which is the part no log shows: the first visible frame lands at +3555 ms either way, so releasing
+    /// early buys no picture at all and costs 1.4 s of content played into a dark screen.
+    ///
+    /// This is the answer to "a rate-only switch does not need to be waited out" (Sodalite#49, DrHurt). It
+    /// does not need to be waited out for *correctness*, since only a range change can fail AVPlayer, but
+    /// waiting is free where the panel is dark anyway, and not waiting is not.
+    nonisolated static func settleCapMs(cap: SettleCap, startRecorded: Bool) -> Int {
+        guard cap == .awaitObservedEnd, startRecorded else { return stage2CapMs }
+        return observedEndCapMs
+    }
+
     /// Both stages spend a deadline, not a poll count. `n` sleeps of `m` ms is only `n * m` on an idle
     /// scheduler: the same 40 x 50 ms Stage 2 ran 2082 ms in one of the reporter's runs and 2862 ms in
     /// another, on a device reporting `thermal=serious` throughout. A budget that stretches 40 % under the
@@ -490,7 +521,9 @@ final class DisplayCriteriaController {
     /// `consumesRecord: false` leaves the observation readable for the load's second gate. The pre-flight
     /// passes it: it waits an HDR switch out before the item is built, and the play gate that follows is
     /// entitled to the same start/end timestamps (#339).
-    func waitForSwitch(startGrace: StartGrace = .full, consumesRecord: Bool = true) async {
+    func waitForSwitch(startGrace: StartGrace = .full,
+                       consumesRecord: Bool = true,
+                       settleCap: SettleCap = .standard) async {
         #if os(tvOS)
         guard startGrace != .skip else { return }
         guard let window = resolveWindow() else { return }
@@ -600,6 +633,10 @@ final class DisplayCriteriaController {
         // in-progress flag clearing), else a bounded ~2s cap so a panel whose DV
         // switch is unobservable to the app can't gate the first frame the way the
         // old fixed 5s poll did.
+        // What this gate may spend waiting for the end, given who is waiting on it (`settleCapMs`).
+        let capMs = Self.settleCapMs(
+            cap: settleCap,
+            startRecorded: gateSnapshot.startedAt != nil || observation.hasNewStart(since: gateSnapshot))
         let stage2Entry = DispatchTime.now()
         func timing() -> String {
             // The panel's own switch duration whenever both notifications were seen. This is the number the
@@ -614,7 +651,7 @@ final class DisplayCriteriaController {
                                      totalMs: Self.elapsedMs(since: entry),
                                      startBeforeGateMs: preGateStartMs, switchMs: switchMs)
         }
-        while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: Self.stage2CapMs) {
+        while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: capMs) {
             try? await Task.sleep(for: .milliseconds(50))
             if observation.hasNewEnd(since: gateSnapshot) {
                 EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()))", category: .engine)

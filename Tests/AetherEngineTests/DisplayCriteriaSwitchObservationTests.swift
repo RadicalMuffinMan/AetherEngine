@@ -190,3 +190,43 @@ struct DisplayCriteriaSwitchObservationTests {
             isFirstPoll: false, startNotificationFired: false, switchInProgress: false) == nil)
     }
 }
+
+// Sodalite#49, rate-only round: the play gate used to break out of a switch it had watched start, because
+// Stage 2's cap is sized for a gate that runs BEFORE the load. Device measurement (ATV 4K 3rd gen,
+// tvOS 26.5, SDR 25p on a 60 Hz system, so a rate-only write with no pre-flight): item ready +443 ms, cap
+// released play() +2130 ms, panel finished +3555 ms. The panel is dark the whole time, so the early release
+// bought no picture and cost 1.4 s of content played into a black screen.
+@Suite("DisplayCriteria settle cap by what waits on the gate (Sodalite#49)")
+struct DisplayCriteriaSettleCapTests {
+
+    @Test("A play gate that saw the switch start waits for its end")
+    func playGateAwaitsObservedEnd() {
+        #expect(DisplayCriteriaController.settleCapMs(cap: .awaitObservedEnd, startRecorded: true)
+            == DisplayCriteriaController.observedEndCapMs)
+    }
+
+    @Test("Without a recorded start there is no end to await, so the standard cap holds")
+    func unobservedSwitchKeepsTheStandardCap() {
+        // The unobservable-DV panel: nothing will report an end, so a longer ceiling is pure startup cost.
+        #expect(DisplayCriteriaController.settleCapMs(cap: .awaitObservedEnd, startRecorded: false)
+            == DisplayCriteriaController.stage2CapMs)
+    }
+
+    @Test("The pre-flight and live keep the standard cap whatever was recorded")
+    func standardCapIsUnconditional() {
+        // Pre-flight: breaking out early is what releases loadNative (AE#348). Live: a zap must not sit
+        // behind a panel handshake.
+        for recorded in [true, false] {
+            #expect(DisplayCriteriaController.settleCapMs(cap: .standard, startRecorded: recorded)
+                == DisplayCriteriaController.stage2CapMs)
+        }
+    }
+
+    @Test("The awaited ceiling clears the measured switches with room, and is still a ceiling")
+    func observedEndCapIsSized() {
+        // Measured: 2779-2898 ms dynamic range, ~3550 ms rate-only. Reachable only if a start was recorded
+        // and its end never arrives, which happened in none of sixteen device switches.
+        #expect(DisplayCriteriaController.observedEndCapMs > 3600)
+        #expect(DisplayCriteriaController.observedEndCapMs <= 6000)
+    }
+}
