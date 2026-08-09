@@ -4223,10 +4223,17 @@ public final class AetherEngine: ObservableObject {
         let wantAirPlay = active && !wired
         guard wantAirPlay != airPlayActive else { return }
         airPlayActive = wantAirPlay
-        // Loopback native path only: remote-HLS is already receiver-reachable. Reload so loadNative rebuilds
-        // the playback URL on the LAN IP + media playlist (active) or back on 127.0.0.1 master/media (inactive).
-        guard playbackBackend == .native, !loadedOptions.nativeRemoteHLS, loadedURL != nil else { return }
-        EngineLog.emit("[AirPlay] external playback \(wantAirPlay ? "active (wireless) -> LAN media reload" : "ended -> loopback reload")", category: .engine)
+        // Reload so the load path rebuilds the playback URL on the LAN IP (active) or back on 127.0.0.1
+        // (inactive). The remote-HLS bypass is exempt only while it plays the origin URL, which a receiver
+        // reaches by itself; with a #316 subtitle proxy mounted it stands on the engine's own loopback
+        // origin and needs the swap exactly like the loopback path. See AirPlayPlaylistDecision.
+        guard playbackBackend == .native, loadedURL != nil,
+              AirPlayPlaylistDecision.routeChangeNeedsReload(
+                isRemoteHLSBypass: loadedOptions.nativeRemoteHLS,
+                bypassServesLoopbackOrigin: remoteHLSSubtitleProxy != nil) else { return }
+        EngineLog.emit("[AirPlay] external playback \(wantAirPlay ? "active (wireless) -> LAN reload" : "ended -> loopback reload")"
+                       + (loadedOptions.nativeRemoteHLS ? " (remote-HLS bypass on its #316 subtitle origin)" : ""),
+                       category: .engine)
         Task { try? await reloadAtCurrentPosition() }
     }
 
