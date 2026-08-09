@@ -1443,7 +1443,7 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let stallReengageGraceSeconds: TimeInterval = 6.0
     /// #65 level re-watch: fetch activity inside the grace window used to disarm the watchdog
     /// PERMANENTLY (single instantaneous check), which parked a player that drained its tail
-    /// segments and then waited forever on a frozen playlist — playbackStalled never re-fires
+    /// segments and then waited forever on a frozen playlist: playbackStalled never re-fires
     /// while the buffer is non-empty, so nothing re-armed. The loop re-baselines instead, capped
     /// so trickling fetches on a merely slow session hand back to the producer-side arms.
     nonisolated static let maxStallWatchPasses = 10
@@ -1470,17 +1470,28 @@ public final class AetherEngine: ObservableObject {
         return passesSoFar + 1 < cap ? .rewatch : .disarm
     }
 
-    /// #65 final rung: a stage-2 reload against a FROZEN live playlist refills nothing — AVPlayer
+    /// #65 final rung: a stage-2 reload against a FROZEN live playlist refills nothing, AVPlayer
     /// re-buffers the same tail and parks again, and no notification ever re-fires. If the rendered
-    /// clock has not moved a whole post-reload window later and the player still waits, the local
+    /// clock has not ADVANCED a post-reload window later and the player still waits, the local
     /// session is unrecoverable consumer-side and only the host can retune (liveSourceReset).
+    ///
+    /// Not advanced, not unchanged: the stage-2 reload is an in-place swap, so a swap that half
+    /// took can park the fresh item at a DIFFERENT clock (its own timeline, or zero before it is
+    /// ready) while being just as dead. An equality test reads that as recovery and the rung never
+    /// fires in the shape it exists for. `progressEpsilon` is the same 0.5 s the item-death gate
+    /// and the deferred-failure check use for "the clock did not move".
+    ///
+    /// The false-positive guard is `isWaitingToPlay`, not the clock: a consumer that recovered is
+    /// `.playing`, and nothing gets here without a stall plus two silent grace windows plus a
+    /// stage-2 reload before it.
     nonisolated static func shouldPublishLiveSourceReset(
         isLive: Bool,
         clockAtReload: Double,
         clockNow: Double,
-        isWaitingToPlay: Bool
+        isWaitingToPlay: Bool,
+        progressEpsilon: Double = 0.5
     ) -> Bool {
-        isLive && clockNow == clockAtReload && isWaitingToPlay
+        isLive && clockNow <= clockAtReload + progressEpsilon && isWaitingToPlay
     }
 
     /// #93 round 3: item death (failedToPlayToEndTime after -12889 strikes) escalation.
@@ -1490,7 +1501,7 @@ public final class AetherEngine: ObservableObject {
     var itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
     /// #65 final rung, storm shape: on a frozen live playlist each stage-2 reload replays the tail,
     /// re-stalls within seconds, and the fresh stall SUPERSEDES the ladder task before its
-    /// post-reload rung can run — so the reload cycle alone would loop forever. This gate persists
+    /// post-reload rung can run, so the reload cycle alone would loop forever. This gate persists
     /// across stall events: stage-2 reloads at the same frozen position exhaust it (then the ladder
     /// publishes liveSourceReset instead of reloading again); real progress restores the budget.
     var stallReloadReviveGate = ItemDeathReviveGate(maxAttempts: 2)

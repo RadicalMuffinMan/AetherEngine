@@ -1100,7 +1100,7 @@ extension AetherEngine {
                 self.stallReengageTask?.cancel()
                 self.stallReengageTask = Task { @MainActor [weak self, weak host] in
                     // Level re-watch (#65): fetch activity inside the grace window used to disarm
-                    // this watchdog permanently — but a player that drains its remaining TAIL
+                    // this watchdog permanently, but a player that drains its remaining TAIL
                     // segments and then parks on a frozen playlist (fwd buffer non-empty, so
                     // playbackStalled never re-fires) was exactly that case, and nothing ever
                     // re-armed. Re-baseline and keep watching instead, bounded so trickling
