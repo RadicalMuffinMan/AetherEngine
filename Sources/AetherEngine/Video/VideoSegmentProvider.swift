@@ -396,7 +396,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             )
             return
         }
-        _seqDurations.append(max(0.001, durationSeconds))
+        // Zero marks a plan index a long GOP skipped entirely (no media file exists); the
+        // playlist renderer omits those entries. Negative values are producer bugs, clamp them.
+        _seqDurations.append(max(0, durationSeconds))
         stateLock.unlock()
         firstSegmentCondition.lock()
         firstSegmentCondition.broadcast()

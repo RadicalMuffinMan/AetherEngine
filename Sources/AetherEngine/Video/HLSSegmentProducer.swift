@@ -182,8 +182,35 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// playlist completes with ENDLIST.
     var onSequentialSourceEnded: (@Sendable () -> Void)?
     /// Item-axis start (seconds) per VOD segment, recorded at the #65 ledger site as each
-    /// segment opens; consumed by `reportSequentialSegmentFinalized`. Pump-thread only.
+    /// segment opens. Pump-thread only.
     private var vodSegmentStartByIndex: [Int: Double] = [:]
+    /// Capture and duration arrive in either order: the muxer rotation can fire off an AUDIO
+    /// packet crossing the boundary before the first video packet of the new segment has
+    /// recorded its start (the duration source). The report fires once BOTH are in. Pump-thread only.
+    private var seqCapturedAwaitingDuration: Set<Int> = []
+    private var seqDurationAwaitingCapture: [Int: Double] = [:]
+    /// The most recent segment index the ledger recorded a start for: a long GOP can SKIP plan
+    /// indices entirely (a 5.76 s cut spans two 4 s boundaries), so duration pairing runs against
+    /// the last RECORDED index, and the skipped holes report duration 0 (the playlist renderer
+    /// omits zero-duration entries). Pump-thread only.
+    private var lastSeqLedgerSeg = Int.min
+    /// The provider's append API is strictly contiguous; captures, holes and the EOF tail can
+    /// resolve out of order, so reports funnel through this small reorder buffer. Pump-thread only.
+    private var seqNextReportIndex: Int? = nil
+    private var seqReadyReports: [Int: Double] = [:]
+
+    /// Order-preserving funnel for sequential finalize reports.
+    private func emitSequentialReport(index: Int, duration: Double) {
+        let base = seqNextReportIndex ?? index
+        seqNextReportIndex = base
+        seqReadyReports[index] = duration
+        var next = base
+        while let d = seqReadyReports.removeValue(forKey: next) {
+            onSequentialSegmentFinalized?(next, d)
+            next += 1
+        }
+        seqNextReportIndex = next
+    }
 
     /// Forward discontinuity threshold. Distinct from NOPTS-dts repair (+1 tick scale); only fires on genuine multi-second leaps.
     static let discontinuityThresholdSeconds: Double = 10.0
@@ -1472,8 +1499,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 reportLiveSegmentFinalized(index: currentMuxerSegmentIndex,
                                            nextIndex: newIdx)
             } else if onSequentialSegmentFinalized != nil {
-                reportSequentialSegmentFinalized(index: currentMuxerSegmentIndex,
-                                                 nextIndex: newIdx)
+                reportSequentialSegmentFinalized(index: currentMuxerSegmentIndex, isFinal: false)
             }
             // Cut succeeded but muxer failed to open the next staging fd: silently discards every subsequent byte.
             if muxer.isWedged {
@@ -1524,21 +1550,39 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return muxer
     }
 
-    /// Sequential-VOD finalize report: real duration = next segment's item-axis start minus this
-    /// one's, both recorded at the #65 ledger site. Falls back to the cut target when a start is
-    /// missing (NOPTS dts at the boundary) - one estimated EXTINF beats a stalled playlist.
-    private func reportSequentialSegmentFinalized(index: Int, nextIndex: Int?) {
-        let duration: Double
-        if let start = vodSegmentStartByIndex[index],
-           let nextIndex, let nextStart = vodSegmentStartByIndex[nextIndex],
-           nextStart > start {
-            duration = nextStart - start
+    /// Sequential-VOD duration became known (next segment's start recorded at the ledger).
+    /// Reports immediately when the segment is already captured; otherwise parks until the
+    /// capture side arrives.
+    private func noteSequentialDurationKnown(index: Int, duration: Double) {
+        if seqCapturedAwaitingDuration.remove(index) != nil {
+            emitSequentialReport(index: index, duration: duration)
         } else {
-            duration = targetSegmentDurationSeconds
+            seqDurationAwaitingCapture[index] = duration
         }
-        vodSegmentStartByIndex.removeValue(forKey: index)
-        onSequentialSegmentFinalized?(index, duration)
     }
+
+    /// Sequential-VOD capture side of the pairing. `isFinal` (EOF finalize) reports with the cut
+    /// target when no next ledger entry will ever supply the real duration - one estimated tail
+    /// EXTINF beats a playlist that never completes.
+    private func reportSequentialSegmentFinalized(index: Int, isFinal: Bool) {
+        if let dur = seqDurationAwaitingCapture.removeValue(forKey: index) {
+            emitSequentialReport(index: index, duration: dur)
+        } else if isFinal {
+            let dur: Double
+            if let start = vodSegmentStartByIndex[index], lastMuxedItemAxisSeconds > start {
+                dur = lastMuxedItemAxisSeconds - start
+            } else {
+                dur = targetSegmentDurationSeconds
+            }
+            emitSequentialReport(index: index, duration: dur)
+        } else {
+            seqCapturedAwaitingDuration.insert(index)
+        }
+    }
+
+    /// Newest item-axis video segment start muxed (seconds); floors the final segment's EXTINF
+    /// estimate at EOF. Pump-thread only.
+    private var lastMuxedItemAxisSeconds: Double = 0
 
     private func reportLiveSegmentFinalized(index: Int, nextIndex: Int?) {
         guard let startSeconds = liveSegmentStartByIndex[index] else {
@@ -1581,7 +1625,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             if isLive {
                 reportLiveSegmentFinalized(index: idx, nextIndex: nil)
             } else if onSequentialSegmentFinalized != nil {
-                reportSequentialSegmentFinalized(index: idx, nextIndex: nil)
+                reportSequentialSegmentFinalized(index: idx, isFinal: true)
             }
         } else {
             EngineLog.emit(
@@ -2792,7 +2836,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             let shiftTicks = videoShiftPts == Int64.min ? 0 : videoShiftPts
                             let outDts = prev.pointee.dts
                             if onSequentialSegmentFinalized != nil {
-                                vodSegmentStartByIndex[prevSeg] = Double(outDts) * sourceVideoTbSeconds
+                                let startSec = Double(outDts) * sourceVideoTbSeconds
+                                vodSegmentStartByIndex[prevSeg] = startSec
+                                lastMuxedItemAxisSeconds = startSec
+                                // The previous segment's REAL duration is final the moment this
+                                // one's start is known; the report pairs with its capture. Plan
+                                // indices a long GOP skipped report as zero-duration holes.
+                                if lastSeqLedgerSeg != Int.min, lastSeqLedgerSeg < prevSeg,
+                                   let priorStart = vodSegmentStartByIndex[lastSeqLedgerSeg],
+                                   startSec > priorStart {
+                                    vodSegmentStartByIndex.removeValue(forKey: lastSeqLedgerSeg)
+                                    noteSequentialDurationKnown(index: lastSeqLedgerSeg,
+                                                                duration: startSec - priorStart)
+                                    for hole in (lastSeqLedgerSeg + 1)..<prevSeg {
+                                        emitSequentialReport(index: hole, duration: 0)
+                                    }
+                                }
+                                lastSeqLedgerSeg = prevSeg
                             }
                             let srcDts = outDts &+ shiftTicks
                             let localI = prevSeg - baseIndex

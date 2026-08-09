@@ -1354,6 +1354,9 @@ final class HLSLocalServer: @unchecked Sendable {
                 lastInitVersion = v
             }
             let dur = provider.segmentDuration(at: i)
+            // A zero-duration entry is a plan index the producer skipped outright (sequential
+            // sessions: a long GOP spanning two boundaries); no media file exists for it.
+            guard dur > 0 else { continue }
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
             lines.append(segURI(i))
         }
