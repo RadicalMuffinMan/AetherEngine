@@ -372,12 +372,15 @@ final class SoftwarePlaybackHost {
 
     /// #315: publish the renderer layer's own `readyForDisplay` as `isVideoReadyForDisplay`.
     /// AVFoundation posts a notification for it rather than supporting KVO, and it arrived in
-    /// tvOS/iOS 17.4 and macOS 14.4, below the engine's own floor. Where it is missing the fallback
-    /// is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which is one hop
-    /// earlier than presentation and is documented as such on the public property.
+    /// tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1, below the engine's own floor. Where it is missing
+    /// the fallback is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which
+    /// is one hop earlier than presentation and is documented as such on the public property.
+    ///
+    /// #344: visionOS has to be named. Falling through to `*` resolves it to the package's declared
+    /// visionOS floor, which is 1.0, and that is a compile error rather than a runtime fallback.
     private func armReadyForDisplayObserver() {
         disarmReadyForDisplayObserver()
-        guard #available(tvOS 17.4, iOS 17.4, macOS 14.4, *) else { return }
+        guard #available(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1, *) else { return }
         let layer = renderer.displayLayer
         readyForDisplayObserver = NotificationCenter.default.addObserver(
             forName: .AVSampleBufferDisplayLayerReadyForDisplayDidChange,
@@ -404,10 +407,12 @@ final class SoftwarePlaybackHost {
         }
     }
 
-    /// #315 fallback below tvOS/iOS 17.4 and macOS 14.4: no `readyForDisplay` on the layer, so the
-    /// first frame the decoder hands the renderer is the closest observable. Called off-main.
+    /// #315 fallback below tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1: no `readyForDisplay` on the
+    /// layer, so the first frame the decoder hands the renderer is the closest observable. Called
+    /// off-main. Mirrors the observer's list exactly: a platform named there and not here would get
+    /// neither the notification nor the fallback, so it would never publish readiness at all.
     nonisolated private func noteFirstFrameEnqueuedForDisplayFallback() {
-        guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4) else { return }
+        guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1) else { return }
         Task { @MainActor [weak self] in self?.isVideoReadyForDisplay = true }
     }
 

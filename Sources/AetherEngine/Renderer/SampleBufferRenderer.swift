@@ -162,9 +162,13 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// that imports the async accessor as `nonisolated` refuses to take that non-Sendable renderer
     /// from the main actor. The completion form suspends without moving the renderer anywhere, so it
     /// holds on both. Every caller is main-actor isolated already, so the annotation costs no hop.
+    ///
+    /// #344: the version list gates the metrics accessor (tvOS/iOS 17.4, macOS 14.4, visionOS 1.1),
+    /// not the renderer, which exists from visionOS 1.0. tvOS/iOS 18 and macOS 15 stay as they are:
+    /// below them `queueTarget` is the display layer, so there is no renderer to ask.
     @MainActor
     func loadRenderMetrics() async -> RenderMetrics? {
-        guard #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) else { return nil }
+        guard #available(tvOS 18.0, iOS 18.0, macOS 15.0, visionOS 1.1, *) else { return nil }
         let renderer = displayLayer.sampleBufferRenderer
         return await withCheckedContinuation { (cont: CheckedContinuation<RenderMetrics?, Never>) in
             renderer.loadVideoPerformanceMetrics { m in
@@ -179,7 +183,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     // MARK: - Queue rendering target
 
-    /// tvOS 18+ / iOS 18+ / macOS 15+: use AVSampleBufferVideoRenderer via displayLayer.sampleBufferRenderer. Calling the deprecated layer enqueue/flush/isReadyForMoreMediaData on tvOS 26+ with AVSampleBufferRenderSynchronizer fails with FigVideoQueueRemote -12080 after the first enqueue. Older OSes use the layer directly via AVQueuedSampleBufferRendering.
+    /// tvOS 18+ / iOS 18+ / macOS 15+: use AVSampleBufferVideoRenderer via displayLayer.sampleBufferRenderer. Calling the deprecated layer enqueue/flush/isReadyForMoreMediaData on tvOS 26+ with AVSampleBufferRenderSynchronizer fails with FigVideoQueueRemote -12080 after the first enqueue. Older OSes use the layer directly via AVQueuedSampleBufferRendering. visionOS is not named because it has the renderer from 1.0, which is the package floor, so the `*` arm is the renderer arm there and naming it would be a check that is always true.
     var queueTarget: any AVQueuedSampleBufferRendering {
         if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
             return displayLayer.sampleBufferRenderer
