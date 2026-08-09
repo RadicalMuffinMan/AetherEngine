@@ -233,6 +233,32 @@ final class DisplayCriteriaController {
         case none
     }
 
+    /// May a raised EDR headroom end the settle wait?
+    ///
+    /// Only while no switch has been observed to start. The headroom rises *with* the dynamic-range
+    /// transition, so during a switch it reports "HDR is coming up", not "the panel is done". Device
+    /// measurement (Apple TV 4K 3rd gen, tvOS 26.5, 2026-08-09, notifications captured on all objects): a run
+    /// whose headroom reached 1.20 at +374 ms belonged to a switch whose end notification arrived at
+    /// +2851 ms. The gate released `play()` 2.5 s into a running HDMI handshake, which is the "first frame
+    /// hits a mid-transition panel" case the whole wait exists to prevent, and the shape Sodalite#49 was
+    /// filed on.
+    ///
+    /// With a start observed, the authoritative end is the end notification or the in-progress flag
+    /// clearing. Both were exact on that device: the flag cleared within 1 ms of the notification.
+    nonisolated static func headroomMayEndSettle(startObserved: Bool) -> Bool {
+        !startObserved
+    }
+
+    /// May the entry fast-exit take a raised headroom as "nothing to wait for"?
+    ///
+    /// Its purpose is the panel a previous session already drove into HDR: no transition is pending and the
+    /// wait would be dead time. A panel that is mid-switch produces the same raised headroom for the
+    /// opposite reason, so the in-progress flag has to agree. Same device run: the play gate read headroom
+    /// 1.20 at entry and returned in 0 ms while the switch had another 2.4 s to run.
+    nonisolated static func entryHeadroomIsSettled(headroomAboveOne: Bool, switchInProgress: Bool) -> Bool {
+        headroomAboveOne && !switchInProgress
+    }
+
     /// Whether a recorded switch belongs to the load whose gate is asking (#339).
     ///
     /// The record survives between loads, and two gates in one load can read it (an HDR write settles in the
@@ -381,7 +407,7 @@ final class DisplayCriteriaController {
         // #339: arm before the write. The switch this triggers can start and finish while the AVPlayerItem
         // is being built, and observers registered at gate entry miss both notifications; that is why two of
         // three device runs in Sodalite#49 never saw an end for a switch that was already over.
-        observation.arm(manager: displayManager)
+        observation.arm()
         displayManager.preferredDisplayCriteria = criteria
         didApply = true
         lastCriteriaWasHDR = isHDR
@@ -409,7 +435,7 @@ final class DisplayCriteriaController {
     func armSwitchObservation() {
         #if os(tvOS)
         guard let window = resolveWindow() else { return }
-        observation.arm(manager: window.avDisplayManager)
+        observation.arm()
         #endif
     }
 
@@ -450,9 +476,10 @@ final class DisplayCriteriaController {
         }
 
         // Fast exit: panel already in HDR (headroom already raised, e.g. a prior
-        // HDR/DV session left it there).
-        if observeHeadroom(screen) {
-            EngineLog.emit("[DisplayCriteria] no switch needed (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) at entry)", category: .engine)
+        // HDR/DV session left it there) and not currently switching.
+        if Self.entryHeadroomIsSettled(headroomAboveOne: observeHeadroom(screen),
+                                       switchInProgress: displayManager.isDisplayModeSwitchInProgress) {
+            EngineLog.emit("[DisplayCriteria] no switch needed (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) at entry, panel not switching)", category: .engine)
             return
         }
 
@@ -507,7 +534,9 @@ final class DisplayCriteriaController {
         if startSignal == .none {
             var isFirstPoll = true
             while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: entry), budgetMs: startGrace.budgetMs) {
-                if observation.hasNewEnd(since: gateSnapshot) || observeHeadroom(screen) {
+                let headroomSettles = observeHeadroom(screen)
+                    && Self.headroomMayEndSettle(startObserved: observation.hasNewStart(since: gateSnapshot))
+                if observation.hasNewEnd(since: gateSnapshot) || headroomSettles {
                     EngineLog.emit("[DisplayCriteria] settled during start phase (after \(Self.elapsedMs(since: entry))ms, EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                     return
                 }
@@ -557,7 +586,9 @@ final class DisplayCriteriaController {
                 EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()))", category: .engine)
                 return
             }
-            if observeHeadroom(screen) {
+            // Only meaningful before a start was seen: the headroom rises with the transition, so during an
+            // observed switch it is the panel warming up, not the panel being done.
+            if observeHeadroom(screen), Self.headroomMayEndSettle(startObserved: startSignal == .preGateObserved || startSignal == .inGate) {
                 EngineLog.emit("[DisplayCriteria] switch settled via EDR (\(timing()), headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 return
             }
@@ -721,34 +752,38 @@ private final class SwitchObservation: @unchecked Sendable {
     private var endCount = 0
     private var generation = 0
     private var tokens: [NSObjectProtocol] = []
-    private var observedManager: ObjectIdentifier?
 
-    /// Clear the record and, on first use or a display change, register for this manager. Called immediately
-    /// before a criteria write so everything the following gate reads belongs to that write.
-    func arm(manager: AVDisplayManager) {
-        let id = ObjectIdentifier(manager)
+    /// Clear the record and, on first use, register. Called immediately before a criteria write so
+    /// everything the following gate reads belongs to that write.
+    ///
+    /// `object: nil` is the load-bearing part. tvOS posts both notifications from an
+    /// **`AVSharedDisplayManager`**, not from the `AVDisplayManager` that `window.avDisplayManager` returns
+    /// and that `preferredDisplayCriteria` is written to. Filtering on that manager, which is what this code
+    /// did from the start, dropped every notification the settle gate exists to read. Device probe, Apple TV
+    /// 4K (3rd gen), tvOS 26.5, 2026-08-09, listening on all objects:
+    ///
+    ///     FIRED AVDisplayManagerModeSwitchStartNotification object=AVSharedDisplayManager@0x10b581a10
+    ///     our manager=AVDisplayManager@0x1036fdfa0
+    ///
+    /// Six start/end pairs arrived that way in three playbacks while the engine's filtered observers saw
+    /// none. That, not the registration point, is why no run in Sodalite#49 ever reported an end.
+    func arm() {
         lock.lock()
         startedAt = nil
         endedAt = nil
         startCount = 0
         endCount = 0
         generation += 1
-        let alreadyObserving = observedManager == id && !tokens.isEmpty
-        let stale = alreadyObserving ? [] : tokens
-        if !alreadyObserving {
-            tokens = []
-            observedManager = id
-        }
+        let needsRegistration = tokens.isEmpty
         lock.unlock()
 
-        guard !alreadyObserving else { return }
-        stale.forEach { NotificationCenter.default.removeObserver($0) }
+        guard needsRegistration else { return }
         // Weak, or the token retains the block retains this object for the process lifetime.
         let start = NotificationCenter.default.addObserver(
-            forName: .AVDisplayManagerModeSwitchStart, object: manager, queue: nil
+            forName: .AVDisplayManagerModeSwitchStart, object: nil, queue: nil
         ) { [weak self] _ in self?.record(isStart: true) }
         let end = NotificationCenter.default.addObserver(
-            forName: .AVDisplayManagerModeSwitchEnd, object: manager, queue: nil
+            forName: .AVDisplayManagerModeSwitchEnd, object: nil, queue: nil
         ) { [weak self] _ in self?.record(isStart: false) }
         lock.lock()
         tokens = [start, end]

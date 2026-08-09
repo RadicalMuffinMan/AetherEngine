@@ -43,6 +43,25 @@ struct DisplayCriteriaSwitchObservationTests {
             gateEntryNanos: gateEntry, switchInProgress: false) == .none)
     }
 
+    // MARK: - The headroom is not an end signal
+
+    @Test("A raised headroom ends the wait only while no switch has been seen to start")
+    func headroomIsNotAnEndSignalDuringASwitch() {
+        // Device run, ATV 4K 3rd gen, tvOS 26.5: headroom 1.20 at +374ms, end notification at +2851ms. The
+        // headroom rises with the transition, so mid-switch it says "HDR is coming", not "the panel is done".
+        #expect(DisplayCriteriaController.headroomMayEndSettle(startObserved: false))
+        #expect(!DisplayCriteriaController.headroomMayEndSettle(startObserved: true))
+    }
+
+    @Test("The entry fast-exit needs the in-progress flag to agree with the headroom")
+    func entryFastExitRequiresAnIdlePanel() {
+        // Same run: the play gate read headroom 1.20 at entry and returned in 0 ms while the switch had
+        // 2.4 s left. A panel already in HDR and a panel mid-transition read identically here.
+        #expect(DisplayCriteriaController.entryHeadroomIsSettled(headroomAboveOne: true, switchInProgress: false))
+        #expect(!DisplayCriteriaController.entryHeadroomIsSettled(headroomAboveOne: true, switchInProgress: true))
+        #expect(!DisplayCriteriaController.entryHeadroomIsSettled(headroomAboveOne: false, switchInProgress: false))
+    }
+
     // MARK: - Whose switch is it
 
     @Test("A record is pre-gate evidence once, for the load it was armed in")
