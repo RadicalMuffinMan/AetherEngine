@@ -12,6 +12,34 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.16.0] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.0))
+
+### Changed
+
+- The play gate waits for a panel mode switch it observed starting, instead of
+  breaking out of it after 2 s. Device-measured: a rate switch takes ~3.55 s and
+  the panel is dark throughout, so releasing early bought no picture and played
+  1.4 s of content into a black screen. The pre-flight gate, live, and panels
+  that report no switch start keep the previous cap.
+
+### Fixed
+
+- Mode-switch notifications are observed from the manager that posts them. tvOS
+  posts `AVDisplayManagerModeSwitchStart` / `...End` from an
+  `AVSharedDisplayManager`, not from the `AVDisplayManager` that
+  `preferredDisplayCriteria` is written to, so the settle gate had never seen a
+  single one and fell back on the in-progress flag and the EDR headroom.
+- The EDR headroom no longer ends a switch that was observed to start. It peaks
+  during the transition, and had been releasing playback up to 2.5 s before the
+  panel finished.
+- The mode-switch observation is armed at the criteria write rather than at the
+  play gate, so a switch that starts and finishes during the load is knowable
+  rather than invisible, and both gates of one load read the same record.
+- Settle lines report the panel's measured switch duration when both
+  notifications were seen.
+
 ## [6.15.3] - 2026-08-08
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.15.3))
