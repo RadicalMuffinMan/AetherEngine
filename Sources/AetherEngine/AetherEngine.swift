@@ -2831,7 +2831,9 @@ public final class AetherEngine: ObservableObject {
             ) {
             case .willSwitch:
                 didSwitchPanel = true
-                await displayCriteria.waitForSwitch()
+                // #339: consumesRecord: false, the play gate after loadNative is entitled to the same
+                // start/end timestamps; spending them here made it pay Stage 1's grace for a settled switch.
+                await displayCriteria.waitForSwitch(consumesRecord: false)
                 // Superseded during panel handshake: close local probe and unwind.
                 if loadGeneration != gen {
                     probe.markClosed()

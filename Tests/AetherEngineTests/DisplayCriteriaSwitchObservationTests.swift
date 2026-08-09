@@ -77,14 +77,12 @@ struct DisplayCriteriaSwitchObservationTests {
 
     // MARK: - Whose switch is it
 
-    @Test("A record is pre-gate evidence once, for the load it was armed in")
-    func recordIsConsumedOnce() {
-        // Two gates run inside one load when an HDR write settles in the pre-flight and the play gate
-        // follows. The second must not be handed the same switch again.
-        #expect(DisplayCriteriaController.shouldConsumeObservation(
-            recordGeneration: 7, lastConsumedGeneration: 6))
-        #expect(!DisplayCriteriaController.shouldConsumeObservation(
-            recordGeneration: 7, lastConsumedGeneration: 7))
+    @Test("A record is evidence until a gate spends it, which the pre-flight does not")
+    func recordIsEvidenceUntilSpent() {
+        // Both gates of one load are entitled to the same switch: the pre-flight waits it out without
+        // spending the record, so the play gate can still see that it settled instead of paying Stage 1.
+        #expect(DisplayCriteriaController.recordIsFreshEvidence(recordGeneration: 7, lastSpentGeneration: 6))
+        #expect(!DisplayCriteriaController.recordIsFreshEvidence(recordGeneration: 7, lastSpentGeneration: 7))
     }
 
     @Test("A load that arms nothing reads no record: the previous load's switch is not its own")
@@ -92,10 +90,8 @@ struct DisplayCriteriaSwitchObservationTests {
         // An engine-writer reload re-applies no criteria, so it arms nothing. Reading the last load's start
         // would send it into Stage 2 to wait out an end that can no longer arrive, adding the full cap to a
         // load where nothing is switching.
-        #expect(!DisplayCriteriaController.shouldConsumeObservation(
-            recordGeneration: 0, lastConsumedGeneration: 0))
-        #expect(!DisplayCriteriaController.shouldConsumeObservation(
-            recordGeneration: 3, lastConsumedGeneration: 3))
+        #expect(!DisplayCriteriaController.recordIsFreshEvidence(recordGeneration: 0, lastSpentGeneration: 0))
+        #expect(!DisplayCriteriaController.recordIsFreshEvidence(recordGeneration: 3, lastSpentGeneration: 3))
     }
 
     // MARK: - Started, not finished

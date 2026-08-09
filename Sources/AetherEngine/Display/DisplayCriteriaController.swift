@@ -45,9 +45,10 @@ final class DisplayCriteriaController {
     private let observation = SwitchObservation()
     #endif
 
-    /// The arm generation whose record a gate has already read. A record is pre-gate evidence exactly once,
-    /// for the load it was armed in (`shouldConsumeObservation`).
-    private var consumedArmGeneration: Int = 0
+    /// The arm generation whose record has been spent. Only a gate that ends the load's wait spends it, so
+    /// both gates of one load see the same evidence while a later, unarmed gate sees none
+    /// (`recordIsFreshEvidence`).
+    private var spentArmGeneration: Int = 0
 
     /// The identifying inputs of an apply(): equal signatures mean the panel is already in the target mode.
     struct AppliedCriteria: Equatable {
@@ -273,12 +274,16 @@ final class DisplayCriteriaController {
 
     /// Whether a recorded switch belongs to the load whose gate is asking (#339).
     ///
-    /// The record survives between loads, and two gates in one load can read it (an HDR write settles in the
-    /// pre-flight, then the play gate runs). Consuming it once per arm keeps a switch from being credited
-    /// twice: without this, an engine-writer reload, which arms nothing because it re-applies nothing, would
-    /// read the previous load's start and wait out an end that can no longer arrive.
-    nonisolated static func shouldConsumeObservation(recordGeneration: Int, lastConsumedGeneration: Int) -> Bool {
-        recordGeneration != 0 && recordGeneration != lastConsumedGeneration
+    /// The record survives between loads, so a gate that runs without a preceding arm must not read it: an
+    /// engine-writer reload re-applies no criteria and arms nothing, and inheriting the previous load's start
+    /// would make it wait out an end that can no longer arrive.
+    ///
+    /// Marking the record spent is a separate decision (`consumesRecord`), because a load runs up to two
+    /// gates and both are entitled to the same evidence. The pre-flight deliberately does not spend it: on
+    /// the device, a play gate that opened after its switch had ended found the record already spent, fell
+    /// back to Stage 1 and paid its 200 ms grace for a switch it could have known was over.
+    nonisolated static func recordIsFreshEvidence(recordGeneration: Int, lastSpentGeneration: Int) -> Bool {
+        recordGeneration != 0 && recordGeneration != lastSpentGeneration
     }
 
     /// Pure verdict on the recorded timestamps.
@@ -470,7 +475,10 @@ final class DisplayCriteriaController {
     /// timeout. Presenting slightly early on that fallback is at worst cosmetic:
     /// the panel is mid re-sync (black) during the handshake and shows the correct
     /// frame once it locks. The decode/color-correctness guard is Stage 1 below.
-    func waitForSwitch(startGrace: StartGrace = .full) async {
+    /// `consumesRecord: false` leaves the observation readable for the load's second gate. The pre-flight
+    /// passes it: it waits an HDR switch out before the item is built, and the play gate that follows is
+    /// entitled to the same start/end timestamps (#339).
+    func waitForSwitch(startGrace: StartGrace = .full, consumesRecord: Bool = true) async {
         #if os(tvOS)
         guard startGrace != .skip else { return }
         guard let window = resolveWindow() else { return }
@@ -504,8 +512,8 @@ final class DisplayCriteriaController {
         var preGateStartMs: Int?
 
         let observed: ObservedSwitch
-        if Self.shouldConsumeObservation(recordGeneration: gateSnapshot.generation,
-                                         lastConsumedGeneration: consumedArmGeneration) {
+        if Self.recordIsFreshEvidence(recordGeneration: gateSnapshot.generation,
+                                      lastSpentGeneration: spentArmGeneration) {
             observed = Self.observedSwitch(
                 startedAtNanos: gateSnapshot.startedAt,
                 endedAtNanos: gateSnapshot.endedAt,
@@ -514,7 +522,7 @@ final class DisplayCriteriaController {
         } else {
             observed = .none
         }
-        consumedArmGeneration = gateSnapshot.generation
+        if consumesRecord { spentArmGeneration = gateSnapshot.generation }
 
         switch observed {
         case .settled(let before, let measured):
