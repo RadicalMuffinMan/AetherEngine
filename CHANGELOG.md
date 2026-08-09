@@ -12,6 +12,23 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.16.1] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.1))
+
+### Fixed
+
+- A wireless AirPlay route change reloads the `nativeRemoteHLS` bypass when it is
+  serving its own loopback origin. The bypass was exempt from that reload on the
+  premise that remote HLS is always receiver-reachable, which stopped holding in
+  6.14.0: with text sidecars declared at load, the bypass plays a master the
+  engine serves from the loopback, and a receiver cannot reach `127.0.0.1`.
+  Engaging AirPlay mid-playback therefore handed the receiver an address it
+  could not fetch, losing the whole session rather than just its subtitles, with
+  no watchdog underneath it because that path builds no `HLSVideoEngine` session.
+  Engaging AirPlay before playback started was never affected, and neither were
+  wired displays, PiP, or tvOS.
+
 ## [6.16.0] - 2026-08-09
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.0))
