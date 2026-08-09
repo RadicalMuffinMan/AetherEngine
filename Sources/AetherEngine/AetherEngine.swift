@@ -909,12 +909,18 @@ public final class AetherEngine: ObservableObject {
     /// Use to gate the AVMediaSelection picker (PiP/AirPlay). Cleared by clearSubtitle and stopInternal.
     @Published public internal(set) var nativeSubtitleRenditionAvailable: Bool = false
 
-    /// True when the SERVED playlist is the master (so the master's SUBTITLES renditions reach an
-    /// external display), false when the media playlist is served (Sodalite#98 external-subtitle window).
-    /// Mirrors the inner session's `servingMasterPlaylist`; the "and renditions exist" refinement is
-    /// unnecessary because text subtitles on iOS always get renditions prepared, and bitmap subtitles on
-    /// an HDR external display stay a pre-existing limitation (unchanged). Goes false on a media fallback.
-    /// The host uses it to decide whether to draw its own subtitle window on a wired external display.
+    /// True when the SERVED playlist is the master, false when the media playlist is served. Mirrors the
+    /// inner session's `servingMasterPlaylist` and goes false on a media fallback.
+    ///
+    /// A playlist property, nothing more. It once carried the reading "so the master's SUBTITLES
+    /// renditions reach an external display", and a host gated its own external-subtitle window on that
+    /// (Sodalite#98). Device evidence disproved it (Sodalite#34, 2026-08-09): across a wired HDMI adapter
+    /// the master is served for SDR content on any panel and for HDR content on an HDR panel, and in all
+    /// of those the subtitles stayed on the phone; they reached the external screen only in the one
+    /// configuration serving media, where the host was allowed to take the screen and draw them itself.
+    /// Whether a legible rendition is rendered on a wired external display is AVKit's business and is not
+    /// observable from here, so do not derive that from this flag. Useful as a reload signal (a serving
+    /// change means a rebuilt item) and for diagnostics.
     @Published public internal(set) var nativeSubtitleRenditionsServed: Bool = false
 
     /// Ordered native mov_text subtitle tracks for the session (#55). Populated from nativeSubtitleTrackTable
