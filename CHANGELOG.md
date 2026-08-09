@@ -12,6 +12,31 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.16.2] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.2))
+
+### Fixed
+
+- `hasFirstFrameReadyForDisplay` latches on the item's readiness while an
+  external screen holds the picture. Device-measured (iPhone to Apple TV): with
+  external playback active the local `AVPlayerLayer` never reaches
+  `isReadyForDisplay`, on any load of the session, so a flag folded from that
+  layer alone stayed false for the whole AirPlay session and a host lifting a
+  cover on it covered the session instead of the load. Audio-only sessions still
+  never arm it, and the seam rules are unchanged: this only ever adds a rise.
+  Wired HDMI takes the same latch, it flips `isExternalPlaybackActive` too and
+  keeps no local picture either.
+
+### Documentation
+
+- Corrected which seams `hasFirstFrameReadyForDisplay` survives. The AE#158
+  in-place handover was listed among them and is not one: it is a full `load()`,
+  which un-latches. The discriminator is the entry point, not the `inPlaceSwap`
+  flag a swap is made with. The media fallback, the AirPlay master swap and the
+  #93 recovery reload call `host.load(inPlaceSwap:)` themselves and are
+  unchanged.
+
 ## [6.16.1] - 2026-08-09
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.1))
