@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.17.1] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.17.1))
+
 ### Fixed
 
 - Software path: a cold-start session no longer deadlocks when the selected
