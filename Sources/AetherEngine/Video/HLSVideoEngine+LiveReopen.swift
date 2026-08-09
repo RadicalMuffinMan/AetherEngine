@@ -97,18 +97,25 @@ extension HLSVideoEngine {
         return .none
     }
 
-    /// Live muxerFailed pure decision: the muxer died but the connection is healthy, so the arm rebuilds
-    /// the producer in place — bounded by PROGRESS, not per session: a rebuild that cut new segments since
-    /// the last death earns a fresh budget (an hours-long channel legitimately crosses several encoder
-    /// restarts), while `cap` consecutive barren deaths mean the source is not muxable as-is and the
-    /// session must halt production and delegate to host retune.
-    static func liveMuxerRebuildDecision(
-        continuationIndex: Int,
-        lastContinuationIndex: Int,
+    /// Shared budget for both live recovery arms (in-place muxer rebuild, reopen): bounded by PROGRESS,
+    /// not per session. A recovery that cut new segments since the last death earns a fresh budget (an
+    /// hours-long channel legitimately crosses several encoder restarts, so a session-lifetime gate like
+    /// the VOD #99 one would be wrong here), while `cap` consecutive BARREN attempts mean the source is
+    /// not usable as-is and the session must halt production and delegate to host retune.
+    ///
+    /// The progress index is the provider's continuation point, i.e. how many segments have ever been
+    /// produced, so "barren" means the last recovery produced nothing at all.
+    ///
+    /// One deliberate hole, the same one the reopen arm has always had: a source that dies after every
+    /// handful of segments never goes barren and so recovers forever. Bounding that needs a rate, not a
+    /// counter, and an eager cap would kill exactly the long-running channels this budget exists for.
+    static func liveRecoveryBudgetDecision(
+        progressIndex: Int,
+        lastProgressIndex: Int,
         barrenCycles: Int,
         cap: Int
-    ) -> (rebuild: Bool, newBarrenCycles: Int) {
-        let cycles = continuationIndex == lastContinuationIndex ? barrenCycles + 1 : 0
+    ) -> (proceed: Bool, newBarrenCycles: Int) {
+        let cycles = progressIndex == lastProgressIndex ? barrenCycles + 1 : 0
         return (cycles < cap, cycles)
     }
 
@@ -227,15 +234,17 @@ extension HLSVideoEngine {
         }
         restartLock.lock()
         let segmentsNow = provider?.liveContinuationPoint().nextIndex ?? 0
-        if segmentsNow == lastReopenSegmentCount {
-            barrenReopenCycles += 1
-        } else {
-            barrenReopenCycles = 0
-        }
+        let reopenDecision = Self.liveRecoveryBudgetDecision(
+            progressIndex: segmentsNow,
+            lastProgressIndex: lastReopenSegmentCount,
+            barrenCycles: barrenReopenCycles,
+            cap: Self.maxBarrenReopenCycles
+        )
+        barrenReopenCycles = reopenDecision.newBarrenCycles
         lastReopenSegmentCount = segmentsNow
-        let barrenNow = barrenReopenCycles
+        let barrenNow = reopenDecision.newBarrenCycles
         restartLock.unlock()
-        if barrenNow >= Self.maxBarrenReopenCycles {
+        if !reopenDecision.proceed {
             EngineLog.emit(
                 "[HLSVideoEngine] live source produced no segments across "
                 + "\(barrenNow) reopen cycles; giving up (source considered dead)",
@@ -443,7 +452,7 @@ extension HLSVideoEngine {
         requestRestart(at: idx, authoritative: true)
     }
 
-    /// Live arm for a pump death with `muxerFailed` — previously a bare return: the provider kept serving
+    /// Live arm for a pump death with `muxerFailed`, previously a bare return: the provider kept serving
     /// a frozen playlist, AVPlayer parked on it, and the session zombified until the viewer zapped away.
     /// The connection is healthy (the muxer died, not the socket), so the recovery rebuilds the producer
     /// IN PLACE on the same demuxer and provider at the live continuation point. A reopen is the wrong
@@ -452,9 +461,9 @@ extension HLSVideoEngine {
     func handleLiveMuxerFailure(_ prod: HLSSegmentProducer) {
         restartLock.lock()
         let nextNow = provider?.liveContinuationPoint().nextIndex ?? 0
-        let decision = Self.liveMuxerRebuildDecision(
-            continuationIndex: nextNow,
-            lastContinuationIndex: lastMuxerRebuildSegmentCount,
+        let decision = Self.liveRecoveryBudgetDecision(
+            progressIndex: nextNow,
+            lastProgressIndex: lastMuxerRebuildSegmentCount,
             barrenCycles: liveMuxerRebuildCycles,
             cap: Self.maxLiveMuxerRebuildCycles
         )
@@ -462,7 +471,7 @@ extension HLSVideoEngine {
         lastMuxerRebuildSegmentCount = nextNow
         restartLock.unlock()
 
-        guard decision.rebuild else {
+        guard decision.proceed else {
             EngineLog.emit(
                 "[HLSVideoEngine] live muxer died \(decision.newBarrenCycles) times with no new segment; "
                 + "halting production and requesting host retune",

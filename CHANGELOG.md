@@ -21,6 +21,16 @@ the public-API contract.
   frame cannot prime a bridge-encoded track. The producer now retains the last
   audio frame a muxer accepted and primes every later allocation with it.
   Contributed by @tschuegy (#340).
+- A live pump death with `muxerFailed` no longer zombifies the session. It had
+  no recovery arm at all: the provider kept serving a frozen playlist, AVPlayer
+  parked on it waiting for buffer that never came, and nothing surfaced to the
+  host. The live arm now rebuilds the producer in place on the same connection
+  at the live continuation point (a reopen would double-connect against a
+  healthy socket), bounded by progress rather than per session, and halts
+  production plus asks the host to retune once the budget is spent. The AE#222
+  prime rebuild takes the same in-place path for live, where it used to run
+  through the VOD-only restart and rebuild nothing. Contributed by @tschuegy
+  (#341).
 
 ## [6.18.1] - 2026-08-09
 
