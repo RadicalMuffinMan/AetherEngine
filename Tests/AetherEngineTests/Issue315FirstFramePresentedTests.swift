@@ -60,12 +60,32 @@ struct Issue315FirstFramePresentedTests {
         host.isVideoReadyForDisplay = true
 
         // The measured shape of an item swap on a reused host: ~40 ms of false, then true again.
-        // Media fallback, the AirPlay master swap, the #93 recovery and the AE#158 in-place handover
-        // all take it, and a host must not re-cover a picture for any of them.
+        // The media fallback, the AirPlay master swap and the #93 recovery reload all call
+        // host.load(inPlaceSwap:) themselves, reach no stopInternal, and a host must not re-cover a
+        // picture for any of them.
         host.isVideoReadyForDisplay = false
         #expect(engine.hasFirstFrameReadyForDisplay == true)
         host.isVideoReadyForDisplay = true
         #expect(engine.hasFirstFrameReadyForDisplay == true)
+    }
+
+    @MainActor
+    @Test("The AE#158 in-place handover is a load(), so it un-latches like any other")
+    func inPlaceHandoverUnlatchesLikeAnyLoad() async throws {
+        let engine = try AetherEngine()
+        var cancellables = Set<AnyCancellable>()
+        let host = HostDouble(false)
+        engine.latchFirstFrameReadyForDisplay(from: host.$isVideoReadyForDisplay, storeIn: &cancellables)
+        host.isVideoReadyForDisplay = true
+        #expect(engine.hasFirstFrameReadyForDisplay == true)
+
+        // What load() runs for a PiP next-episode handover: the outgoing item stays attached so the
+        // system PiP window survives the teardown, which is what makes this seam look like the three
+        // above. It is not one of them. The content is new, so its own first frame has to be reached
+        // again, and holding the latch here would lift a host's cover onto the previous episode's
+        // frozen frame.
+        engine.stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCurrentItem: true)
+        #expect(engine.hasFirstFrameReadyForDisplay == false)
     }
 
     @MainActor

@@ -565,14 +565,18 @@ public final class AetherEngine: ObservableObject {
     ///   a host that never bound a surface still gets true here while showing nothing (#298), and
     ///   an `AVPlayerViewController` host presents through AVKit's own layer a frame or so later.
     /// - **Not a level.** It is latched for the load: false at every `load()` and at `stop()`, true
-    ///   once and then held. The seams that reuse the running host (media fallback, the wired-HDMI
-    ///   AirPlay master swap, the #93 recovery reload, the AE#158 in-place handover) each drop the
-    ///   layer's picture for a few tens of milliseconds, measured, and this holds true through
-    ///   them: reporting them would make a host re-cover a seam it is deliberately not meant to
-    ///   see, and a falling edge would be ambiguous in exactly the way `SeekEvent` was introduced
-    ///   to fix, since nothing in a level says why it fell. A rebuild that goes back through
-    ///   `load()`, `reloadAtCurrentPosition()` included, does reset it: there the item is genuinely
-    ///   gone and its first frame has to be reached again.
+    ///   once and then held. What decides whether a swap surfaces is the entry point, not the
+    ///   `inPlaceSwap` flag it is made with. The seams that reuse the running host by calling
+    ///   `host.load(inPlaceSwap:)` themselves (media fallback, the wired-HDMI AirPlay master swap,
+    ///   the #93 recovery reload) each drop the layer's picture for a few tens of milliseconds,
+    ///   measured, and this holds true through them: reporting them would make a host re-cover a
+    ///   seam it is deliberately not meant to see, and a falling edge would be ambiguous in exactly
+    ///   the way `SeekEvent` was introduced to fix, since nothing in a level says why it fell.
+    ///   Everything that enters through the engine's `load()` resets it instead, the AE#158
+    ///   in-place handover and `reloadAtCurrentPosition()` (so the wireless-AirPlay route change)
+    ///   included. The handover keeps the OUTGOING item attached across the teardown so a system
+    ///   PiP window survives, but its content is new and has to reach its own first frame; holding
+    ///   the latch across it would lift a host's cover onto the previous episode's frozen frame.
     ///
     /// For "has this seek reached the screen", the per-seek answer is `SeekEvent.landed`, not this
     /// flag: a seek keeps the previous frame up, so the layer never stops being ready for display.
