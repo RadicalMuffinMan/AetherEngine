@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.18.0] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.18.0))
+
+### Changed
+
+- Codec routing defaults to the software path. The dispatch switch used to name
+  its software codecs (AV1 without hardware, VP9, VP8, MPEG-4 Part 2, MPEG-2,
+  VC-1) and send everything else native, but the native path is an allowlist of
+  its own: `HLSVideoEngine` takes HEVC, H.264 and hardware-decodable AV1 and
+  throws `unsupportedCodec` on the rest. The two lists were not complementary,
+  they left a hole, so a codec nobody had enumerated was not routed
+  conservatively, it was routed to the one path that refuses it by contract and
+  never reached libavcodec. Surfaced by FFmpegBuild#1 (QuickTime RLE): with the
+  decoder built in, a qtrle `.mov` still failed the load. The same held for
+  ProRes, MJPEG, Theora, Cinepak and rawvideo. `AV_CODEC_ID_NONE` stays native
+  explicitly, since an audio-only source probes as NONE.
+
+### Dependencies
+
+- FFmpegBuild 2.4.1 (adds the `qtrle` decoder; 40 decoders, demuxer / filter /
+  parser lists unchanged).
+
 ## [6.17.1] - 2026-08-09
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.17.1))
