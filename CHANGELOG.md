@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- The software load path cancelled every Combine sink it had already wired.
+  `softwareCancellables.removeAll()` stood between two groups of `.store(in:)`
+  calls, so the SW-PiP cue mirror never delivered a cue after the frame
+  compositor was armed, and subtitles in a software-path PiP window froze at
+  whatever was on screen when PiP started.
 
 ## [6.16.2] - 2026-08-09
 

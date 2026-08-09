@@ -1235,6 +1235,11 @@ extension AetherEngine {
         }
 
         activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
+        // Drop the previous session's sinks BEFORE anything wires this one's. Standing further down,
+        // between two groups of `.store(in:)` calls, this cancelled everything wired above it: the
+        // SW-PiP cue mirror never delivered a cue after the frame compositor was armed. Both halves
+        // of such a wiring work in isolation, which is why a dead sink here reads as a working one.
+        softwareCancellables.removeAll()
         let host = SoftwarePlaybackHost()
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
@@ -1296,7 +1301,6 @@ extension AetherEngine {
         self.playlistShiftSeconds = 0
         self.setPresentationAxis(PresentationAxisMap())
 
-        softwareCancellables.removeAll()
         host.$currentTime
             .sink { [weak self] value in
                 guard let self = self else { return }
