@@ -1638,6 +1638,10 @@ extension AetherEngine {
                 softwareHost?.play()
             } else {
                 EngineLog.emit("[AetherEngine] reload: loadNative enter audio=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
+                // #339: the only write this reload can still produce is a sole-writer host's re-write on the
+                // swapped item, which happens inside loadNative. Arm before it, or the gate below is again
+                // reading a flag for a switch whose notifications it was not registered for.
+                if loadedOptions.suppressDisplayCriteria { displayCriteria.armSwitchObservation() }
                 try await loadNative(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
