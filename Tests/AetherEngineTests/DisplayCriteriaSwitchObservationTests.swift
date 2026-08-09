@@ -45,12 +45,25 @@ struct DisplayCriteriaSwitchObservationTests {
 
     // MARK: - The headroom is not an end signal
 
-    @Test("A raised headroom ends the wait only while no switch has been seen to start")
-    func headroomIsNotAnEndSignalDuringASwitch() {
-        // Device run, ATV 4K 3rd gen, tvOS 26.5: headroom 1.20 at +374ms, end notification at +2851ms. The
-        // headroom rises with the transition, so mid-switch it says "HDR is coming", not "the panel is done".
-        #expect(DisplayCriteriaController.headroomMayEndSettle(startObserved: false))
-        #expect(!DisplayCriteriaController.headroomMayEndSettle(startObserved: true))
+    @Test("A recorded start rules the headroom out as an end signal, in both stages")
+    func headroomIsNotAnEndSignalForAnObservableSwitch() {
+        // Device run, ATV 4K 3rd gen, tvOS 26.5: headroom 1.20 at +374ms for a switch that ended at +2853ms.
+        #expect(!DisplayCriteriaController.startPhaseHeadroomSettles(startRecorded: true, switchInProgress: false))
+        #expect(!DisplayCriteriaController.settlePhaseHeadroomSettles(startRecorded: true))
+    }
+
+    @Test("Without a recorded start the headroom keeps its say: that is the unobservable-DV panel")
+    func headroomStillSettlesAnUnobservableSwitch() {
+        #expect(DisplayCriteriaController.startPhaseHeadroomSettles(startRecorded: false, switchInProgress: false))
+        // Stage 2 has classified a start already, so a stuck flag must not disqualify the only signal left.
+        #expect(DisplayCriteriaController.settlePhaseHeadroomSettles(startRecorded: false))
+    }
+
+    @Test("Stage 1 also refuses the headroom while the panel reports a switch in progress")
+    func startPhaseHeadroomRespectsTheFlag() {
+        // The second gate of a load finds the record consumed, so "no new start" is not "no switch": on the
+        // device that read ended the wait 759 ms before the switch did.
+        #expect(!DisplayCriteriaController.startPhaseHeadroomSettles(startRecorded: false, switchInProgress: true))
     }
 
     @Test("The entry fast-exit needs the in-progress flag to agree with the headroom")

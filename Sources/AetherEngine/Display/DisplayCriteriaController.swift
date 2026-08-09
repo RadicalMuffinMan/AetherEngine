@@ -233,20 +233,32 @@ final class DisplayCriteriaController {
         case none
     }
 
-    /// May a raised EDR headroom end the settle wait?
+    /// May a raised EDR headroom end the wait?
     ///
-    /// Only while no switch has been observed to start. The headroom rises *with* the dynamic-range
-    /// transition, so during a switch it reports "HDR is coming up", not "the panel is done". Device
-    /// measurement (Apple TV 4K 3rd gen, tvOS 26.5, 2026-08-09, notifications captured on all objects): a run
-    /// whose headroom reached 1.20 at +374 ms belonged to a switch whose end notification arrived at
-    /// +2851 ms. The gate released `play()` 2.5 s into a running HDMI handshake, which is the "first frame
-    /// hits a mid-transition panel" case the whole wait exists to prevent, and the shape Sodalite#49 was
-    /// filed on.
+    /// The headroom rises *with* the dynamic-range transition, so during a switch it reports "HDR is coming
+    /// up", not "the panel is done". Device measurement (Apple TV 4K 3rd gen, tvOS 26.5, 2026-08-09): a run
+    /// whose headroom reached 1.20 at +374 ms belonged to a switch that ended at +2853 ms, and the gate
+    /// released `play()` 2.5 s into a running HDMI handshake. That is the "first frame hits a mid-transition
+    /// panel" case the whole wait exists to prevent, and the shape Sodalite#49 was filed on.
     ///
-    /// With a start observed, the authoritative end is the end notification or the in-progress flag
-    /// clearing. Both were exact on that device: the flag cleared within 1 ms of the notification.
-    nonisolated static func headroomMayEndSettle(startObserved: Bool) -> Bool {
-        !startObserved
+    /// The deciding input is whether **this load recorded a start notification at all**, not whether one
+    /// arrived since this gate opened. A load runs two gates (pre-flight, then play), the second finds the
+    /// record already consumed, and reading that as "no observable switch" let the headroom end the wait
+    /// 759 ms early on the very next device run. If a start was recorded, its end will be too, and the
+    /// notification or the in-progress flag is the authority: on that device the flag cleared within 1 ms of
+    /// the notification.
+    ///
+    /// Without a recorded start the headroom is the only end signal there is, which is the unobservable-DV
+    /// panel the Stage 2 cap exists for, so it keeps its say there.
+    nonisolated static func startPhaseHeadroomSettles(startRecorded: Bool, switchInProgress: Bool) -> Bool {
+        !startRecorded && !switchInProgress
+    }
+
+    /// Stage 2 has already classified a start, so the flag is expected to be set and cannot disqualify the
+    /// headroom the way it does in Stage 1; an unobservable-DV panel sticks it `true` for the whole switch.
+    /// A recorded start still rules the headroom out.
+    nonisolated static func settlePhaseHeadroomSettles(startRecorded: Bool) -> Bool {
+        !startRecorded
     }
 
     /// May the entry fast-exit take a raised headroom as "nothing to wait for"?
@@ -535,7 +547,9 @@ final class DisplayCriteriaController {
             var isFirstPoll = true
             while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: entry), budgetMs: startGrace.budgetMs) {
                 let headroomSettles = observeHeadroom(screen)
-                    && Self.headroomMayEndSettle(startObserved: observation.hasNewStart(since: gateSnapshot))
+                    && Self.startPhaseHeadroomSettles(
+                        startRecorded: gateSnapshot.startedAt != nil || observation.hasNewStart(since: gateSnapshot),
+                        switchInProgress: displayManager.isDisplayModeSwitchInProgress)
                 if observation.hasNewEnd(since: gateSnapshot) || headroomSettles {
                     EngineLog.emit("[DisplayCriteria] settled during start phase (after \(Self.elapsedMs(since: entry))ms, EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                     return
@@ -586,9 +600,10 @@ final class DisplayCriteriaController {
                 EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()))", category: .engine)
                 return
             }
-            // Only meaningful before a start was seen: the headroom rises with the transition, so during an
-            // observed switch it is the panel warming up, not the panel being done.
-            if observeHeadroom(screen), Self.headroomMayEndSettle(startObserved: startSignal == .preGateObserved || startSignal == .inGate) {
+            // Only meaningful when this load recorded no start: the headroom rises with the transition, so
+            // during an observable switch it is the panel warming up, not the panel being done.
+            if observeHeadroom(screen), Self.settlePhaseHeadroomSettles(
+                startRecorded: gateSnapshot.startedAt != nil || observation.hasNewStart(since: gateSnapshot)) {
                 EngineLog.emit("[DisplayCriteria] switch settled via EDR (\(timing()), headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 return
             }
