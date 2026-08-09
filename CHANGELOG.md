@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- visionOS builds again. Three availability lists named tvOS, iOS and macOS and
+  then fell through to `*`, which on visionOS resolves to the package's declared
+  floor of 1.0, so `AVSampleBufferDisplayLayer.isReadyForDisplay`, its
+  `ReadyForDisplayDidChange` notification and
+  `AVSampleBufferVideoRenderer.videoPerformanceMetrics` (all visionOS 1.1) were
+  compile errors on that platform and on no other. visionOS 1.1 is now named in
+  each list, so visionOS 1.0 takes the same documented fallbacks as tvOS/iOS
+  below 17.4; the declared floor stays `.visionOS(.v1)`, so no consumer's
+  platform minimum moves. Reported by @YangHanqing (#344).
+- CI now builds the visionOS Simulator alongside tvOS and iOS. The platform has
+  been declared since 6.0.0 with nothing compiling for it, which is why the
+  break above shipped unnoticed.
 
 ## [6.18.0] - 2026-08-09
 
