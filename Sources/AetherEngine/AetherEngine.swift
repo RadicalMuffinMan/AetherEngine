@@ -2831,7 +2831,9 @@ public final class AetherEngine: ObservableObject {
             ) {
             case .willSwitch:
                 didSwitchPanel = true
-                await displayCriteria.waitForSwitch()
+                // #339: consumesRecord: false, the play gate after loadNative is entitled to the same
+                // start/end timestamps; spending them here made it pay Stage 1's grace for a settled switch.
+                await displayCriteria.waitForSwitch(consumesRecord: false)
                 // Superseded during panel handshake: close local probe and unwind.
                 if loadGeneration != gen {
                     probe.markClosed()
@@ -2850,6 +2852,11 @@ public final class AetherEngine: ObservableObject {
             // own from the AVPlayerItem formatDescription later. Clear a leftover engine criteria now
             // (didApply-gated no-op for hosts that always suppress) so the two writers can't fight.
             displayCriteria.reset()
+            // #339: AVKit's write lands inside loadNative, so the observation has to be armed before the
+            // load rather than when the play gate opens. After reset(), so a switch back to the default
+            // mode is not recorded as this session's. Audio-only loads reach clearStale too and have no
+            // panel handshake to observe.
+            if options.suppressDisplayCriteria { displayCriteria.armSwitchObservation() }
         }
 
         // 2.5. Post-handshake panel-mode snapshot.
