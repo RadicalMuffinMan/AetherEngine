@@ -210,6 +210,19 @@ final class DisplayCriteriaController {
     /// combined toggle) never sets the proof and keeps the conservative answer, so it is still never offered a
     /// PQ master it would reject with -11848.
     ///
+    /// `UIScreen.potentialEDRHeadroom` looks like the way out of all of this and is not. It reads **1.00 on
+    /// tvOS regardless of the display's mode**, measured 2026-08-09 on an Apple TV 4K (3rd gen), tvOS 26.5,
+    /// HDR10 panel, same title played once with the box set to 4K HDR and once to 4K SDR:
+    ///
+    ///     4K HDR, t+2.5s:  current 1.20, potential 1.00
+    ///     4K HDR, t+20s:   current 1.00, potential 1.00
+    ///     4K SDR, t+2.5s:  current 1.00, potential 1.00
+    ///
+    /// The first row is the one that closes it: the panel was demonstrably in an HDR mode, and the value
+    /// documented as the maximum the screen can display read *lower* than the live one at the same instant,
+    /// from the same `UIScreen`. That is not a sampling-time problem, it is a property tvOS does not
+    /// maintain. There is no mode read-back; do not go looking for one here again (Sodalite#49).
+    ///
     /// The residual risk is the reverse: Match Dynamic Range switched off in Settings after a proven session,
     /// without the app being killed. That offers one master to an SDR panel, which the reactive master-to-media
     /// fallback (#98) and the startup-readiness gate (#35) already recover from. Trading a rare, self-healing
