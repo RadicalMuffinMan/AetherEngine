@@ -2933,11 +2933,16 @@ public final class AetherEngine: ObservableObject {
 
         // 3. Dispatch by codec.
         //    Native: HEVC/H.264 (unconditional) and AV1 on platforms with HW decode (iOS 17+/macOS 14+).
+        //    That list is exactly what HLSVideoEngine accepts; everything else it refuses with
+        //    unsupportedCodec, so every other video codec belongs on the software path by default
+        //    (FFmpegBuild#1: qtrle reached loadNative and died there instead of decoding).
         //    SW (SoftwarePlaybackHost / dav1d / libavcodec):
         //    - AV1 on tvOS: no Apple-shipped dav1d, no HW AV1 on any Apple TV chip.
         //    - VP9/VP8: AVPlayer's HLS manifest parser rejects vp09/vp8 CODECS attributes even when VT can
         //      HW-decode VP9 (verified via aetherctl: item.status never leaves .unknown).
         //    - MPEG-4 Part 2, MPEG-2, VC-1: not in the HLS Authoring Spec CODECS list; libavcodec handles all.
+        //    - qtrle and the rest of the QuickTime long tail: same reason, whatever libavcodec was
+        //      built with decodes them.
         // #107: interlaced H.264 joins MPEG-2/VC-1 on the software path so DeinterlaceFilter (bwdif)
         // can deinterlace it; tvOS AVPlayer does not. Decision is pure and unit-tested in
         // VideoRoutingPolicyTests. deint=interlaced passes progressive frames through untouched, so a
