@@ -4741,6 +4741,14 @@ public final class AetherEngine: ObservableObject {
         liveReloadWatchdogTask?.cancel()
         liveReloadWatchdogTask = nil
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
+        // #356: counterpart to the install line, because a session-preserving reload lands here
+        // too. The host sees its stream finish and has to re-install; without this the device log
+        // shows a tap that was installed once and then simply stopped delivering.
+        if audioTapController != nil {
+            EngineLog.emit("[AetherEngine] audio tap torn down with the session "
+                + "(a reload finishes the stream; re-install to follow the new one)",
+                category: .engine)
+        }
         audioTapController?.teardown()
         audioTapController = nil
         // #214 follow-up: the confirmation ledger is NOT cleared here. It is keyed to loadedURL and a
