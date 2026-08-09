@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- Software path: a cold-start session no longer deadlocks when the selected
+  audio stream's first packet sits past the point where the video renderer
+  fills (#337). The video branch back-pressures on
+  `renderer.isReadyForMoreMediaData`, the renderer only drains while the
+  synchronizer clock runs, and the clock arms off the first decoded buffer of
+  the selected audio stream, so a park entered there with an unarmed clock was
+  terminal: every packet that could arm it sat behind the park. Reported after
+  a host applied a language preference ~20 ms after `play()`, which rebuilds
+  the session at `resumeAt = 0`; the session published `.playing` with a first
+  frame on screen and `currentTime` pinned at 0 until the viewer seeked. The
+  gate now anchors on the video the renderer is holding
+  (`SWClockAnchorPolicy.shouldArmFromParkedVideo`, keeping the load anchor
+  unless the source joined mid-stream) and logs one line naming the stream that
+  never arrived. The live feeder's gate is closed the same way, where the
+  terminal condition is its look-ahead pump having spent its pre-arm budget (an
+  audio track that never decodes a buffer).
 
 ## [6.17.0] - 2026-08-09
 

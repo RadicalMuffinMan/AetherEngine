@@ -1561,6 +1561,26 @@ final class SoftwarePlaybackHost {
                         Thread.sleep(forTimeInterval: 0.005)
                         waitTicks += 1
                         if waitTicks % 20 == 0 { pumpAudio() }
+                        // #337: the pump is what can still arm the clock from here, so its spent
+                        // pre-arm budget is what turns this park terminal (an audio track that
+                        // never decodes a buffer). The renderer cannot drain at a stopped clock,
+                        // so waiting past that point is a deadlock, not patience.
+                        if SWClockAnchorPolicy.shouldArmFromParkedVideo(
+                            clockArmed: clockArmed(),
+                            isPlaying: isPlaying(),
+                            rendererReadyForMoreData: renderer.isReadyForMoreMediaData,
+                            audioArmingStillPossible: preArmPacketsFed < AudioLookaheadPolicy.preArmPacketBudget),
+                           let aOut = audioOutput {
+                            EngineLog.emit(
+                                "[SWHost] clock unarmed at the video gate: the look-ahead pump spent its "
+                                + "pre-arm budget (\(preArmPacketsFed) packets) without a decoded buffer; "
+                                + "anchoring on video at \(String(format: "%.3f", pkt.pts))s",
+                                category: .swPlayback
+                            )
+                            aOut.seekClock(to: CMTime(seconds: pkt.pts, preferredTimescale: 90000),
+                                           rate: currentRate())
+                            markClockArmed()
+                        }
                     }
                 }
                 if stopRequested() { return false }
@@ -1677,6 +1697,21 @@ final class SoftwarePlaybackHost {
         // the session unarmed forever. See the video-branch arming below.
         var audioPacketsSeen = 0
         var audioBuffersProduced = false
+
+        // Anchor the clock on a video packet. SWClockAnchorPolicy keeps the load anchor unless the
+        // source joined mid-stream, so the frames already queued still present. Shared by the
+        // undecodable-audio fallback and the #337 parked-gate exit.
+        func armFromVideoPacket(_ packet: UnsafeMutablePointer<AVPacket>, _ aOut: AudioOutput) {
+            // #107: a mid-stream-joined source delivers first samples far past the load
+            // anchor; anchor at the packet PTS so they ever present (see SWClockAnchorPolicy).
+            let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
+                ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
+            let resolution = SWClockAnchorPolicy.resolve(
+                initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
+            armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
+                     rate: currentRate(), onClockAnchored: onClockAnchored)
+            markClockArmed()
+        }
 
         func demuxIteration() -> Bool {
             if !isPlaying() {
@@ -1806,6 +1841,24 @@ final class SoftwarePlaybackHost {
                             }
                             condition.unlock()
                         } else {
+                            // #337: this loop is the only reader, so an unarmed clock here is a
+                            // deadlock and not latency: the renderer waits for the clock, the clock
+                            // waits for a selected-stream audio buffer, and that packet is behind
+                            // this park. Anchor on the video the renderer is holding instead.
+                            if SWClockAnchorPolicy.shouldArmFromParkedVideo(
+                                clockArmed: clockArmed(),
+                                isPlaying: isPlaying(),
+                                rendererReadyForMoreData: renderer.isReadyForMoreMediaData,
+                                audioArmingStillPossible: false),
+                               let aOut = audioOutput {
+                                EngineLog.emit(
+                                    "[SWHost] clock unarmed at the video gate: the selected audio stream "
+                                    + "(index \(audioStreamIndex)) has produced nothing by the renderer's "
+                                    + "fill point (audioPacketsSeen=\(audioPacketsSeen)); anchoring on video",
+                                    category: .swPlayback
+                                )
+                                armFromVideoPacket(packet, aOut)
+                            }
                             Thread.sleep(forTimeInterval: 0.005)
                         }
                     }
@@ -1831,15 +1884,7 @@ final class SoftwarePlaybackHost {
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
                    audioDecoder == nil || (audioPacketsSeen >= 50 && !audioBuffersProduced) {
-                    // #107: a mid-stream-joined source delivers first samples far past the load
-                    // anchor; anchor at the packet PTS so they ever present (see SWClockAnchorPolicy).
-                    let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
-                        ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
-                    let resolution = SWClockAnchorPolicy.resolve(
-                        initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
-                    armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
-                             rate: currentRate(), onClockAnchored: onClockAnchored)
-                    markClockArmed()
+                    armFromVideoPacket(packet, aOut)
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
                 // Background audio-only: the video gate is bypassed, so pace on the audio renderer to avoid

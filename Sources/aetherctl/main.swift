@@ -71,13 +71,14 @@ func printUsage() {
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>]
-                 [--start-position S]
+                 [--start-position S] [--switch-audio <index>[@ms]]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback] <url>
                      (full load+play session smoke test; --subs activates the first
                       matching embedded subtitle track and logs overlay cues;
                       --audio-stats taps decoded PCM and prints per-second audio lead
                       plus PTS-continuity gaps; seekback rewinds 20 s at t=15 and
-                      returns to the live edge at t=30)
+                      returns to the live edge at t=30; --switch-audio replays a host
+                      applying a language preference just after play, default +20 ms)
       aetherctl segverify [--from N] [--count K] [--no-dv] [--dump <dir>] <url>
                           (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
@@ -487,6 +488,18 @@ if first == "play" {
                 name: language.map { $0.uppercased() } ?? url.deletingPathExtension().lastPathComponent,
                 language: language)
         }
+    // #337: a host's post-play audio pick, `index[@ms]` (default 20 ms, the field case). Selecting a
+    // stream whose first packet sits past the renderer's fill point is what wedges the rebuilt
+    // session, so the delay has to be short enough that the rebuild still resumes at 0.
+    let audioSwitch: AudioSwitchRequest? = takeStringFlag("--switch-audio", from: &rest).flatMap { spec in
+        let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let index = Int(parts[0]) else {
+            print("ERROR: --switch-audio takes <index>[@ms], got '\(spec)'")
+            exit(64)
+        }
+        return AudioSwitchRequest(index: index,
+                                  delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20) : 20)
+    }
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -499,7 +512,8 @@ if first == "play" {
         exit(64)
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
-                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars))
+                 censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
+                 audioSwitch: audioSwitch))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
