@@ -107,9 +107,21 @@ final class DisplayCriteriaController {
     }
 
     /// Stage 2's ceiling: long enough that an unobservable DV switch does not gate the first frame the way
-    /// the old fixed 5 s poll did, short enough to stay a startup cost. The reporter's panel has been
-    /// measured taking ~2.9 s end to end, so this cap is knowingly exceeded there; raising it trades every
-    /// session's cold start against one panel and wants its own evidence (Sodalite#49).
+    /// the old fixed 5 s poll did, short enough to stay a startup cost.
+    ///
+    /// **Do not raise this to "fit" the measured switch duration.** Twelve device measurements (Apple TV 4K
+    /// 3rd gen, tvOS 26.5, 2026-08-09, dynamic-range and range-plus-rate alike) put a real switch at 2779 to
+    /// 2898 ms, so the pre-flight gate reliably breaks out here at ~2.0 s with the panel still switching.
+    /// That looks like a defect and is currently load-bearing: breaking out is what lets `loadNative` start
+    /// while the switch finishes, and the play gate then waits out whatever is left. Timed end to end:
+    ///
+    ///     cap 2000: pre-flight breaks +2020, load ~850 ms, play() at ~+2918
+    ///     cap 4000: pre-flight ends +2892 on the notification, load ~850 ms, play() at ~+3740
+    ///
+    /// The "corrected" cap costs a full load's worth of startup, ~820 ms here, because the load is serialised
+    /// behind the wait. The way to spend that time properly is to load *during* the switch rather than to
+    /// pick a cap that overlaps them by accident (AE#348); until then this number is doing two jobs and only
+    /// one of them is written on it.
     nonisolated static let stage2CapMs = 2000
 
     /// Both stages spend a deadline, not a poll count. `n` sleeps of `m` ms is only `n * m` on an idle
