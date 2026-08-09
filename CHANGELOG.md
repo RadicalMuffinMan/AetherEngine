@@ -10,6 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- `AetherEngine.softwareDisplaySize`: the size the software path's picture
+  presents at, the coded frame under the pixel aspect ratio the decoder attached
+  (#353). A host laying an overlay out over the picture had only
+  `sourceVideoWidth` / `sourceVideoHeight`, which are the CODED size, so
+  anamorphic content was laid out against the wrong rectangle (720x576 at 64:45
+  presents as 1024x576), and `AVSampleBufferDisplayLayer` carries no `videoRect`
+  to measure instead. Nor could a host compute it: the ratio is resolved per
+  frame across three sources (#177) and one whose display aspect is impossible
+  is dropped in favour of square pixels (#290). Read off the format description
+  the renderer enqueues rather than recomputed from the SAR, so it cannot
+  disagree with the screen. nil off the software path and before the first
+  frame; it follows a mid-stream format change and is cleared with the session.
+
 ### Fixed
 
 - The software load path cancelled every Combine sink it had already wired.

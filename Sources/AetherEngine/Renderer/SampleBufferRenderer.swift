@@ -111,6 +111,33 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return _newestEnqueuedPtsSeconds
     }
 
+    /// #353: the size the picture presents at, which is the coded frame under the pixel aspect ratio
+    /// the decoder attached; nil before the first sample buffer is built. Read off the description
+    /// that is enqueued rather than recomputed from the SAR: the ratio is resolved per frame across
+    /// three sources (#177) and a ratio whose display aspect is impossible is dropped (#290), so a
+    /// second computation of the same answer is a second thing that can disagree with the screen.
+    /// Guarded by `reorderLock`.
+    private var _displaySize: CGSize?
+    var displaySize: CGSize? {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _displaySize
+    }
+
+    /// #353: fires when the settled display size CHANGES, on the decode thread, plus once on
+    /// installation if the picture already settled. Compared against the value and not against the
+    /// description, because `flush()` drops the cached description and every seek therefore rebuilds
+    /// one for a picture that never changed shape. The late-installation call is what a host relies
+    /// on: on a source with one format, the only report ever due has already happened.
+    private var _displaySizeObserver: (@Sendable (CGSize) -> Void)?
+    func setDisplaySizeObserver(_ observer: (@Sendable (CGSize) -> Void)?) {
+        reorderLock.lock()
+        _displaySizeObserver = observer
+        let settled = _displaySize
+        reorderLock.unlock()
+        if let settled { observer?(settled) }
+    }
+
     init() {
         displayLayer = Self.makeDisplayLayer(isHDR: false)
     }
@@ -378,6 +405,14 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
     }
 
+    /// #353: what the layer will draw the description at. Pixel aspect ratio and clean aperture are
+    /// extensions of the description itself, so this asks the description what it presents at
+    /// instead of repeating the decision that built it.
+    static func presentationSize(of desc: CMVideoFormatDescription) -> CGSize {
+        CMVideoFormatDescriptionGetPresentationDimensions(
+            desc, usePixelAspectRatio: true, useCleanAperture: true)
+    }
+
     /// Internal (not private) for #177 regression tests: the PAR-keyed cache behavior is the fix.
     func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         // Cache hit avoids CMVideoFormatDescriptionCreateForImageBuffer allocation + CF refcount churn on every frame.
@@ -410,10 +445,17 @@ final class SampleBufferRenderer: @unchecked Sendable {
                 formatDescriptionOut: &formatDesc
             )
             guard status == noErr, let new = formatDesc else { return nil }
+            // #353: a new description is the only moment the picture can change shape, so the
+            // settled size is taken here and reported outside the lock.
+            let settled = Self.presentationSize(of: new)
             reorderLock.lock()
             cachedFormatDesc = new
             cachedFormatKey = key
+            let changed = settled != _displaySize
+            if changed { _displaySize = settled }
+            let sizeObserver = changed ? _displaySizeObserver : nil
             reorderLock.unlock()
+            sizeObserver?(settled)
             desc = new
         }
 

@@ -363,6 +363,11 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     defer { seekEventSub?.cancel() }
     var overlapVerdicts: [String] = []
 
+    // #353: sampled during the session, because the engine clears the size with the session and the
+    // summary below prints after teardown. Paired with the coded dimensions read at the same moment.
+    var observedDisplaySize: CGSize?
+    var observedCodedSize: (Int32, Int32) = (0, 0)
+
     let ticks = max(1, Int(seconds))
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -389,6 +394,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
             // proximity to ftLast is the point: one axis, no conversion between them.
             if let timebase = engine.softwarePresentationTimebase {
                 line += String(format: " tb=%.3fs", timebase.time.seconds)
+            }
+            // #353: the rectangle the frames land in. Read next to the coded dimensions on purpose:
+            // on anamorphic content the two differ, and that difference IS the defect being watched.
+            if let size = engine.softwareDisplaySize {
+                line += " disp=\(Int(size.width))x\(Int(size.height))"
+                observedDisplaySize = size
+                observedCodedSize = (engine.sourceVideoWidth, engine.sourceVideoHeight)
             }
         }
         print(line)
@@ -500,6 +512,14 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     }
     if let frameProbe {
         print("frame times: \(frameProbe.summary())")
+        // #353: coded next to settled. Equal on square-pixel sources, and on anamorphic content the
+        // gap is exactly what a host laying out against `sourceVideoWidth` would have got wrong.
+        if let size = observedDisplaySize {
+            print("display size: \(Int(size.width))x\(Int(size.height)) "
+                  + "(coded \(observedCodedSize.0)x\(observedCodedSize.1))")
+        } else {
+            print("display size: never published (not the software path, or no frame built)")
+        }
     }
     if !finalSubtitleTracks.isEmpty {
         let listed = finalSubtitleTracks
