@@ -3136,12 +3136,17 @@ public final class AetherEngine: ObservableObject {
                 // #274: the 1000ms Stage 1 budget is the DV-cold-start bet on a sole-writer host's inbound
                 // write. Sessions no dynamic-range switch can reach (engine-writer, or SDR content) take the
                 // 200ms budget instead of paying it on every load.
-                await displayCriteria.waitForSwitch(startGrace: Self.playGateGrace(
-                    criteriaUnchanged: criteriaUnchanged,
-                    engineIsCriteriaWriter: !options.suppressDisplayCriteria,
-                    formatKnown: probeOpened,
-                    effectiveFormat: effectiveFormat
-                ))
+                await displayCriteria.waitForSwitch(
+                    startGrace: Self.playGateGrace(
+                        criteriaUnchanged: criteriaUnchanged,
+                        engineIsCriteriaWriter: !options.suppressDisplayCriteria,
+                        formatKnown: probeOpened,
+                        effectiveFormat: effectiveFormat
+                    ),
+                    // Sodalite#49: this gate runs after the item is ready, so waiting out an observed switch
+                    // blocks nothing else, and the panel is dark until it ends either way. Live keeps the
+                    // standard cap: a zap must not sit behind a panel handshake.
+                    settleCap: options.isLive ? .standard : .awaitObservedEnd)
                 try checkLoadCurrent(gen)
                 // automaticallyWaitsToMinimizeStalling=true (default) handles play-before-ready.
                 // #35: on a real SDR->HDR switch while serving a VOD master, drive the bounded
