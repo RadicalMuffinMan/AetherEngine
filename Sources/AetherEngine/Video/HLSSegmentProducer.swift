@@ -246,15 +246,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var loggedFirstDiscontinuity: Bool = false
 
     private let targetSegmentDurationSeconds: Double
-    /// AE#222: real audio frame handed to every muxer this producer builds, so moov (with its packet-derived
-    /// dec3/dac3/dmlp) is written at init instead of at the first cut. nil on a normal session.
-    private let audioMoovPrimeFrame: [UInt8]?
-    /// Most recent audio frame a muxer accepted, retained so every LATER allocation (same-PID parameter-set
-    /// rotation, SSAI program switch) starts primed too: video leads audio across a seam, so a rotated
-    /// muxer's first cut can arrive before any post-seam audio packet exists — unprimed, that cut defers
-    /// for a sample entry the bridge's encoder latency will never deliver in time and the pump dies with
-    /// `muxerFailed`. Pump-thread confined; seeded from `audioMoovPrimeFrame`.
-    private var lastMuxedAudioPrimeFrame: [UInt8]?
+    /// Real audio frame handed to every muxer this producer builds, so moov (with its packet-derived
+    /// dec3/dac3/dmlp) is written at init instead of at the first cut. Two origins, one field:
+    /// - AE#222 seeds it from the host, and only on a session that already proved its first segment
+    ///   carries no audio (nil on a normal session).
+    /// - Every audio frame a muxer accepts then replaces it, so a LATER allocation (same-PID
+    ///   parameter-set rotation, SSAI program switch) starts primed too. Video leads audio across a seam,
+    ///   so a rotated muxer's first cut can arrive before any post-seam audio packet exists; unprimed,
+    ///   that cut defers for a sample entry the bridge's encoder latency will never deliver in time and
+    ///   the pump dies with `muxerFailed`.
+    ///
+    /// Pump-thread confined: written only from the two audio write sites, read only from `allocateMuxer`,
+    /// and every muxer allocation goes through `ensureMuxer` on the pump thread.
+    private var audioMoovPrimeFrame: [UInt8]?
     /// True when the session's audio codec derives its mp4 sample entry from a parsed packet
     /// (AC-3/E-AC-3/TrueHD); only then is a per-frame prime copy worth the memcpy. AAC never copies.
     private let capturesAudioPrimeFrames: Bool
@@ -799,7 +803,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
     ) throws {
         self.epoch = epoch
         self.audioMoovPrimeFrame = audioMoovPrimeFrame
-        self.lastMuxedAudioPrimeFrame = audioMoovPrimeFrame
         self.capturesAudioPrimeFrames =
             audio.map { MP4SegmentMuxer.audioNeedsParsedPacketForMoov($0.codecpar.pointee.codec_id) } ?? false
         self.bufferAheadSegments = bufferAheadSegments
@@ -1332,10 +1335,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // Floored at 8s (the historical 2 x 4s value): a sub-second fastZap cut target (AE#195)
                 // must not shrink the cap below typical TS A/V interleave skew.
                 maxBufferedFragmentSeconds: max(8.0, 2 * targetSegmentDurationSeconds),
-                // AE#222 + mid-session rotation: prefer the last frame a muxer accepted, so a rotation
-                // stays primed even when video leads audio across the seam; the construction-time prime
-                // covers only the first allocation of a session whose first segment carries no audio.
-                audioMoovPrimeFrame: lastMuxedAudioPrimeFrame ?? audioMoovPrimeFrame,
+                // AE#222 + mid-session rotation: the last frame a muxer accepted, or the host's
+                // construction-time prime while no muxer has accepted one yet.
+                audioMoovPrimeFrame: audioMoovPrimeFrame,
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
                     if versionedInit {
@@ -2847,7 +2849,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
                             let prime = copyAudioPrimeCandidate(fp)
                             if muxer.writePacket(fp).rc >= 0, let prime {
-                                lastMuxedAudioPrimeFrame = prime
+                                audioMoovPrimeFrame = prime
                             }
                             trackedPacketFree(&fpVar)
                         }
@@ -3139,7 +3141,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Copies the payload of an audio packet about to be muxed, BEFORE the write: movenc consumes the
     /// packet's data reference, so afterwards there is nothing left to copy. The caller commits the copy
-    /// into `lastMuxedAudioPrimeFrame` only when the write succeeded.
+    /// into `audioMoovPrimeFrame` only when the write succeeded.
     private func copyAudioPrimeCandidate(_ packet: UnsafeMutablePointer<AVPacket>) -> [UInt8]? {
         guard capturesAudioPrimeFrames, let data = packet.pointee.data, packet.pointee.size > 0 else {
             return nil
@@ -3167,7 +3169,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         av_packet_rescale_ts(packet, audio.inputTimeBase, muxer.muxerAudioTimeBase)
         let prime = copyAudioPrimeCandidate(packet)
         if muxer.writePacket(packet).rc >= 0, let prime {
-            lastMuxedAudioPrimeFrame = prime
+            audioMoovPrimeFrame = prime
         }
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet

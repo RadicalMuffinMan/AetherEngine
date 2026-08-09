@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A live session with bridged E-AC-3 audio no longer dies with `muxerFailed`
+  when a mid-session muxer rotation (a same-PID parameter-set change after a
+  reconnect join, or an SSAI program switch) cuts its first segment before any
+  post-seam audio packet has been muxed. E-AC-3 builds its mp4 sample entry from
+  a parsed packet, so the fresh muxer started un-primed, the cut deferred, and
+  the pump exited; the AE#222 exit scan could not rescue it because a raw source
+  frame cannot prime a bridge-encoded track. The producer now retains the last
+  audio frame a muxer accepted and primes every later allocation with it.
+  Contributed by @tschuegy (#340).
 
 ## [6.18.1] - 2026-08-09
 

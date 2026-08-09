@@ -7,7 +7,7 @@ import Libavutil
 
 /// Live rotation wedge: a mid-session muxer rotation (same-PID parameter-set change after a live reconnect
 /// join, or an SSAI program switch) builds a brand-new muxer, and with BRIDGED E-AC-3 the rotated muxer's
-/// first cut can arrive before any post-seam audio packet exists — video leads audio across the seam and
+/// first cut can arrive before any post-seam audio packet exists: video leads audio across the seam and
 /// the bridge adds encoder latency on top. Unprimed, that cut defers for a sample entry (AE#222), the
 /// producer converts the deferral into a pump exit, teardown finalize fails on the same precondition, and
 /// the live session dies with `muxerFailed`. The exit-scan cannot help either: it rightly excludes bridged
@@ -171,7 +171,7 @@ struct LiveRotationAudioPrimeTests {
         #expect(muxer.cutFragmentForNextSegment(415) == .deferredAwaitingAudioSampleEntry,
                 "the rotated muxer's first cut arrives before any post-seam bridge output")
         #expect(muxer.finalize() == nil,
-                "teardown finalize fails on the same precondition — the 'final finalize failed; not adopted' -> muxerFailed pump death")
+                "teardown finalize fails on the same precondition, the 'final finalize failed; not adopted' -> muxerFailed pump death")
     }
 
     // MARK: - The fix's load-bearing claim
@@ -198,5 +198,24 @@ struct LiveRotationAudioPrimeTests {
         let segment = try Data(contentsOf: path)
         #expect(Self.containsBox(segment, "moof"), "the delivered segment is a plain fragment")
         #expect(!Self.containsBox(segment, "moov"), "moov already went to the versioned init")
+    }
+
+    // MARK: - The gate the retention hangs on
+
+    /// The producer copies a prime frame per audio write only when this predicate says the codec needs one,
+    /// so narrowing it silently disarms the rotation prime (and the #64 flush guard with it). The bridged
+    /// case is what the incident ran on: the producer's AudioConfig carries the ENCODER codecpar, so a
+    /// surroundCompat bridge reads as E-AC-3 here and a lossless bridge as FLAC.
+    @Test("only the packet-derived sample entries ask for a prime frame")
+    func onlyPacketDerivedSampleEntriesNeedAPrime() {
+        for codec in [AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3, AV_CODEC_ID_TRUEHD] {
+            #expect(MP4SegmentMuxer.audioNeedsParsedPacketForMoov(codec),
+                    "dac3/dec3/dmlp are built from a parsed packet, so the frame must be retained")
+        }
+        for codec in [AV_CODEC_ID_AAC, AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC,
+                      AV_CODEC_ID_OPUS, AV_CODEC_ID_MP3, AV_CODEC_ID_PCM_S16LE, AV_CODEC_ID_NONE] {
+            #expect(!MP4SegmentMuxer.audioNeedsParsedPacketForMoov(codec),
+                    "sample entry comes from codecpar alone, so no per-frame copy is warranted")
+        }
     }
 }
