@@ -129,7 +129,18 @@ extension HLSVideoEngine {
         // died with the pump and the provider's restart escalation judged by index distance alone,
         // so the tail request parked 30 s at a time into -12889 (rrgomes' seg719 trace).
         if case .readError(let code) = reason, !isLiveSession {
-            if Self.shouldReviveVODAfterReadError(
+            // A sequential origin admits no revive: the fresh demuxer can only reopen from byte 0
+            // and then fails its anchor seek on the non-seekable pb, burning a connection slot on
+            // origins that are typically connection-capped. Surface the loss to the host, whose
+            // re-request (a fresh load) is the real recovery path.
+            if sequentialOrigin {
+                EngineLog.emit(
+                    "[HLSVideoEngine] sequential-origin VOD pump died (readError \(code)); "
+                    + "revive cannot resume at an offset, surfacing source failure",
+                    category: .session
+                )
+                onVODSourceFailed?(code)
+            } else if Self.shouldReviveVODAfterReadError(
                 isLive: isLiveSession,
                 packetsWritten: prod.packetsWrittenCount,
                 cachedSegments: cache?.count ?? 0

@@ -2568,6 +2568,8 @@ public final class AetherEngine: ObservableObject {
                 // demuxer is reused as the session demuxer, so the cap lands on the open that actually pays it.
                 let probeProfile = DemuxerOpenProfile.playback.withProbeBudget(
                     probesize: options.probesize, maxAnalyzeDuration: options.maxAnalyzeDuration)
+                    .withSequentialOrigin(options.sequentialOrigin,
+                                          declaredDuration: options.declaredDurationSeconds)
                 switch source {
                 case .url(let u):
                     // isLive configures the AVIOReader for endless-feed mode; must be set at open time because

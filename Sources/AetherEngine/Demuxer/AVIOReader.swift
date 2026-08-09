@@ -190,6 +190,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var streamEnded = false
     private let streamLock = NSLock()
     private let streamDataReady = DispatchSemaphore(value: 0)
+    /// Advisory body length from the streaming response's Content-Length (-1 unknown). Only the
+    /// sequential-origin path reads it: a connection that ends short of it (or stalls out) is a
+    /// LOST source, not end-of-media, and must surface as a read error rather than EOF - the
+    /// consumer treats EOF as "played to the end" and deliberately never retries it. Guarded by
+    /// `streamLock`.
+    private var streamExpectedBytes: Int64 = -1
 
     // MARK: - Persistent Mode (single forward-streaming connection, playback path)
 
@@ -497,6 +503,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// reports EIO (-5) instead of EOF when the reconnect cap is hit.
     let isLive: Bool
 
+    /// `LoadOptions.sequentialOrigin` (via `DemuxerOpenProfile.avioSequentialOnly`): the origin
+    /// fabricates range answers, so only byte 0 is addressable. `open()` routes straight onto the
+    /// forward-only streaming mode (one unranged GET) and never issues a ranged request - no tail
+    /// prefetch, no optimistic persistent open, no size probe, no detours. `fileSize` stays -1 by
+    /// construction, which keeps `isStreaming` true and the pb non-seekable (#126 block below).
+    let sequentialOnly: Bool
+
     /// Detour cache is VOD-only: live feeds have no meaningful random access and a
     /// non-authoritative size, so they stay on the unchanged reconnect path.
     private var detourEligible: Bool { !isLive && fileSize > 0 }
@@ -541,13 +554,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// origin at once and the line used to name none of them.
     private let label: String
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil) {
         self.url = url
         self.label = label
         self.extraHeaders = extraHeaders
         self.chunkSize = chunkSize
         self.prefetchEnabled = prefetchEnabled
         self.isLive = isLive
+        self.sequentialOnly = sequentialOnly
         self.chunkRequestTimeout = chunkRequestTimeout
         self.chunkMaxRetries = max(1, chunkMaxRetries)
         self.boundedInitialFetch = boundedInitialFetch.map { max(1, $0) }
@@ -603,7 +617,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         context = ctx
 
-        if prefetchEnabled {
+        if sequentialOnly {
+            // Sequential origin: the only trustworthy request shape is one unranged GET from
+            // byte 0. Everything the branches below would issue on top - the suffix tail
+            // prefetch, the optimistic `Range: bytes=0-` persistent open, the dedicated size
+            // probe - is a ranged request the origin would answer with fabricated positions,
+            // so none of it runs. `fileSize` stays -1: `isStreaming` routes read()/seek()
+            // onto the forward-only streaming path and the #126 block below marks the pb
+            // non-seekable.
+            startStreamingDownload()
+            _ = streamDataReady.wait(timeout: .now() + .seconds(15))
+        } else if prefetchEnabled {
             // #281: the parse seeks that follow this open are what the retained head exists for.
             winCond.lock()
             openPhaseActive = true
@@ -1098,7 +1122,27 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
         }
 
-        return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eof
+        if totalRead > 0 { return Int32(totalRead) }
+        if sequentialOnly {
+            streamLock.lock()
+            let ended = streamEnded
+            let received = streamBytesRead + Int64(streamBuffer.count)
+            let expected = streamExpectedBytes
+            streamLock.unlock()
+            // A sequential origin cannot be resumed at an offset, so a stalled-out wait or a
+            // body that ended short of its advisory length is a LOST source: report EIO so the
+            // pump exits on a read error the session can surface. EOF here would read as
+            // end-of-media, which the consumer deliberately never retries.
+            if !ended || (expected > 0 && received < expected) {
+                EngineLog.emit(
+                    "[AVIOReader] sequential stream \(ended ? "ended short" : "stalled out") at "
+                    + "\(received)\(expected > 0 ? "/\(expected)" : "") bytes; reporting EIO",
+                    category: .demux
+                )
+                return AVERROR_EIO_VALUE
+            }
+        }
+        return FFmpegErr.eof
     }
 
     // MARK: - Persistent Read (single forward-streaming connection)
@@ -2382,7 +2426,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let semaphore = DispatchSemaphore(value: 0)
 
-        let delegate = StreamingDelegate { [weak self] data in
+        let delegate = StreamingDelegate(
+            extraHeaders: extraHeaders,
+            onResponse: { [weak self] response in
+                // Advisory length for the sequential-origin EOF/EIO distinction; -1 (chunked /
+                // unknown) leaves the clean-end path as the only EOF source.
+                guard let self, self.sequentialOnly else { return }
+                let expected = response.expectedContentLength
+                guard expected > 0 else { return }
+                self.streamLock.lock()
+                self.streamExpectedBytes = expected
+                self.streamLock.unlock()
+            }
+        ) { [weak self] data in
             guard let self, !self.isClosed else { return }
             self.streamLock.lock()
             self.streamBuffer.append(data)
@@ -3206,10 +3262,44 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
 private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     let onData: @Sendable (Data) -> Void
     let onComplete: @Sendable () -> Void
+    /// Response hook (advisory Content-Length capture on the sequential-origin path).
+    let onResponse: (@Sendable (URLResponse) -> Void)?
+    /// Re-applied across cross-host redirects like every other delegate in this file;
+    /// IPTV origins routinely 302 twice (portal -> panel -> archive host) and the final
+    /// host must still see the caller's User-Agent / auth headers.
+    let extraHeaders: [String: String]
 
-    init(onData: @escaping @Sendable (Data) -> Void, onComplete: @escaping @Sendable () -> Void) {
+    init(
+        extraHeaders: [String: String] = [:],
+        onResponse: (@Sendable (URLResponse) -> Void)? = nil,
+        onData: @escaping @Sendable (Data) -> Void,
+        onComplete: @escaping @Sendable () -> Void
+    ) {
+        self.extraHeaders = extraHeaders
+        self.onResponse = onResponse
         self.onData = onData
         self.onComplete = onComplete
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(redirectPreservingHeaders(
+            task: task, newRequest: request, extraHeaders: extraHeaders))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        onResponse?(response)
+        completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
