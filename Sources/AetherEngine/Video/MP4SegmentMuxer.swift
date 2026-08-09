@@ -144,6 +144,15 @@ final class MP4SegmentMuxer {
     /// Only AC-3 / E-AC-3 / TrueHD build their mp4 sample entry from a parsed packet (dac3/dec3/dmlp),
     /// so only they can hit the "moov before audio parsed" wedge and need the #64-flush guard. Shared with
     /// the producer, which uses it to decide whether retaining a moov-prime frame copy buys anything.
+    ///
+    /// AC-3 and E-AC-3 are what actually reach a muxer here, and for them ANY frame primes: every frame is
+    /// a complete syncframe, so movenc's handle_eac3 derives the full sample entry from whichever one it
+    /// gets. TrueHD is listed for completeness and is unreachable today (`AudioCodecCompat.requiresBridge`
+    /// sends it through AudioBridge, so the muxer's audio track is the bridge's E-AC-3 or FLAC encoder,
+    /// never mlpa). That matters if it is ever unblocked: movenc latches `track->extradata` from the FIRST
+    /// packet written and `mov_write_dmlp_tag` rejects it unless it carries the major-sync word 0xF8726FBA,
+    /// which most TrueHD frames do not, so a TrueHD stream-copy path would have to prime from a major-sync
+    /// frame specifically instead of from an arbitrary retained one.
     static func audioNeedsParsedPacketForMoov(_ codecID: AVCodecID) -> Bool {
         codecID == AV_CODEC_ID_AC3 ||
         codecID == AV_CODEC_ID_EAC3 ||
