@@ -72,13 +72,17 @@ func printUsage() {
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>]
                  [--start-position S] [--switch-audio <index>[@ms]]
+                 [--sequential-origin] [--declared-duration S]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback] <url>
                      (full load+play session smoke test; --subs activates the first
                       matching embedded subtitle track and logs overlay cues;
                       --audio-stats taps decoded PCM and prints per-second audio lead
                       plus PTS-continuity gaps; seekback rewinds 20 s at t=15 and
                       returns to the live edge at t=30; --switch-audio replays a host
-                      applying a language preference just after play, default +20 ms)
+                      applying a language preference just after play, default +20 ms;
+                      --sequential-origin declares a fake-range origin (one unranged
+                      GET, no ranged probes) and needs --declared-duration on VOD
+                      since the tail estimate is skipped)
       aetherctl segverify [--from N] [--count K] [--no-dv] [--dump <dir>] <url>
                           (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
@@ -472,6 +476,11 @@ if first == "play" {
     // Resume anchor, the same one load(startPosition:) takes. AE#287 needs it: the reporter's hard
     // park only reproduces when a rebuilt session opens exactly at the video-exhaustion boundary.
     let playStartPosition = takeDoubleFlag("--start-position", from: &rest)
+    // Sequential-origin declaration (LoadOptions.sequentialOrigin): fake-range archives get one
+    // unranged GET and no ranged probes; pair with --declared-duration on VOD because the tail
+    // duration estimate is skipped along with the other ranged reads.
+    let sequentialOrigin = takeFlag("--sequential-origin", from: &rest)
+    let declaredDuration = takeDoubleFlag("--declared-duration", from: &rest)
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
     let frameTimes = takeFlag("--frame-times", from: &rest)
@@ -513,7 +522,8 @@ if first == "play" {
     }
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
-                 audioSwitch: audioSwitch))
+                 audioSwitch: audioSwitch,
+                 sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

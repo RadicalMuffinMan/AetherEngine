@@ -638,14 +638,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         companionAudioReader: IOReader? = nil,
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
+        sequentialOrigin: Bool = false,
+        declaredDurationSeconds: Double? = nil,
         forwardBufferSegments: Int? = nil
     ) {
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
+        self.sequentialOrigin = sequentialOrigin
+        self.declaredDurationSeconds = declaredDurationSeconds
         // Caller-bounded find_stream_info budget (#68); nil keeps the .playback default. Applied only to the
         // fallback open / live reopen here; the happy path reuses the already-budgeted preopenedDemuxer.
         self.openProfile = DemuxerOpenProfile.playback.withProbeBudget(
             probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration)
+            .withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDurationSeconds)
         self.dvModeAvailable = dvModeAvailable
         self.displaySupportsHDR = displaySupportsHDR
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
@@ -756,6 +761,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `.playback` unless the caller set `LoadOptions.probesize` / `maxAnalyzeDuration`. Read in the
     /// `+LiveReopen` extension, so it cannot be file-private.
     let openProfile: DemuxerOpenProfile
+
+    /// `LoadOptions.sequentialOrigin` for this session. Gates the VOD readError revive
+    /// (`+LiveReopen`): a revive's fresh demuxer can only reopen from byte 0 and then fails its
+    /// anchor seek on the non-seekable pb, burning a connection slot on origins that are typically
+    /// connection-capped, so the session surfaces `onVODSourceFailed` directly instead.
+    let sequentialOrigin: Bool
+
+    /// `LoadOptions.declaredDurationSeconds`, threaded into every fresh-demuxer profile this
+    /// session builds (wedge restart) so a reopened demuxer reports the same trusted duration.
+    let declaredDurationSeconds: Double?
 
 
     // MARK: - Public API
@@ -1399,6 +1414,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
             isLive: isLiveSession,
+            // Sequential archives: playlist grows with the producer's REAL cut durations. The
+            // static plan's uniform EXTINF lies whenever the archive's GOP cadence does not
+            // divide the cut target (1.92 s GOPs vs a 4.0 s plan put every segment's media up
+            // to 1.9 s outside its advertised window; AVPlayer visibly jumped at each resync).
+            sequentialAppendPlaylist: sequentialOrigin && !isLiveSession,
             liveWindowSizing: LiveWindowSizing(
                 targetSegmentDurationSeconds: liveCutTargetSeconds,
                 dvrWindowSeconds: dvrWindowSeconds
@@ -1438,6 +1458,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
                                         startSeconds: startPtsSeconds,
                                         durationSeconds: durationSeconds,
                                         discontinuous: discontinuous)
+            }
+        } else if sequentialOrigin {
+            prod.onSequentialSegmentFinalized = { [weak prov] index, durationSeconds in
+                prov?.appendSequentialSegmentDuration(index: index, durationSeconds: durationSeconds)
             }
         }
 
@@ -2206,7 +2230,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
                     // the bulk of a 44 s wedge-reopen over WAN (#93 residual). The pass itself must
                     // run so video_delay resolves, else B-frame dts arrive broken (#93 judder).
-                    try fresh.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: .restartReopen, isLive: false)
+                    // A sequential origin keeps its declaration on the fresh open too: a ranged
+                    // reopen would splice fabricated-position bytes into the new pump.
+                    try fresh.open(
+                        url: sourceURL, extraHeaders: sourceHTTPHeaders,
+                        profile: DemuxerOpenProfile.restartReopen
+                            .withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDurationSeconds),
+                        isLive: false)
                     dem.markClosed() // abort any wedged read now that the replacement is ready
                     freshDemuxer = fresh
                     activeDem = fresh
