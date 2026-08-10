@@ -409,6 +409,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
     }
 
+    /// [SWDiag] surface: current queue-target status for the 1 Hz diagnostic line. A mid-session
+    /// flip away from `rendering` is the layer-side stall the per-frame counters cannot show.
+    var diagStatusName: String { statusName }
+
     /// #353: what the layer will draw the description at. Pixel aspect ratio and clean aperture are
     /// extensions of the description itself, so this asks the description what it presents at
     /// instead of repeating the decision that built it.

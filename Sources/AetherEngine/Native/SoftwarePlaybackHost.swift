@@ -515,6 +515,16 @@ final class SoftwarePlaybackHost {
         isLive && codecID == AV_CODEC_ID_AAC && sampleRate == 0
     }
 
+    /// Pure decision: whether the demux loop folds PTS discontinuities into one continuous
+    /// timeline. Live always folds (encoder restarts mid-session). A forward-only non-live
+    /// source folds too: sequential-origin IPTV timeshift archives are chunked recordings
+    /// whose every chunk restarts at PTS ~0, FFmpeg's wrap correction turns that backward
+    /// jump into a ~26.5 h forward one, and a non-seekable pb offers no seek-based recovery.
+    /// Seekable VOD keeps its trusted container timeline untouched.
+    nonisolated static func shouldFoldTimeline(isLive: Bool, sourceSeekable: Bool) -> Bool {
+        isLive || !sourceSeekable
+    }
+
     // MARK: - Load
 
     func load(
@@ -1165,6 +1175,7 @@ final class SoftwarePlaybackHost {
             return
         }
 
+        let diag = demuxDiag
         demuxQueue.async {
             Self.runDemuxLoop(
                 demuxer: dem,
@@ -1177,10 +1188,13 @@ final class SoftwarePlaybackHost {
                 condition: condition,
                 initialClockTime: initialClock,
                 currentRate: currentRate,
+                diag: diag,
                 ring: ring,
                 videoTimeBaseSeconds: vTbSec,
                 audioTimeBaseSeconds: aTbSec,
                 isLive: liveSession,
+                foldTimeline: Self.shouldFoldTimeline(
+                    isLive: liveSession, sourceSeekable: dem.isSourceSeekable),
                 noteEdge: noteEdge,
                 isPlaying: getIsPlaying,
                 stopRequested: getStopRequested,
@@ -1668,10 +1682,12 @@ final class SoftwarePlaybackHost {
         condition: NSCondition,
         initialClockTime: CMTime,
         currentRate: @Sendable () -> Float,
+        diag: SWPlaybackDiagState? = nil,
         ring: PacketRingBuffer?,
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
         isLive: Bool,
+        foldTimeline: Bool,
         noteEdge: @Sendable (Double) -> Void,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
@@ -1690,18 +1706,105 @@ final class SoftwarePlaybackHost {
     ) {
         // Clock arming: one-shot latch (seekClock is not idempotent -- re-calling snaps clock back to initialClockTime). Shared with host so a seek before first audio isn't overridden by a late re-arm.
 
-        // Live PTS-discontinuity (SW): accrue (jumpedPts - expectedContinuation) into discontinuityOffset; subtract from all subsequent PTS so the whole pipeline sees one continuous timeline. Threshold 10s (mirrors native producer); flush decoders at the seam.
+        // PTS-discontinuity fold (SW): accrue (jumpedPts - expectedContinuation) into discontinuityOffset; subtract from all subsequent PTS so the whole pipeline sees one continuous timeline. Threshold 10s (mirrors native producer); flush decoders at the seam.
+        // Runs for live AND for forward-only (sequential-origin) VOD: IPTV timeshift archives are
+        // chunked recordings whose every chunk restarts at PTS ~0 (device trace: 89 s chunk ending
+        // at raw 2717.9 s, next chunk at 0.04 s; FFmpeg's 33-bit wrap correction turned that -2718 s
+        // into +92726 s, the renderer then waited 25 h for the frame's display time and died with
+        // -12080). Seekable VOD keeps the fold off: its timeline is trusted, and a threshold-sized
+        // jump there is a container seek artifact the native path also leaves alone.
         let discontinuityThresholdSeconds = 10.0
         var prevRawVideoPtsSec = Double.nan
         var frameIntervalSec = 0.0
         var discontinuityOffsetSec = 0.0
-        var loggedSWDiscontinuity = false
+        var loggedSeamCount = 0
 
         // Clock-arming fallback bookkeeping: a declared audio track whose
         // decoder never produces buffers (corrupt stream) must not leave
         // the session unarmed forever. See the video-branch arming below.
         var audioPacketsSeen = 0
         var audioBuffersProduced = false
+
+        // VOD audio decoupling (#107 family). The combined loop paced EVERYTHING on the video
+        // renderer's ~10-frame queue, so interleaved audio could never build more than ~0.3 s
+        // of lead over the synchronizer clock. Any decode/deinterlace jitter beyond that
+        // starved the audio renderer, the synchronizer leapt to the next sample's PTS, the
+        // whole queued video was suddenly late and the layer dropped it - a visible forward
+        // skip (1080i50 archive replay trace: periodic +0.25 s clock leaps, 17 % renderer
+        // drops). Video packets now PARK in a bounded FIFO while audio keeps decoding up to
+        // AudioLookaheadPolicy.targetLeadSeconds ahead of the clock, and a genuine underrun
+        // pauses the clock for a rebuffer (AudioLookaheadPolicy.clockAction) instead of
+        // letting it free-run, mirroring the DVR feeder arm. Live-without-ring sessions keep
+        // the historical lockstep pacing: their delivery is origin-paced realtime and the DVR
+        // arm covers the sessions that need the pump.
+        var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
+        let parkedVideoCap = 256
+        var lastEnqueuedAudioPtsSec = Double.nan
+        var rebuffering = false
+        // The pause/rebuffer arm stays off until the source has proven it can deliver a real
+        // lead once: an exactly-realtime origin whose lead never leaves the start offset must
+        // not eat a rebuffer pause at every session start.
+        var everHadLead = false
+        var parkedSeekGeneration = seekGeneration()
+        let decoupleAudio = !isLive && audioDecoder != nil && audioOutput != nil
+
+        func freeParkedVideo() {
+            for p in parkedVideo {
+                av_packet_unref(p)
+                av_packet_free_safe(p)
+            }
+            parkedVideo.removeAll()
+        }
+
+        // Decode+enqueue parked video while the renderer will take it. Never blocks.
+        func drainParkedVideoNonblocking() {
+            while !parkedVideo.isEmpty, renderer.isReadyForMoreMediaData,
+                  !stopRequested(), !backgroundAudioOnly() {
+                let p = parkedVideo.removeFirst()
+                videoDecoder.decode(packet: p)
+                av_packet_unref(p)
+                av_packet_free_safe(p)
+            }
+        }
+
+        // Pause the master clock when the audio lead is genuinely exhausted, resume once the
+        // rebuffer target is met. In this loop there is no ring to distinguish decode lag
+        // from a dry source, so a sub-threshold lead IS treated as source-starved - the
+        // everHadLead latch keeps that from firing on realtime-paced sources that never had
+        // a lead to lose.
+        func applyAudioClockAction(sourceEnded: Bool) {
+            guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
+            let lead = lastEnqueuedAudioPtsSec.isFinite
+                ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
+            if lead >= AudioLookaheadPolicy.rebufferResumeLeadSeconds { everHadLead = true }
+            guard everHadLead, isPlaying() || rebuffering else { return }
+            switch AudioLookaheadPolicy.clockAction(
+                rebuffering: rebuffering,
+                lastFedAudioPTS: lastEnqueuedAudioPtsSec,
+                clockSeconds: aOut.currentTimeSeconds,
+                atRingEnd: true,
+                sourceEnded: sourceEnded
+            ) {
+            case .pauseForRebuffer:
+                rebuffering = true
+                EngineLog.emit(
+                    "[SWHost] audio lead exhausted (\(String(format: "%.2f", lead))s); "
+                    + "pausing clock for rebuffer",
+                    category: .swPlayback
+                )
+                aOut.pause()
+            case .resume:
+                rebuffering = false
+                EngineLog.emit(
+                    "[SWHost] rebuffered to \(String(format: "%.2f", lead))s audio lead; "
+                    + "resuming clock",
+                    category: .swPlayback
+                )
+                aOut.setRate(currentRate())
+            case .none:
+                break
+            }
+        }
 
         // Anchor the clock on a video packet. SWClockAnchorPolicy keeps the load anchor unless the
         // source joined mid-stream, so the frames already queued still present. Shared by the
@@ -1730,6 +1833,41 @@ final class SoftwarePlaybackHost {
                 return true
             }
 
+            if decoupleAudio {
+                // Parked packets are pre-seek stale once the generation moves; the seek path
+                // has already flushed decoders and re-anchored the clock.
+                let gen = seekGeneration()
+                if gen != parkedSeekGeneration {
+                    parkedSeekGeneration = gen
+                    freeParkedVideo()
+                    lastEnqueuedAudioPtsSec = .nan
+                    rebuffering = false
+                }
+                drainParkedVideoNonblocking()
+                applyAudioClockAction(sourceEnded: false)
+                // Bounded park: audio has its lead, so block on the renderer taking video
+                // (the historical backpressure shape) before reading further.
+                if parkedVideo.count >= parkedVideoCap {
+                    while !parkedVideo.isEmpty, parkedVideo.count >= parkedVideoCap / 2,
+                          !stopRequested(), !backgroundAudioOnly() {
+                        if renderer.isReadyForMoreMediaData {
+                            drainParkedVideoNonblocking()
+                        } else if !isPlaying() {
+                            condition.lock()
+                            while !isPlaying() && !stopRequested() {
+                                autoreleasepool {
+                                    _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                                }
+                            }
+                            condition.unlock()
+                        } else {
+                            Thread.sleep(forTimeInterval: 0.005)
+                        }
+                    }
+                    return true
+                }
+            }
+
             let genBeforeRead = seekGeneration()
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
@@ -1741,6 +1879,20 @@ final class SoftwarePlaybackHost {
             }
 
             guard let packet else {
+                // Play the parked tail out before the flush, and release a rebuffer hold:
+                // nothing more will arrive, the queues must drain to end-of-media.
+                while !parkedVideo.isEmpty, !stopRequested(), !backgroundAudioOnly() {
+                    if renderer.isReadyForMoreMediaData {
+                        drainParkedVideoNonblocking()
+                    } else {
+                        Thread.sleep(forTimeInterval: 0.005)
+                    }
+                }
+                freeParkedVideo()
+                if rebuffering {
+                    rebuffering = false
+                    audioOutput?.setRate(currentRate())
+                }
                 videoDecoder.flush()
                 audioDecoder?.flush()
                 renderer.drainReorderBuffer()
@@ -1757,8 +1909,8 @@ final class SoftwarePlaybackHost {
 
             let streamIdx = packet.pointee.stream_index
 
-            // Discontinuity runs before any timestamp read; offset applied to both streams. Non-live SW skips.
-            if isLive, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+            // Discontinuity runs before any timestamp read; offset applied to both streams.
+            if foldTimeline, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
                packet.pointee.pts != Int64.min {
                 let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
                 if !prevRawVideoPtsSec.isNaN {
@@ -1768,18 +1920,32 @@ final class SoftwarePlaybackHost {
                         let expectedContinuation = prevRawVideoPtsSec
                             + (frameIntervalSec > 0 ? frameIntervalSec : 0)
                         discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
+                        // Feed the parked pre-seam tail to the decoder before the flush drops
+                        // its reference chain; the seam packet itself parks after this block.
+                        while !parkedVideo.isEmpty, !stopRequested(), !backgroundAudioOnly() {
+                            if renderer.isReadyForMoreMediaData {
+                                drainParkedVideoNonblocking()
+                            } else {
+                                Thread.sleep(forTimeInterval: 0.005)
+                            }
+                        }
+                        freeParkedVideo()
                         videoDecoder.flush()
                         audioDecoder?.flush()
                         renderer.drainReorderBuffer()
-                        if !loggedSWDiscontinuity {
-                            loggedSWDiscontinuity = true
+                        // Chunked archives seam every minute or two; log each seam (bounded by the
+                        // 10 s threshold to at most one line per 10 s of content) with a soft cap
+                        // so a pathological source cannot flood the log.
+                        if loggedSeamCount < 20 {
+                            loggedSeamCount += 1
                             EngineLog.emit(
-                                "[SWHost] live PTS discontinuity: prevPts="
+                                "[SWHost] PTS discontinuity #\(loggedSeamCount): prevPts="
                                 + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
                                 + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
                                 + "delta=\(String(format: "%.2f", deltaSec))s -> "
                                 + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
-                                + "(timeline held continuous)",
+                                + "(timeline held continuous)"
+                                + (loggedSeamCount == 20 ? " [further seams unlogged]" : ""),
                                 category: .swPlayback
                             )
                         }
@@ -1790,8 +1956,8 @@ final class SoftwarePlaybackHost {
                 prevRawVideoPtsSec = rawPtsSec
             }
 
-            // Apply discontinuity offset to timestamps in-place (live only); converts seconds to stream TB ticks.
-            if isLive, discontinuityOffsetSec != 0 {
+            // Apply discontinuity offset to timestamps in-place; converts seconds to stream TB ticks.
+            if foldTimeline, discontinuityOffsetSec != 0 {
                 let tbSec = (streamIdx == videoStreamIndex)
                     ? videoTimeBaseSeconds : audioTimeBaseSeconds
                 if tbSec > 0 {
@@ -1832,6 +1998,25 @@ final class SoftwarePlaybackHost {
                 if backgroundAudioOnly() {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
+                    return true
+                }
+                if decoupleAudio {
+                    // Park; the drains at the iteration top and the bounded-park gate feed the
+                    // renderer. Ownership moves to the FIFO - no free here.
+                    parkedVideo.append(packet)
+                    // Broken-audio clock-arming fallback still applies (decoupleAudio only
+                    // requires a DECLARED audio track, not a producing one).
+                    if !clockArmed(), let aOut = audioOutput,
+                       audioPacketsSeen >= 50, !audioBuffersProduced {
+                        let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
+                            ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
+                        let resolution = SWClockAnchorPolicy.resolve(
+                            initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
+                        armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
+                                 rate: currentRate(), onClockAnchored: onClockAnchored)
+                        markClockArmed()
+                    }
+                    drainParkedVideoNonblocking()
                     return true
                 }
                 // Back-pressure via SampleBufferRenderer.isReadyForMoreMediaData (not the deprecated layer property). Park on condition while paused to avoid 200 Hz CPU spin.
@@ -1924,6 +2109,10 @@ final class SoftwarePlaybackHost {
                     tapSink?(buf)   // #95: mirror before enqueue
                     aOut.enqueue(sampleBuffer: buf)
                 }
+                if decoupleAudio, let last = buffers.last {
+                    let pts = CMSampleBufferGetPresentationTimeStamp(last)
+                    if pts.isValid { lastEnqueuedAudioPtsSec = pts.seconds }
+                }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
                 if !clockArmed(), !buffers.isEmpty {
                     // #107: anchor at the buffer PTS when it deviates from the load anchor
@@ -1954,8 +2143,12 @@ final class SoftwarePlaybackHost {
             let keepGoing: Bool = autoreleasepool {
                 demuxIteration()
             }
+            diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
+                         parked: parkedVideo.count,
+                         rebuffering: rebuffering)
             if !keepGoing { break }
         }
+        freeParkedVideo()
     }
 
     // MARK: - Time updates
@@ -1972,6 +2165,7 @@ final class SoftwarePlaybackHost {
                 // still on the pre-seek anchor and would drag the published position backwards.
                 guard !self.seekInFlight else { return }
                 let raw = aOut.currentTimeSeconds
+                self.emitDiagIfDue(clock: raw)
                 if raw.isFinite, raw >= 0 {
                     // Raw clock = source/subtitle axis; published alongside the mapped position (#107).
                     self.sourceClockSeconds = raw
@@ -1995,6 +2189,68 @@ final class SoftwarePlaybackHost {
             }
     }
 
+    // MARK: - SW diagnostics (1 Hz)
+
+    private let demuxDiag = SWPlaybackDiagState()
+    private var diagTickCounter = 0
+    private var diagPrevClock = Double.nan
+    private var diagPrevDropped = 0
+    private var diagPrevEnqueued = 0
+    private var diagPrevDelay: TimeInterval = 0
+
+    /// 1 Hz [SWDiag] line: clock + clock delta, decoded-audio lead over the clock, parked
+    /// video FIFO depth, rebuffer state, and the display layer's OWN drop counter with its
+    /// per-second delta. The layer counter is the one place render-deadline misses are
+    /// visible - swDropped in the memprobe only counts pre-enqueue drops, so a session can
+    /// stutter visibly while every 30 s probe reads clean.
+    private func emitDiagIfDue(clock: Double) {
+        diagTickCounter += 1
+        guard diagTickCounter % 4 == 0 else { return }
+        let prevClock = diagPrevClock
+        diagPrevClock = clock
+        let d = demuxDiag.snapshot
+        let lead = d.lastAudioPts.isFinite && clock.isFinite ? d.lastAudioPts - clock : Double.nan
+        let enqueued = framesEnqueued
+        let dEnq = enqueued - diagPrevEnqueued
+        diagPrevEnqueued = enqueued
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let m = await self.loadRenderMetrics()
+            let dropped = m?.dropped ?? -1
+            let dDrop = dropped >= 0 ? dropped - self.diagPrevDropped : 0
+            if dropped >= 0 { self.diagPrevDropped = dropped }
+            // Accumulated render delay is the one metric that shows frames displayed LATE:
+            // a layer that stalls a few seconds and then catches up (picture leaps forward,
+            // audio uninterrupted) drops nothing and enqueues on pace - only this grows.
+            let delay = m?.accumulatedDelay ?? -1
+            let dDelay = delay >= 0 ? delay - self.diagPrevDelay : 0
+            if delay >= 0 { self.diagPrevDelay = delay }
+            let dclk = clock.isFinite && prevClock.isFinite ? clock - prevClock : Double.nan
+            let layer = self.renderer.displayLayer
+            let surface = layer.superlayer != nil
+                ? "\(Int(layer.bounds.width))x\(Int(layer.bounds.height))" : "DETACHED"
+            let r4d: String
+            if #available(tvOS 17.4, iOS 17.4, macOS 14.4, *) {
+                r4d = layer.isReadyForDisplay ? "y" : "n"
+            } else {
+                r4d = "-"
+            }
+            EngineLog.emit(
+                "[SWDiag] clk=\(String(format: "%.2f", clock)) "
+                + "dclk=\(dclk.isFinite ? String(format: "%.2f", dclk) : "-") "
+                + "aLead=\(lead.isFinite ? String(format: "%.2f", lead) : "-") "
+                + "parked=\(d.parked) rebuf=\(d.rebuffering ? "y" : "n") "
+                + "enq=+\(dEnq) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop)) "
+                + "delay=\(delay >= 0 ? String(format: "%.2f", delay) : "-")"
+                + "(\(dDelay >= 0 ? "+" : "")\(String(format: "%.2f", dDelay))) "
+                + "corr=\(m?.corrupted ?? -1) "
+                + "status=\(self.renderer.diagStatusName) surf=\(surface) "
+                + "r4d=\(r4d)",
+                category: .swPlayback
+            )
+        }
+    }
+
     // MARK: - Errors
 
     enum HostError: Error, LocalizedError {
@@ -2014,4 +2270,29 @@ final class SoftwarePlaybackHost {
 func av_packet_free_safe(_ packet: UnsafeMutablePointer<AVPacket>) {
     var p: UnsafeMutablePointer<AVPacket>? = packet
     trackedPacketFree(&p)
+}
+
+/// 1 Hz SW-session diagnostics shared between the combined demux loop (writes once per
+/// iteration) and the host's time-update timer (reads + emits the [SWDiag] line). The native
+/// path has LagDiag; the SW path had only the 30 s memprobe, which is too coarse to see the
+/// clock leaps and layer-drop bursts a stuttering session is made of. Lock-guarded.
+final class SWPlaybackDiagState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _lastAudioPts = Double.nan
+    private var _parked = 0
+    private var _rebuffering = false
+
+    func update(lastAudioPts: Double, parked: Int, rebuffering: Bool) {
+        lock.lock()
+        _lastAudioPts = lastAudioPts
+        _parked = parked
+        _rebuffering = rebuffering
+        lock.unlock()
+    }
+
+    var snapshot: (lastAudioPts: Double, parked: Int, rebuffering: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (_lastAudioPts, _parked, _rebuffering)
+    }
 }
