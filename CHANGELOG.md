@@ -12,6 +12,31 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.19.1] - 2026-08-10
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.1))
+
+### Added
+
+- `#357 subtitle-delivery`, a diagnostic line stating what each subtitle drain
+  tick did with the packets it found: `outcome=` is one of `noDecoder`, `empty`,
+  `undecodable`, `held`, `duplicate`, `trimOnly` or `published`, printed with the
+  counts it was derived from. Emitted on a change of outcome and on every
+  post-seek reset tick, never per tick. It complements `#250
+  subtitle-resolution`, which states how far determination reached: the drain
+  cursor advances over packets that decode to nothing, so resolution can keep
+  pace with every seek landing while the overlay never changes, and the two lines
+  together tell those cases apart. A channel holding a drain target whose decoder
+  cannot be built now reports `noDecoder` instead of being skipped in silence.
+
+### Changed
+
+- The per-cue `[applySubtitleEvent]` line is budgeted per seek generation instead
+  of per `load()`, so a seek sequence stays observable to its end rather than
+  going quiet after twenty events, and it prints `sourceTime` beside
+  `currentTime`. Cue timestamps are absolute source PTS, so on a session with a
+  playlist shift those two are not on the same clock.
+
 ## [6.19.0] - 2026-08-10
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.0))
