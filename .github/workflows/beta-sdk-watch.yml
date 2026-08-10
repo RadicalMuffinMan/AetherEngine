@@ -65,6 +65,9 @@ jobs:
             | grep -oE '[^ ]+\.swift:[0-9]+:[0-9]+: (warning|error): [^[]*main actor-isolated[^[]*' \
             | sed -E 's#^.*/Sources/#Sources/#' | sort -u || true)
           count=$(printf '%s' "$sites" | grep -c . || true)
+          # Also to stdout: the step summary is readable in the UI but not through the API, so the
+          # log is the only place a later run can be compared against from a terminal.
+          printf 'main-actor isolation sites: %s\n%s\n' "${count:-0}" "${sites:-(none)}"
           {
             echo "## Main-actor isolation sites: ${count:-0}"
             echo
