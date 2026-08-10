@@ -88,6 +88,20 @@ final class Issue199RerouteRecoveryTests: XCTestCase {
             sourceReopenableByURL: false, hasCustomSourceReopenFactory: false), .none)
     }
 
+    // MARK: - Reopen exhaustion escalation
+
+    func testEveryReopenableTransportEscalatesOnExhaustion() {
+        XCTAssertTrue(HLSVideoEngine.liveReopenExhaustionEscalatesToHost(transport: .url),
+            "a URL source that exhausts its reopen budget must halt production and tell the host; leaving it un-halted is a zombie session with a frozen playlist")
+        XCTAssertTrue(HLSVideoEngine.liveReopenExhaustionEscalatesToHost(transport: .customFactory),
+            "the original #199 escalation")
+    }
+
+    func testTransportlessSourcesNeverReachExhaustionEscalation() {
+        XCTAssertFalse(HLSVideoEngine.liveReopenExhaustionEscalatesToHost(transport: .none),
+            ".none delegates to host retune before any reopen begins; escalating it again would double-signal liveSourceReset")
+    }
+
     // MARK: - Fresh-reader factory
 
     func testMainVideoReaderVendsFreshIndependentReader() {
