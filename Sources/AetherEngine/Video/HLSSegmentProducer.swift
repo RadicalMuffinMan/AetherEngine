@@ -1547,6 +1547,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
             return nil
         }
+        // #358: the cut jumped over plan indices, so no keyframe reached their boundaries and no
+        // segment will ever open there. The VOD playlist still offers them, which is what turns the
+        // gap into a consumer that waits forever, so record them for the wedge handler.
+        if !isLive, newIdx > currentMuxerSegmentIndex + 1 {
+            let folded = (currentMuxerSegmentIndex + 1)..<newIdx
+            cache.noteFolded(folded)
+            EngineLog.emit(
+                "[HLSSegmentProducer] #358 plan indices \(folded.lowerBound)...\(folded.upperBound - 1) "
+                + "folded into seg-\(newIdx) (no IRAP reached their boundary)",
+                category: .session
+            )
+        }
         currentMuxerSegmentIndex = newIdx
         if isLive {
             // Live is source-paced: the pump only runs ahead of real time while draining the join

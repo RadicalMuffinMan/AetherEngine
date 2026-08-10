@@ -480,6 +480,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var consecutiveWedgeReanchors = 0
     var lastWedgeReanchorPosition = -Double.greatestFiniteMagnitude
     static let maxConsecutiveWedgeReanchors = 5
+    /// How many pumps must have folded the index the consumer waits on before the wedge handler
+    /// treats the gap as unrecoverable rather than re-anchoring into it again (#358). One fold can
+    /// still be filled by a rebase; two is the recovery reproducing its own trigger.
+    static let foldsProvingUnrecoverableGap = 2
 
     /// #99: bounded revive for a VOD pump that died with muxerFailed (under `restartLock`).
     /// performRestart rebuilds muxer AND re-arms the audio bridge, so transient causes heal;
@@ -1470,6 +1474,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             liveCadencePolicy: liveCadencePolicy,
             restartHandler: isLiveSession ? nil : { [weak self] idx in
                 self?.requestRestart(at: idx)
+            },
+            // #358: a plan index no keyframe can open, asked for twice. Nothing downstream recovers
+            // from it, so the session ends with an error the host can act on instead of a picture
+            // that never moves again while the engine still reports playing.
+            unrecoverableGapHandler: isLiveSession ? nil : { [weak self] _ in
+                self?.onVODSourceFailed?(FFmpegErr.eio)
             },
             restartActivity: isLiveSession ? nil : { [weak self] in
                 self?.restartInFlight ?? false
