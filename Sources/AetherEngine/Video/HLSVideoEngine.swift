@@ -966,10 +966,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let sorted = keyframes.sorted()
                 let streamStart = videoStream.pointee.start_time
                 let anchorPts = sorted.first ?? (streamStart != Int64.min ? max(0, streamStart) : 0)
+                // #358: a grid finer than the GOP advertises boundaries no keyframe sits on, and the
+                // keyframe-gated cutter leaves every one of them without a segment while the playlist
+                // still offers it. Measure the spacing instead of assuming the target fits it.
+                let anchorSeconds = Double(anchorPts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
+                let spacing = measureKeyframeSpacing(
+                    demuxer: dem,
+                    videoStreamIndex: videoIndex,
+                    videoTimeBase: videoTimeBase,
+                    fromSeconds: anchorSeconds
+                )
+                let stride = Self.uniformStrideSeconds(spacing: spacing)
                 plan = Self.buildUniformSegmentPlan(
                     videoTimeBase: videoTimeBase,
                     sourceDurationSeconds: durationSeconds,
-                    startPts0: anchorPts
+                    startPts0: anchorPts,
+                    strideSeconds: stride
                 )
                 self.firstKeyframePts = anchorPts
                 self.firstKeyframeSeconds = Double(anchorPts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
@@ -992,8 +1004,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let reason = keyframes.count < 2
                     ? "\(keyframes.count) IRAPs in index, need >=2"
                     : "index unusable (\(keyframes.count) IRAPs, coverage=\(String(format: "%.1f", coverageSeconds))s, largestGap=\(String(format: "%.1f", largestGapSeconds))s)"
+                let spacingText: String
+                switch spacing {
+                case .measured(let s): spacingText = "measured IRAP spacing \(String(format: "%.3f", s))s"
+                case .exceedsBudget(let s): spacingText = "IRAP spacing exceeds the \(String(format: "%.0f", s))s scan budget"
+                case .singleKeyframeInSource: spacingText = "source holds one IRAP, no second to space against"
+                case .unknown: spacingText = "IRAP spacing unknown (no keyframe scanned)"
+                }
                 EngineLog.emit(
-                    "[HLSVideoEngine] segment plan: uniform stride fallback (\(reason), anchorPts=\(anchorPts))",
+                    "[HLSVideoEngine] segment plan: uniform stride fallback (\(reason), anchorPts=\(anchorPts), "
+                    + "\(spacingText) → stride=\(String(format: "%.3f", stride))s, \(plan.count) segments)",
                     category: .session
                 )
             }
