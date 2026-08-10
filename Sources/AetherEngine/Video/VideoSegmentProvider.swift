@@ -190,6 +190,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// Synchronous teardown + relaunch at the given absolute segment index.
     private let restartHandler: ((Int) -> Void)?
+    /// Called with a plan index the consumer wants and no pump will ever open (#358).
+    private let unrecoverableGapHandler: ((Int) -> Void)?
     /// True while the engine's restart coalescer has an in-flight run (#93 residual): waiting
     /// fetches ride it instead of burning fixed retry budgets, and never re-fire at stale indices.
     private let restartActivity: (() -> Bool)?
@@ -297,6 +299,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
         restartHandler: ((Int) -> Void)? = nil,
+        unrecoverableGapHandler: ((Int) -> Void)? = nil,
         restartActivity: (() -> Bool)? = nil,
         activeProducerBase: (() -> Int?)? = nil,
         producerFinished: (() -> Bool)? = nil,
@@ -330,6 +333,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
         self.restartHandler = restartHandler
+        self.unrecoverableGapHandler = unrecoverableGapHandler
         self.restartActivity = restartActivity
         self.activeProducerBase = activeProducerBase
         self.producerFinished = producerFinished
@@ -577,6 +581,36 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
     private var _mediaFetchCount: UInt64 = 0
 
+    /// The index the consumer is currently blocked on, and how often a pump has passed it without
+    /// producing a segment (#358). Two folds mean a re-anchor already tried and rebuilt the same gap.
+    var consumerTargetFold: (index: Int, folds: Int) {
+        let index = cache.targetIndex
+        return (index, cache.foldCount(index))
+    }
+
+    /// What to do with a request for a non-resident index, given how often pumps have folded it (#358).
+    enum FoldedTargetDecision: Equatable {
+        /// Nobody has folded this index: it is ordinary read-ahead, wait for the producer.
+        case wait
+        /// Folded once. The boundaries move with the producer's base, so anchoring the producer at
+        /// this index can open it; measured on a 40 s-GOP source, this turns a permanent freeze into
+        /// a session that plays to the end.
+        case reanchor
+        /// Folded again after that re-anchor, which is the repair reproducing its own trigger. No
+        /// further attempt changes the outcome, so the source fails instead of freezing.
+        case fail
+    }
+
+    static func foldedTargetDecision(folds: Int, alreadyReanchoredHere: Bool) -> FoldedTargetDecision {
+        guard folds > 0 else { return .wait }
+        if folds >= HLSVideoEngine.foldsProvingUnrecoverableGap { return .fail }
+        // A retry arriving while the repair is still in flight must wait, not fail: the fold count is
+        // only cleared once the segment lands, so this is the ordinary case a second or two after the
+        // re-anchor. If that pump folds the index again, the count reaches the cap and the next
+        // request fails, which is the repeat we actually want to act on.
+        return alreadyReanchoredHere ? .wait : .reanchor
+    }
+
     /// Shared by mediaSegment(at:) and mediaSegmentURL(at:). Without sharing, back-scrubs served
     /// via sendfile (cache hits) skip the proactive restart entirely, leaving seg-11+ to fall into
     /// a reactive prune-gap restart with AVPlayer's buffer at its thinnest.
@@ -586,6 +620,42 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.unlock()
         let previousTarget = cache.targetIndex
         cache.declareTarget(index)
+
+        // #358: the consumer is asking for a plan index a pump folded away, because no keyframe
+        // reached its boundary. The playlist offers it regardless, so waiting here is waiting for
+        // something nobody will produce: the request rides out the slow threshold, the server closes
+        // for a retry, and the session freezes with the engine still reporting playing. A rebase can
+        // open the index, because the boundaries move with the producer's base, so the first fold
+        // asks for exactly that. A second fold is that repair reproducing its own trigger, and then
+        // the source has no way past this point.
+        if !isLive, cache.peekURL(index: index) == nil {
+            let folds = cache.foldCount(index)
+            switch VideoSegmentProvider.foldedTargetDecision(
+                folds: folds, alreadyReanchoredHere: lastRestartIndex == index
+            ) {
+            case .wait:
+                break
+            case .fail:
+                EngineLog.emit(
+                    "[VideoSegmentProvider] #358 seg\(index) folded by \(folds) pumps and requested again; "
+                    + "no re-anchor can open it, failing the source",
+                    category: .session
+                )
+                unrecoverableGapHandler?(index)
+                return
+            case .reanchor:
+                guard let restart = restartHandler else { break }
+                EngineLog.emit(
+                    "[VideoSegmentProvider] #358 seg\(index) was folded away by the cutter; "
+                    + "re-anchoring the producer there so its boundary can open",
+                    category: .session
+                )
+                lastRestartIndex = index
+                restart(index)
+                cache.resetHighWaterForRestart()
+                return
+            }
+        }
 
         if previousTarget >= 0, index < previousTarget - 2, let restart = restartHandler {
             // Cache gate: backwardWindow=20 covers Continuous-Audio handover refetches (~7-10 segments

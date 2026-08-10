@@ -588,6 +588,22 @@ extension HLSVideoEngine {
             )
             return
         }
+        // #358: a re-anchor cannot fill a plan index the cutter never opened, it only rebuilds the
+        // same boundaries and folds it again. One fold can still come out producible after a rebase,
+        // so the second one is the proof that this recovery reproduces its own trigger. Spending the
+        // remaining attempts on it buys a minute of frozen picture and then silence, which is how
+        // this reached a reporter (#358); fail the source instead, so the host has something to act on.
+        if let fold = provider?.consumerTargetFold, fold.folds >= Self.foldsProvingUnrecoverableGap {
+            EngineLog.emit(
+                "[HLSVideoEngine] #358 consumer is blocked on seg\(fold.index), which \(fold.folds) pumps "
+                + "have now folded away (no IRAP reaches its plan boundary). A re-anchor rebuilds the same "
+                + "gap, so the source cannot be played past it; failing instead of re-anchoring.",
+                category: .session
+            )
+            onVODSourceFailed?(FFmpegErr.eio)
+            return
+        }
+
         restartLock.lock()
         // Reset the storm counter when AVPlayer's position has advanced since the last wedge (real progress);
         // a frozen position across consecutive wedges means AVPlayer never recovered, so we eventually give up.
