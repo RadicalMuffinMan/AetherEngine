@@ -12,6 +12,46 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.20.0] - 2026-08-10
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.20.0))
+
+### Changed
+
+- The uniform fallback segment plan is never finer than the source's real IRAP
+  spacing, which it now measures from the bitstream (#358). A grid finer than
+  the GOP advertises boundaries no keyframe sits on, and the keyframe-gated
+  cutter (#92, shipped in 4.8.0) opens a segment only at the IRAP that reaches a
+  boundary: every boundary that IRAP stepped over is a plan index that gets no
+  segment while `EXTINF` still comes from the plan, so the playlist keeps
+  offering it. Reproduced on a 120 s / 10 s-GOP MPEG-TS, which the 4 s grid left
+  with holes at two indices in three and a permanent stall on the first one the
+  player reached. The index cannot answer the spacing question: it is
+  untrustworthy by the time this path runs, and the same source indexed 1.400,
+  59.960, 60.000, 60.280, 121.360, whose smallest gap (0.04 s) and largest
+  (58.6 s) miss the real 10 s in opposite directions. The scan is bounded to 30 s
+  of content, runs only on this fallback path, and live never reaches it. The
+  comment above `buildSegmentedSourcePlan` has named this failure since #268,
+  which fixed it only for sources that declare their own boundaries.
+
+### Fixed
+
+- A plan index the cutter folded away is repaired or fails, instead of being
+  waited out forever (#358). The consumer's request for such an index rode out
+  the slow threshold, took the early chunked header, got no body and was closed
+  for a retry that met the same nothing: measured on a 40 s-GOP source against a
+  30 s grid, the clock froze at 90.00 s while the session reported `playing` for
+  the rest of the run. No recovery ran, because the pump had finished the file,
+  so nothing was parked and the backpressure wedge detector never fired; the
+  provider sees every request before the wait, so the decision sits there now.
+  The cut records the indices it jumped in the segment cache rather than on the
+  producer, since a restart rebuilds the producer and the repeat across restarts
+  is the signal. A first fold re-anchors the producer at that index, whose
+  boundary can open once the base moves (the same source then plays to the end);
+  a second fold is that repair reproducing its own trigger and raises
+  `onVODSourceFailed`. Live is excluded: its playlist is built from what was
+  finalized, so it never offers an index the pump skipped.
+
 ## [6.19.4] - 2026-08-10
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.4))
