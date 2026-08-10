@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.19.0] - 2026-08-10
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.0))
+
 ### Fixed
 
 - A live session with bridged E-AC-3 audio no longer dies with `muxerFailed`

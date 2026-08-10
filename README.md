@@ -264,7 +264,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.18.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.19.0")
 ```
 
 Two complementary samples ship in `Examples/`:
@@ -358,6 +358,27 @@ A non-live remote `m3u8` handed to the default (loopback) path reroutes onto thi
 
 Sidecar subtitles declared in `LoadOptions.externalSubtitles` become renditions on this bypass too (#316). Media selection on an HLS asset comes from the playlist and nowhere else, so for a VOD source the engine fetches the origin master, rewrites every variant, audio and key URI to an absolute origin URL, adds one `EXT-X-MEDIA:TYPE=SUBTITLES` entry per sidecar, and serves that master from the loopback origin. AVPlayer still fetches all A/V bytes straight from the origin, so E-AC-3 / Atmos passthrough is untouched; only the master and the WebVTT renditions are local. The tracks keep the external ids they were registered under, and selecting one drives media selection instead of the host overlay, so the subtitle survives PiP, AirPlay and a wired external display. Live sources (no `EXT-X-ENDLIST`), bitmap sidecars, a playlist that will not rewrite and a slow origin all fall back to playing the origin URL with host-overlay subtitles, which is the behaviour before #316; the load is never failed over this.
 
+### IPTV timeshift / catch-up archives
+
+```swift
+// An origin that answers every Range with a plausible 206 whose body is not at that offset:
+try await player.load(url: archiveURL, options: LoadOptions(
+    sequentialOrigin: true,             // only byte 0 is addressable
+    declaredDurationSeconds: 8100       // required on VOD; the tail-read estimate is gone
+))
+```
+
+Timeshift and catch-up archives commonly fabricate range answers: `Range: bytes=X-` returns `206`
+with a body that actually sits on a coarse internal chunk boundary. No header exposes that, so the
+caller declares it (#346). The reader then runs one long-lived unranged GET with no ranged probes,
+no byte-offset reconnects and no tail read, the demuxer's pb is non-seekable, and a dropped
+connection surfaces as a read error rather than end-of-media so the host can re-request. Such a
+source keeps the native path instead of being forced to software, and the session serves an
+append-only `EVENT` playlist carrying the durations actually muxed, completed with `ENDLIST` at
+true source EOF. Every producer reposition is refused by construction, so **seeking is
+unavailable**: re-request the archive with a shifted start timestamp instead. `aetherctl play`
+gains `--sequential-origin` / `--declared-duration` for reproducing one from macOS.
+
 ## Host setup on tvOS
 
 For HDR / Dolby Vision sources to play reliably on tvOS 26.5+, the engine must drive `AVDisplayManager.preferredDisplayCriteria` itself (synchronously, before the AVPlayerItem assignment). Apple Tech Talk 503 has prescribed this ordering since 2017, and tvOS 26.5 now enforces it synchronously at HLS variant validation: the validator rejects variants whose `VIDEO-RANGE` the panel can't currently host with `AVFoundationErrorDomain -11868`, before fetching the `EXT-X-MAP` init segment, producing `item.status = .failed` with zero `errorLog().events`. SDR variants are unaffected.
@@ -421,10 +442,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.18.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.19.0")
 ```
 
-Pin to `.upToNextMinor(from: "6.18.1")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "6.19.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
