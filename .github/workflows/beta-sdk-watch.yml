@@ -1,0 +1,64 @@
+name: Beta SDK watch
+
+# #351: in the 27 SDK `AVSampleBufferDisplayLayer` is annotated `@MainActor`, which leaves twelve
+# isolation diagnostics in the renderer. They are warnings, so nothing is built against them; the
+# decision is to act only once one of them becomes an error, or once a floor raise is on the table
+# for other reasons. Nothing was watching for that. CI pins `latest-stable`, so it never sees a beta
+# SDK, and #313 reached us only because an outside reporter built the engine directly instead of
+# consuming it, which is the one shape where Xcode does not hide a dependency's warnings.
+#
+# This job is that watcher, and deliberately not a gate. It runs weekly instead of on pushes, so a
+# beta that hardens one of the twelve arrives as a failed scheduled run rather than as a blocked
+# merge. On a runner with no beta installed, `latest` resolves to the stable Xcode and the run is a
+# duplicate of CI, which is the harmless case.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  build-newest-xcode:
+    name: swift build (newest Xcode, betas included)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest
+
+      # Which toolchain actually answered matters more here than in the gating jobs: a green run on
+      # a stable Xcode proves nothing about the beta, so the version and the SDK list are the first
+      # thing to read when this workflow reports.
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      # tools-version 6.0 means Swift 6 language mode, the same mode the #313 reporter built in.
+      - name: swift build
+        run: |
+          set -o pipefail
+          swift build 2>&1 | tee build.log
+
+      # The build failing is the signal to act. This count is the early warning ahead of it: it
+      # moves when the annotation moves, which is worth seeing while it is still free.
+      - name: Isolation diagnostics
+        if: always()
+        run: |
+          pattern='main actor-isolated|cannot exit main actor-isolated'
+          count=$(grep -cE "$pattern" build.log || true)
+          {
+            echo "## Main-actor isolation diagnostics: ${count:-0}"
+            echo
+            echo '```'
+            grep -E "$pattern" build.log || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
