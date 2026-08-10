@@ -9,8 +9,14 @@ name: Beta SDK watch
 #
 # This job is that watcher, and deliberately not a gate. It runs weekly instead of on pushes, so a
 # beta that hardens one of the twelve arrives as a failed scheduled run rather than as a blocked
-# merge. On a runner with no beta installed, `latest` resolves to the stable Xcode and the run is a
-# duplicate of CI, which is the harmless case.
+# merge.
+#
+# The runner label matters more than it looks. `xcode-27` is a preview image that ships Xcode 27
+# beta as its only Xcode and as the default, so there is nothing to select and nothing to pin. The
+# obvious spelling, `macos-15` plus `xcode-version: latest`, was measured first and resolves to
+# Xcode 26.3: a green run that reads like a beta check and is a second copy of CI. Being a preview
+# image, it can queue, and the label will move when 27 goes GA. Either failure mode is loud, which
+# is the point.
 
 on:
   schedule:
@@ -22,20 +28,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-newest-xcode:
-    name: swift build (newest Xcode, betas included)
-    runs-on: macos-15
+  build-beta-sdk:
+    name: swift build (Xcode 27 beta SDK)
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest
-
-      # Which toolchain actually answered matters more here than in the gating jobs: a green run on
-      # a stable Xcode proves nothing about the beta, so the version and the SDK list are the first
-      # thing to read when this workflow reports.
+      # Which toolchain actually answered is the first thing to read here: a run on anything below
+      # 27 proves nothing about the annotation, whatever its conclusion says.
       - name: Show toolchain
         run: |
           swift --version
