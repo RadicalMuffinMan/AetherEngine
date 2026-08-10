@@ -1139,7 +1139,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     + "\(received)\(expected > 0 ? "/\(expected)" : "") bytes; reporting EIO",
                     category: .demux
                 )
-                return AVERROR_EIO_VALUE
+                return FFmpegErr.eio
             }
         }
         return FFmpegErr.eof
@@ -1494,7 +1494,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         EngineLog.emit("[AVIOReader] \(label) stall gave up at offset \(frontier) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
                         emitNetworkPhase(.flowing)   // reader is exiting; let state carry the terminal outcome (#85)
                         if isLive {
-                            return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
+                            return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eio
                         }
                         return totalRead > 0 ? Int32(totalRead) : -1
                     }
@@ -1544,7 +1544,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 EngineLog.emit("[AVIOReader] \(label) reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
                 emitNetworkPhase(.flowing)   // reader is exiting; let state carry the terminal outcome (#85)
                 if isLive {
-                    return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
+                    return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eio
                 }
                 return totalRead > 0 ? Int32(totalRead) : -1
             }
@@ -3536,9 +3536,6 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
 
 // MARK: - C Callbacks
 
-
-// AVERROR(EIO) = -5: live source lost (distinct from AVERROR_EOF).
-private let AVERROR_EIO_VALUE: Int32 = -5
 
 private func readCallback(
     opaque: UnsafeMutableRawPointer?,
