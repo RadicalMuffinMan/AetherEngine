@@ -12,6 +12,31 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.19.2] - 2026-08-10
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.2))
+
+### Changed
+
+- A damaged PGS display set closes its predecessor instead of being dropped. PGS
+  carries no end time, a cue is closed by the start of its successor, so a set
+  whose referenced palette is missing used to take that successor with it and the
+  previous subtitle stayed on screen past its authored end (#142). The bundled
+  FFmpeg now returns the empty subtitle at that branch, which
+  `EmbeddedSubtitleDecoder` already treats as a clear event. This replaces the
+  cache retention across composition state 3 that FFmpegBuild had carried since
+  2.1.1: those caches are bounded by a count, not by an id namespace, so retained
+  pre-connection objects occupied the 64 object slots a self-contained connection
+  display set needs, and a conformant set conveying a new object id was rejected
+  outright. A damaged Epoch Continue set therefore no longer re-renders the
+  previous bitmap from retained state; it ends the predecessor at the authored
+  time and shows nothing until the next intact set. Upstream as FFmpeg PR 23851.
+
+### Dependencies
+
+- FFmpegBuild 2.4.2 (pgssubdec missing-palette recovery, replacing the Epoch
+  Continue cache retention; only `Libavcodec` changed).
+
 ## [6.19.1] - 2026-08-10
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.1))
