@@ -125,8 +125,8 @@ struct DisplayCriteriaPlayGateTests {
     @Test("Reported timings are the measured ones, not the Stage 1 budget added back in")
     func timingSuffixReportsMeasuredValues() {
         let suffix = DisplayCriteriaController.timingSuffix(
-            startSignal: .preGate, stage1Ms: 5, totalMs: 55)
-        #expect(suffix == "start pre-gate after 5ms, total 55ms")
+            startSignal: .inGate, stage1Ms: 5, totalMs: 55)
+        #expect(suffix == "start in-gate after 5ms, total 55ms")
         // The line this replaces read "~1050ms" for exactly this switch: Stage 1's full 1000 ms budget,
         // which it never spent, plus one 50 ms Stage 2 tick.
         #expect(!suffix.contains("1050"))
@@ -135,8 +135,13 @@ struct DisplayCriteriaPlayGateTests {
 
     @Test("Start signal distinguishes a switch already running from one that began inside the gate")
     func startSignalNamesTheOrdering() {
-        // The whole point of #49: a pre-gate start means the panel was switching while the item was built.
-        #expect(DisplayCriteriaController.StartSignal.preGate.rawValue == "pre-gate")
+        // The whole point of #49. Since #339 the observation is armed at the criteria write, so a switch
+        // that was running while the item was built announces itself and the flag-only reading says exactly
+        // what it is: a switch this session's write never announced.
+        #expect(DisplayCriteriaController.StartSignal.preGateObserved.rawValue
+            == "pre-gate (start notification, before gate entry)")
+        #expect(DisplayCriteriaController.StartSignal.preGate.rawValue
+            == "pre-gate (flag only, no start notification since the criteria write)")
         #expect(DisplayCriteriaController.StartSignal.inGate.rawValue == "in-gate")
         #expect(DisplayCriteriaController.timingSuffix(
             startSignal: .inGate, stage1Ms: 120, totalMs: 300)

@@ -69,6 +69,12 @@ final class SoftwarePlaybackHost {
     /// with the session.
     private var readyForDisplayObserver: NSObjectProtocol?
 
+    /// #353: the size this session's picture presents at, coded dimensions under the pixel aspect
+    /// ratio the decoder attached; nil until the renderer builds its first sample buffer and on
+    /// sources with no video. The engine mirrors it as `AetherEngine.softwareDisplaySize`, which is
+    /// what hosts read; this host is built per load, so it starts unknown by construction.
+    @Published private(set) var videoDisplaySize: CGSize?
+
     /// Fires (off-main) once per session the first time HDR10+ dynamic
     /// metadata appears on a decoded frame. Hooked by `AetherEngine` to
     /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
@@ -366,12 +372,15 @@ final class SoftwarePlaybackHost {
 
     /// #315: publish the renderer layer's own `readyForDisplay` as `isVideoReadyForDisplay`.
     /// AVFoundation posts a notification for it rather than supporting KVO, and it arrived in
-    /// tvOS/iOS 17.4 and macOS 14.4, below the engine's own floor. Where it is missing the fallback
-    /// is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which is one hop
-    /// earlier than presentation and is documented as such on the public property.
+    /// tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1, below the engine's own floor. Where it is missing
+    /// the fallback is the first frame handed to the renderer (`disarmedFallbackFirstFrame`), which
+    /// is one hop earlier than presentation and is documented as such on the public property.
+    ///
+    /// #344: visionOS has to be named. Falling through to `*` resolves it to the package's declared
+    /// visionOS floor, which is 1.0, and that is a compile error rather than a runtime fallback.
     private func armReadyForDisplayObserver() {
         disarmReadyForDisplayObserver()
-        guard #available(tvOS 17.4, iOS 17.4, macOS 14.4, *) else { return }
+        guard #available(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1, *) else { return }
         let layer = renderer.displayLayer
         readyForDisplayObserver = NotificationCenter.default.addObserver(
             forName: .AVSampleBufferDisplayLayerReadyForDisplayDidChange,
@@ -398,10 +407,12 @@ final class SoftwarePlaybackHost {
         }
     }
 
-    /// #315 fallback below tvOS/iOS 17.4 and macOS 14.4: no `readyForDisplay` on the layer, so the
-    /// first frame the decoder hands the renderer is the closest observable. Called off-main.
+    /// #315 fallback below tvOS/iOS 17.4, macOS 14.4 and visionOS 1.1: no `readyForDisplay` on the
+    /// layer, so the first frame the decoder hands the renderer is the closest observable. Called
+    /// off-main. Mirrors the observer's list exactly: a platform named there and not here would get
+    /// neither the notification nor the fallback, so it would never publish readiness at all.
     nonisolated private func noteFirstFrameEnqueuedForDisplayFallback() {
-        guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4) else { return }
+        guard #unavailable(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1) else { return }
         Task { @MainActor [weak self] in self?.isVideoReadyForDisplay = true }
     }
 
@@ -458,6 +469,24 @@ final class SoftwarePlaybackHost {
         // Default to the software decoder; load() swaps it for the
         // VT-backed one when the source's video codec is HEVC.
         self.videoDecoder = SoftwareVideoDecoder()
+        armDisplaySizeObserver()
+    }
+
+    /// #353: the renderer settles the picture size on the decode thread, where it builds the format
+    /// description; publish it on the main actor like every other mirror on this host. Armed in init
+    /// rather than at load: the renderer is this host's own and lives exactly as long as it does.
+    private func armDisplaySizeObserver() {
+        renderer.setDisplaySizeObserver { [weak self] size in
+            Task { @MainActor in
+                guard let self, self.videoDisplaySize != size else { return }
+                self.videoDisplaySize = size
+                EngineLog.emit(
+                    "[SWHost] picture settles at \(Int(size.width))x\(Int(size.height)) "
+                    + "after \(self.framesEnqueued) frames",
+                    category: .swPlayback
+                )
+            }
+        }
     }
 
     // MARK: - Audio stream resolution (#133)
@@ -1551,6 +1580,26 @@ final class SoftwarePlaybackHost {
                         Thread.sleep(forTimeInterval: 0.005)
                         waitTicks += 1
                         if waitTicks % 20 == 0 { pumpAudio() }
+                        // #337: the pump is what can still arm the clock from here, so its spent
+                        // pre-arm budget is what turns this park terminal (an audio track that
+                        // never decodes a buffer). The renderer cannot drain at a stopped clock,
+                        // so waiting past that point is a deadlock, not patience.
+                        if SWClockAnchorPolicy.shouldArmFromParkedVideo(
+                            clockArmed: clockArmed(),
+                            isPlaying: isPlaying(),
+                            rendererReadyForMoreData: renderer.isReadyForMoreMediaData,
+                            audioArmingStillPossible: preArmPacketsFed < AudioLookaheadPolicy.preArmPacketBudget),
+                           let aOut = audioOutput {
+                            EngineLog.emit(
+                                "[SWHost] clock unarmed at the video gate: the look-ahead pump spent its "
+                                + "pre-arm budget (\(preArmPacketsFed) packets) without a decoded buffer; "
+                                + "anchoring on video at \(String(format: "%.3f", pkt.pts))s",
+                                category: .swPlayback
+                            )
+                            aOut.seekClock(to: CMTime(seconds: pkt.pts, preferredTimescale: 90000),
+                                           rate: currentRate())
+                            markClockArmed()
+                        }
                     }
                 }
                 if stopRequested() { return false }
@@ -1755,6 +1804,21 @@ final class SoftwarePlaybackHost {
             case .none:
                 break
             }
+        }
+
+        // Anchor the clock on a video packet. SWClockAnchorPolicy keeps the load anchor unless the
+        // source joined mid-stream, so the frames already queued still present. Shared by the
+        // undecodable-audio fallback and the #337 parked-gate exit.
+        func armFromVideoPacket(_ packet: UnsafeMutablePointer<AVPacket>, _ aOut: AudioOutput) {
+            // #107: a mid-stream-joined source delivers first samples far past the load
+            // anchor; anchor at the packet PTS so they ever present (see SWClockAnchorPolicy).
+            let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
+                ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
+            let resolution = SWClockAnchorPolicy.resolve(
+                initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
+            armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
+                     rate: currentRate(), onClockAnchored: onClockAnchored)
+            markClockArmed()
         }
 
         func demuxIteration() -> Bool {
@@ -1967,6 +2031,24 @@ final class SoftwarePlaybackHost {
                             }
                             condition.unlock()
                         } else {
+                            // #337: this loop is the only reader, so an unarmed clock here is a
+                            // deadlock and not latency: the renderer waits for the clock, the clock
+                            // waits for a selected-stream audio buffer, and that packet is behind
+                            // this park. Anchor on the video the renderer is holding instead.
+                            if SWClockAnchorPolicy.shouldArmFromParkedVideo(
+                                clockArmed: clockArmed(),
+                                isPlaying: isPlaying(),
+                                rendererReadyForMoreData: renderer.isReadyForMoreMediaData,
+                                audioArmingStillPossible: false),
+                               let aOut = audioOutput {
+                                EngineLog.emit(
+                                    "[SWHost] clock unarmed at the video gate: the selected audio stream "
+                                    + "(index \(audioStreamIndex)) has produced nothing by the renderer's "
+                                    + "fill point (audioPacketsSeen=\(audioPacketsSeen)); anchoring on video",
+                                    category: .swPlayback
+                                )
+                                armFromVideoPacket(packet, aOut)
+                            }
                             Thread.sleep(forTimeInterval: 0.005)
                         }
                     }
@@ -1992,15 +2074,7 @@ final class SoftwarePlaybackHost {
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
                    audioDecoder == nil || (audioPacketsSeen >= 50 && !audioBuffersProduced) {
-                    // #107: a mid-stream-joined source delivers first samples far past the load
-                    // anchor; anchor at the packet PTS so they ever present (see SWClockAnchorPolicy).
-                    let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
-                        ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
-                    let resolution = SWClockAnchorPolicy.resolve(
-                        initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
-                    armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
-                             rate: currentRate(), onClockAnchored: onClockAnchored)
-                    markClockArmed()
+                    armFromVideoPacket(packet, aOut)
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
                 // Background audio-only: the video gate is bypassed, so pace on the audio renderer to avoid

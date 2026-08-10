@@ -149,6 +149,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Immutable for VOD; grows under stateLock for live (producer appends via appendLiveSegment).
     private var segments: [HLSVideoEngine.Segment]
     private let isLive: Bool
+    /// Sequential-origin session: playlist grows with finalized real durations (see _seqDurations).
+    private let sequentialAppendPlaylist: Bool
     /// Drives both playlist firstVisible and cache eviction cutoff so they never drift.
     private let liveWindowSizing: LiveWindowSizing
     /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
@@ -269,6 +271,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// One-shot latch for `noteWindowSlideRelativeToConsumer`. Guarded by stateLock.
     private var _liveConsumerOutsideWindowLatched = false
 
+    /// Sequential-origin append playlist: real EXTINF per finalized segment, index-aligned and
+    /// contiguous from 0. The static VOD plan's uniform durations are a lie for archives whose
+    /// GOP cadence does not divide the cut target (device trace: 1.92 s GOPs against a 4.0 s
+    /// plan put every segment's media up to 1.9 s outside its advertised window; AVPlayer
+    /// showed a content jump at every resync). Guarded by stateLock.
+    private var _seqDurations: [Double] = []
+    /// Producer reached true source EOF: the next playlist build appends ENDLIST. Guarded by stateLock.
+    private var _seqEnded = false
+
     init(
         cache: SegmentCache,
         segments: [HLSVideoEngine.Segment],
@@ -280,6 +291,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         hdcpLevel: String?,
         sourceBitrate: Int64,
         isLive: Bool = false,
+        sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         allowsBoundedDegradedStart: Bool = false,
         blockingReloadOverride: Bool? = nil,
@@ -305,6 +317,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.cache = cache
         self.segments = segments
         self.isLive = isLive
+        self.sequentialAppendPlaylist = sequentialAppendPlaylist
         self.liveWindowSizing = liveWindowSizing
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
         self.blockingReloadOverride = blockingReloadOverride
@@ -368,6 +381,58 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         firstSegmentCondition.unlock()
     }
 
+    /// Append the real duration of a finalized sequential-VOD segment (index-contiguous from 0;
+    /// out-of-order appends are ignored like the live path's). The playlist's visible count and
+    /// EXTINF values follow these, so AVPlayer only ever sees segments whose advertised duration
+    /// matches the media inside them.
+    func appendSequentialSegmentDuration(index: Int, durationSeconds: Double) {
+        stateLock.lock()
+        guard index == _seqDurations.count else {
+            stateLock.unlock()
+            EngineLog.emit(
+                "[HLSVideoEngine] sequential segment append out of order: got index=\(index), "
+                + "expected \(_seqDurations.count); ignoring",
+                category: .session
+            )
+            return
+        }
+        // Zero marks a plan index a long GOP skipped entirely (no media file exists); the
+        // playlist renderer omits those entries. Negative values are producer bugs, clamp them.
+        _seqDurations.append(max(0, durationSeconds))
+        stateLock.unlock()
+        firstSegmentCondition.lock()
+        firstSegmentCondition.broadcast()
+        firstSegmentCondition.unlock()
+    }
+
+    /// Producer reached true source EOF: the next playlist build renders as a completed VOD
+    /// asset (ENDLIST). Never called for a torn-down session, whose playlist simply stops
+    /// being served.
+    func markSequentialEnded() {
+        stateLock.lock()
+        _seqEnded = true
+        stateLock.unlock()
+        firstSegmentCondition.lock()
+        firstSegmentCondition.broadcast()
+        firstSegmentCondition.unlock()
+    }
+
+    /// Hold the first media playlist until the startup segments exist (mirrors the live gate:
+    /// an empty playlist is a broken asset to AVPlayer, which never re-polls it). A fast
+    /// archive origin cuts the first segments within a second.
+    func waitForSequentialStartupSegments(timeout: TimeInterval) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        firstSegmentCondition.lock()
+        defer { firstSegmentCondition.unlock() }
+        while true {
+            stateLock.lock()
+            let ready = _seqDurations.count >= LiveEdgePolicy.minStartupSegments || _seqEnded
+            stateLock.unlock()
+            if ready { return true }
+            if !firstSegmentCondition.wait(until: deadline) { return false }
+        }
+    }
+
     /// Called on each playlist build. For live: advances firstVisible to max(0, highWater - window),
     /// evicts cache below it, and increments _discontinuitySequence for each dropped discontinuous segment.
     /// VOD: returns full count so AVPlayer sees a complete asset (EVENT experiment that reported
@@ -407,6 +472,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 }
             }
             return (total, _liveFirstVisible, refreshCounter, false, _discontinuitySequence)
+        }
+        if sequentialAppendPlaylist {
+            // Only finalized segments are visible (their EXTINF is real); the playlist grows as
+            // the producer cuts and completes with ENDLIST at true source EOF. The plan bounds
+            // the count so a source running past the declared window cannot outgrow the asset.
+            let visible = min(_seqDurations.count, segments.count)
+            return (visible, 0, refreshCounter, _seqEnded, 0)
         }
         return (segments.count, 0, refreshCounter, false, 0)
     }
@@ -819,6 +891,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             guard index >= 0, index < segments.count else { return 0 }
             return segments[index].durationSeconds
         }
+        if sequentialAppendPlaylist {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            if index >= 0, index < _seqDurations.count { return _seqDurations[index] }
+            // Not yet finalized (restart-mapping callers only; the playlist never shows these).
+            guard index >= 0, index < segments.count else { return 0 }
+            return segments[index].durationSeconds
+        }
         guard index >= 0, index < segments.count else { return 0 }
         return segments[index].durationSeconds
     }
@@ -859,7 +939,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// regardless of playlist type); side effects: Control Center showed "LIVE" (asset.duration NaN),
     /// replay-from-beginning landed ~2 min in. .live is the only spec-correct shape for a sliding window
     /// (EVENT forbids segment removal; VOD stops playback). VOD stays .vod.
-    var playlistType: HLSPlaylistType { isLive ? .live : .vod }
+    var playlistType: HLSPlaylistType {
+        if isLive { return .live }
+        // Sequential archives grow append-only with real durations and never remove segments -
+        // exactly EVENT's contract; the completed playlist (ENDLIST) renders as plain VOD.
+        return sequentialAppendPlaylist ? .event : .vod
+    }
     /// Stable TARGETDURATION from the first manifest; avoids -12888 startup race for high-bitrate live.
     var liveTargetSegmentDuration: Double? {
         isLive ? liveWindowSizing.targetSegmentDurationSeconds : nil

@@ -10,7 +10,250 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A live session with bridged E-AC-3 audio no longer dies with `muxerFailed`
+  when a mid-session muxer rotation (a same-PID parameter-set change after a
+  reconnect join, or an SSAI program switch) cuts its first segment before any
+  post-seam audio packet has been muxed. E-AC-3 builds its mp4 sample entry from
+  a parsed packet, so the fresh muxer started un-primed, the cut deferred, and
+  the pump exited; the AE#222 exit scan could not rescue it because a raw source
+  frame cannot prime a bridge-encoded track. The producer now retains the last
+  audio frame a muxer accepted and primes every later allocation with it.
+  Contributed by @tschuegy (#340).
+- A live pump death with `muxerFailed` no longer zombifies the session. It had
+  no recovery arm at all: the provider kept serving a frozen playlist, AVPlayer
+  parked on it waiting for buffer that never came, and nothing surfaced to the
+  host. The live arm now rebuilds the producer in place on the same connection
+  at the live continuation point (a reopen would double-connect against a
+  healthy socket), bounded by progress rather than per session, and halts
+  production plus asks the host to retune once the budget is spent. The AE#222
+  prime rebuild takes the same in-place path for live, where it used to run
+  through the VOD-only restart and rebuild nothing. Contributed by @tschuegy
+  (#341).
+- The stall re-engage watchdog no longer disarms itself for good when the player
+  fetches anything inside its grace window. It was one-shot and edge-triggered,
+  so a player that drained its remaining tail segments and then parked on a
+  frozen playlist was unreachable: `playbackStalled` does not re-fire while the
+  forward buffer is non-empty, a waiting player never posts
+  `failedToPlayToEndTime`, and the producer-side wedge detector died with the
+  pump. The watchdog now re-baselines and keeps watching for up to a minute, the
+  stage-2 reload carries a budget that spans stall events (a reload storm at one
+  frozen position no longer loops forever), and a live session whose clock has
+  not advanced after the reload publishes `liveSourceReset` so the host can
+  retune. Contributed by @tschuegy (#342).
+- A live URL source that spends its reopen budget no longer zombifies. Both
+  exhaustion sites (the barren-cycle cap and the reopen attempt cap) escalated
+  only for the custom-factory transport #199 introduced, so the far more common
+  URL session reached the same dead end with its provider left un-halted: it
+  kept advertising blocking reloads it could never answer (-15410 on any held
+  `?_HLS_msn=`, and on an item reload against it), the playlist stayed frozen,
+  and the host was never asked to retune. Every in-engine transport now halts
+  production and publishes `liveSourceReset` on exhaustion; a source with no
+  in-engine transport still delegates at the pump exit and is deliberately not
+  signalled twice. Contributed by @tschuegy (#343).
+
+### Added
+
+- `LoadOptions.sequentialOrigin` and its paired `LoadOptions.declaredDurationSeconds`
+  for origins that fabricate range answers. IPTV timeshift/catch-up archives
+  answer any `Range: bytes=X-` with a plausible `206` whose body actually sits on
+  a coarse internal chunk boundary, so only byte 0 is addressable: the 32 MB
+  range rotations spliced misplaced content into every reconnect (heard as a
+  once-a-minute audio desync), the tail-read duration estimate read a 135-minute
+  window as 9.5 hours, and the static plan's uniform `EXTINF` was wrong for any
+  archive whose GOP cadence does not divide the cut target. Headers cannot expose
+  the lie, so the caller declares it: the reader runs one long-lived unranged GET
+  with no ranged probes and reports a lost connection as `EIO` rather than `EOF`,
+  the declared duration takes precedence over the container's, such a source keeps
+  the native path instead of being forced to software, and the session serves an
+  append-only EVENT playlist carrying the durations actually muxed, completed with
+  `ENDLIST` at true source EOF. Seeking is unavailable by construction; re-request
+  the archive with a shifted start timestamp instead. `aetherctl play` gains
+  `--sequential-origin` / `--declared-duration`. Contributed by @tschuegy (#346).
+
+### Changed
+
+- A sequential origin now refuses every producer reposition, not just the
+  `readError` revive. `performRestart`'s demuxer seek cannot land anywhere on a
+  non-seekable pb and does not treat that as failure, so a scrub-driven or
+  deadline-driven restart would have kept reading wherever the stream stood and
+  labelled those bytes as the target segment: the same fabricated-position
+  content the declaration exists to keep out, only silent. The restart and the
+  resume anchor for the first producer now take the same refusal the revive
+  already took (follow-up to #346).
+
+## [6.18.1] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.18.1))
+
+### Fixed
+
+- visionOS builds again. Three availability lists named tvOS, iOS and macOS and
+  then fell through to `*`, which on visionOS resolves to the package's declared
+  floor of 1.0, so `AVSampleBufferDisplayLayer.isReadyForDisplay`, its
+  `ReadyForDisplayDidChange` notification and
+  `AVSampleBufferVideoRenderer.videoPerformanceMetrics` (all visionOS 1.1) were
+  compile errors on that platform and on no other. visionOS 1.1 is now named in
+  each list, so visionOS 1.0 takes the same documented fallbacks as tvOS/iOS
+  below 17.4; the declared floor stays `.visionOS(.v1)`, so no consumer's
+  platform minimum moves. Reported by @YangHanqing (#344).
+- CI now builds the visionOS Simulator alongside tvOS and iOS. The platform has
+  been declared since 6.0.0 with nothing compiling for it, which is why the
+  break above shipped unnoticed.
+
+## [6.18.0] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.18.0))
+
+### Changed
+
+- Codec routing defaults to the software path. The dispatch switch used to name
+  its software codecs (AV1 without hardware, VP9, VP8, MPEG-4 Part 2, MPEG-2,
+  VC-1) and send everything else native, but the native path is an allowlist of
+  its own: `HLSVideoEngine` takes HEVC, H.264 and hardware-decodable AV1 and
+  throws `unsupportedCodec` on the rest. The two lists were not complementary,
+  they left a hole, so a codec nobody had enumerated was not routed
+  conservatively, it was routed to the one path that refuses it by contract and
+  never reached libavcodec. Surfaced by FFmpegBuild#1 (QuickTime RLE): with the
+  decoder built in, a qtrle `.mov` still failed the load. The same held for
+  ProRes, MJPEG, Theora, Cinepak and rawvideo. `AV_CODEC_ID_NONE` stays native
+  explicitly, since an audio-only source probes as NONE.
+
+### Dependencies
+
+- FFmpegBuild 2.4.1 (adds the `qtrle` decoder; 40 decoders, demuxer / filter /
+  parser lists unchanged).
+
+## [6.17.1] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.17.1))
+
+### Fixed
+
+- Software path: a cold-start session no longer deadlocks when the selected
+  audio stream's first packet sits past the point where the video renderer
+  fills (#337). The video branch back-pressures on
+  `renderer.isReadyForMoreMediaData`, the renderer only drains while the
+  synchronizer clock runs, and the clock arms off the first decoded buffer of
+  the selected audio stream, so a park entered there with an unarmed clock was
+  terminal: every packet that could arm it sat behind the park. Reported after
+  a host applied a language preference ~20 ms after `play()`, which rebuilds
+  the session at `resumeAt = 0`; the session published `.playing` with a first
+  frame on screen and `currentTime` pinned at 0 until the viewer seeked. The
+  gate now anchors on the video the renderer is holding
+  (`SWClockAnchorPolicy.shouldArmFromParkedVideo`, keeping the load anchor
+  unless the source joined mid-stream) and logs one line naming the stream that
+  never arrived. The live feeder's gate is closed the same way, where the
+  terminal condition is its look-ahead pump having spent its pre-arm budget (an
+  audio track that never decodes a buffer).
+
+## [6.17.0] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.17.0))
+
+### Added
+
+- `AetherEngine.softwareDisplaySize`: the size the software path's picture
+  presents at, the coded frame under the pixel aspect ratio the decoder attached
+  (#353). A host laying an overlay out over the picture had only
+  `sourceVideoWidth` / `sourceVideoHeight`, which are the CODED size, so
+  anamorphic content was laid out against the wrong rectangle (720x576 at 64:45
+  presents as 1024x576), and `AVSampleBufferDisplayLayer` carries no `videoRect`
+  to measure instead. Nor could a host compute it: the ratio is resolved per
+  frame across three sources (#177) and one whose display aspect is impossible
+  is dropped in favour of square pixels (#290). Read off the format description
+  the renderer enqueues rather than recomputed from the SAR, so it cannot
+  disagree with the screen. nil off the software path and before the first
+  frame; it follows a mid-stream format change and is cleared with the session.
+
+### Fixed
+
+- Anamorphic HEVC on the software host rendered at its coded dimensions (#354).
+  The VT-backed decoder attached no pixel aspect ratio, and the renderer builds
+  its format description from the delivered pixel buffer, so nothing carried the
+  ratio to the layer: 720x576 declaring 64:45 presented as 720x576, a 16:9
+  picture squashed into 5:4. The libavcodec decoder on the same host has
+  attached it since #177, so the gap was one decoder wide. Resolved once at open
+  from the bitstream ratio and the container's, through the same #177 and #290
+  gates, and attached next to the colour metadata that is re-applied there for
+  the same reason. Reached in production by the interlaced-content detour and by
+  forward-only sources, which is where broadcast SD lands.
+- The software load path cancelled every Combine sink it had already wired.
+  `softwareCancellables.removeAll()` stood between two groups of `.store(in:)`
+  calls, so the SW-PiP cue mirror never delivered a cue after the frame
+  compositor was armed, and subtitles in a software-path PiP window froze at
+  whatever was on screen when PiP started.
+
+## [6.16.2] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.2))
+
+### Fixed
+
+- `hasFirstFrameReadyForDisplay` latches on the item's readiness while an
+  external screen holds the picture. Device-measured (iPhone to Apple TV): with
+  external playback active the local `AVPlayerLayer` never reaches
+  `isReadyForDisplay`, on any load of the session, so a flag folded from that
+  layer alone stayed false for the whole AirPlay session and a host lifting a
+  cover on it covered the session instead of the load. Audio-only sessions still
+  never arm it, and the seam rules are unchanged: this only ever adds a rise.
+  Wired HDMI takes the same latch, it flips `isExternalPlaybackActive` too and
+  keeps no local picture either.
+
+### Documentation
+
+- Corrected which seams `hasFirstFrameReadyForDisplay` survives. The AE#158
+  in-place handover was listed among them and is not one: it is a full `load()`,
+  which un-latches. The discriminator is the entry point, not the `inPlaceSwap`
+  flag a swap is made with. The media fallback, the AirPlay master swap and the
+  #93 recovery reload call `host.load(inPlaceSwap:)` themselves and are
+  unchanged.
+
+## [6.16.1] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.1))
+
+### Fixed
+
+- A wireless AirPlay route change reloads the `nativeRemoteHLS` bypass when it is
+  serving its own loopback origin. The bypass was exempt from that reload on the
+  premise that remote HLS is always receiver-reachable, which stopped holding in
+  6.14.0: with text sidecars declared at load, the bypass plays a master the
+  engine serves from the loopback, and a receiver cannot reach `127.0.0.1`.
+  Engaging AirPlay mid-playback therefore handed the receiver an address it
+  could not fetch, losing the whole session rather than just its subtitles, with
+  no watchdog underneath it because that path builds no `HLSVideoEngine` session.
+  Engaging AirPlay before playback started was never affected, and neither were
+  wired displays, PiP, or tvOS.
+
+## [6.16.0] - 2026-08-09
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.16.0))
+
+### Changed
+
+- The play gate waits for a panel mode switch it observed starting, instead of
+  breaking out of it after 2 s. Device-measured: a rate switch takes ~3.55 s and
+  the panel is dark throughout, so releasing early bought no picture and played
+  1.4 s of content into a black screen. The pre-flight gate, live, and panels
+  that report no switch start keep the previous cap.
+
+### Fixed
+
+- Mode-switch notifications are observed from the manager that posts them. tvOS
+  posts `AVDisplayManagerModeSwitchStart` / `...End` from an
+  `AVSharedDisplayManager`, not from the `AVDisplayManager` that
+  `preferredDisplayCriteria` is written to, so the settle gate had never seen a
+  single one and fell back on the in-progress flag and the EDR headroom.
+- The EDR headroom no longer ends a switch that was observed to start. It peaks
+  during the transition, and had been releasing playback up to 2.5 s before the
+  panel finished.
+- The mode-switch observation is armed at the criteria write rather than at the
+  play gate, so a switch that starts and finishes during the load is knowable
+  rather than invisible, and both gates of one load read the same record.
+- Settle lines report the panel's measured switch duration when both
+  notifications were seen.
 
 ## [6.15.3] - 2026-08-08
 
