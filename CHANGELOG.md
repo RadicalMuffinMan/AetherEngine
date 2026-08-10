@@ -12,6 +12,23 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.19.4] - 2026-08-10
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.4))
+
+### Fixed
+
+- The demo `.dmg` job completes. 6.19.3 embedded the frameworks correctly and
+  then failed signing them with `Permission denied`: the xcframework payloads
+  are mode 555 and `cp -R` preserves that, so `codesign` could not replace
+  their existing signature. The copies are made writable. The same run showed
+  that the guard added in 6.19.3 checked presence rather than resolvability, so
+  a bundle holding every framework could still abort in dyld with no rpath
+  pointing at them; it now fails when that rpath is absent.
+
+No library changes. Consumers pinning 6.19.2 or 6.19.3 get byte-identical
+engine code.
+
 ## [6.19.3] - 2026-08-10
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.3))
