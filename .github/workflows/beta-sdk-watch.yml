@@ -51,15 +51,24 @@ jobs:
 
       # The build failing is the signal to act. This count is the early warning ahead of it: it
       # moves when the annotation moves, which is worth seeing while it is still free.
+      #
+      # Count distinct file:line sites, not matching lines. Each diagnostic prints twice, once as
+      # the message and once as the caret line under the source excerpt, and the compiler colours
+      # both even through the pipe, so the naive `grep -c` reports double and the ANSI runs break
+      # any pattern that spans the severity. `error` is in the alternation on purpose: on the day
+      # this workflow earns its keep the build fails, and a summary that only counts warnings would
+      # report zero on exactly that run.
       - name: Isolation diagnostics
         if: always()
         run: |
-          pattern='main actor-isolated|cannot exit main actor-isolated'
-          count=$(grep -cE "$pattern" build.log || true)
+          sites=$(sed -E $'s/\x1b\\[[0-9;]*m//g' build.log \
+            | grep -oE '[^ ]+\.swift:[0-9]+:[0-9]+: (warning|error): [^[]*main actor-isolated[^[]*' \
+            | sed -E 's#^.*/Sources/#Sources/#' | sort -u || true)
+          count=$(printf '%s' "$sites" | grep -c . || true)
           {
-            echo "## Main-actor isolation diagnostics: ${count:-0}"
+            echo "## Main-actor isolation sites: ${count:-0}"
             echo
             echo '```'
-            grep -E "$pattern" build.log || echo "(none)"
+            printf '%s\n' "${sites:-(none)}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
