@@ -100,6 +100,11 @@ for fw in "$FW_SRC"/*.framework; do
 done
 echo "    embedded $fw_count framework(s) from $FW_SRC"
 
+# The xcframework payloads are mode 555 and `cp -R` preserves that, so codesign
+# below fails with a bare "Permission denied" when it tries to replace their
+# existing signature. Restore owner write on the copies.
+chmod -R u+w "$APP_DIR/Contents/Frameworks"
+
 # The binary's own LC_RPATH does not point at Contents/Frameworks, so add it.
 # Duplicate entries are harmless but noisy, so only add when absent.
 if ! otool -l "$APP_DIR/Contents/MacOS/DemoPlayerMac" | grep -q "@executable_path/../Frameworks"; then
@@ -107,7 +112,16 @@ if ! otool -l "$APP_DIR/Contents/MacOS/DemoPlayerMac" | grep -q "@executable_pat
     "$APP_DIR/Contents/MacOS/DemoPlayerMac"
 fi
 
-# Guard: every @rpath load command must resolve to something inside the bundle.
+# Guard, both halves. Presence alone proves nothing: a bundle can hold every
+# framework and still abort in dyld when no rpath points at Contents/Frameworks,
+# which is exactly how this failed once while a presence-only check passed.
+if ! otool -l "$APP_DIR/Contents/MacOS/DemoPlayerMac" | grep -q "@executable_path/../Frameworks"; then
+  echo "FAIL: the binary carries no rpath for Contents/Frameworks, so dyld cannot" >&2
+  echo "      find the embedded frameworks no matter what was copied in." >&2
+  exit 1
+fi
+
+# ...and every @rpath load command must resolve to something inside the bundle.
 # This is the check whose absence shipped a demo that could not launch.
 unresolved=0
 while read -r dep; do
