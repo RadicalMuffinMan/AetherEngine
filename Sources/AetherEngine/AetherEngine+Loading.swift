@@ -1260,7 +1260,10 @@ extension AetherEngine {
         // has raced ahead). The load-time seek to 0 fires before readyToPlay and the item
         // re-anchors to the edge default afterwards, so queue a post-readiness seek through
         // the #127 replay instead - every segment stays retained, so 0 is always reachable.
-        if !isLive, loadedOptions.sequentialOrigin, startPosition == nil {
+        // A declared start position does not exempt it: the session produces from byte 0 either
+        // way (HLSVideoEngine drops the resume anchor for a sequential origin), so leaving the
+        // item on the EVENT edge default would start it mid-archive with no way back.
+        if !isLive, loadedOptions.sequentialOrigin {
             pendingPreReadySeekSeconds = 0.0
         }
         // AE#158: consume-and-reset so only the load() that armed the handover swaps in place; audio-switch

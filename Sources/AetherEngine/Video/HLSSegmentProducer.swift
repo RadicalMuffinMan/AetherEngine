@@ -2841,6 +2841,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                     if let prev = pendingVideoPkt {
                         let prevSeg = pendingVideoSegIndex
+                        // Newest muxed frame time, recorded per PACKET. Recording it at the ledger
+                        // site below (which only fires when a segment opens) left it equal to the
+                        // last segment's start, so the EOF tail EXTINF's "real span" branch could
+                        // never be true and every archive's final segment was advertised at the
+                        // full cut target no matter how little media it held.
+                        if onSequentialSegmentFinalized != nil, prev.pointee.dts != Int64.min,
+                           sourceVideoTbSeconds > 0 {
+                            lastMuxedItemAxisSeconds = Double(prev.pointee.dts) * sourceVideoTbSeconds
+                        }
                         // #65 ledger: at each VOD segment open, map the segment's item-axis start (what AVPlayer and
                         // currentTime see) to the TRUE source content muxed there. drift = actual source - planned
                         // source for this index; non-zero means the presented frame leads the clock (Root B positively
@@ -2854,7 +2863,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             if onSequentialSegmentFinalized != nil {
                                 let startSec = Double(outDts) * sourceVideoTbSeconds
                                 vodSegmentStartByIndex[prevSeg] = startSec
-                                lastMuxedItemAxisSeconds = startSec
                                 // The previous segment's REAL duration is final the moment this
                                 // one's start is known; the report pairs with its capture. Plan
                                 // indices a long GOP skipped report as zero-duration holes.

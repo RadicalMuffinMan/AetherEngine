@@ -192,7 +192,7 @@ extension HLSVideoEngine {
             // and then fails its anchor seek on the non-seekable pb, burning a connection slot on
             // origins that are typically connection-capped. Surface the loss to the host, whose
             // re-request (a fresh load) is the real recovery path.
-            if sequentialOrigin {
+            if sequentialOriginPinsProducerToZero {
                 EngineLog.emit(
                     "[HLSVideoEngine] sequential-origin VOD pump died (readError \(code)); "
                     + "revive cannot resume at an offset, surfacing source failure",

@@ -1355,8 +1355,12 @@ final class HLSLocalServer: @unchecked Sendable {
             }
             let dur = provider.segmentDuration(at: i)
             // A zero-duration entry is a plan index the producer skipped outright (sequential
-            // sessions: a long GOP spanning two boundaries); no media file exists for it.
-            guard dur > 0 else { continue }
+            // sessions: a long GOP spanning two boundaries); no media file exists for it. Scoped
+            // to the append playlist on purpose: dropping a URI shifts every later segment's
+            // implicit media sequence number by one, which is exactly what a live blocking
+            // reload (?_HLS_msn=) resolves against, and a zero on live or plain VOD is a
+            // different bug that should stay visible rather than be rendered away.
+            if provider.playlistType == .event, dur <= 0 { continue }
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
             lines.append(segURI(i))
         }

@@ -772,6 +772,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// session builds (wedge restart) so a reopened demuxer reports the same trusted duration.
     let declaredDurationSeconds: Double?
 
+    /// Every site that would set the producer down somewhere other than byte 0 asks this first:
+    /// the readError revive (`+LiveReopen`), the restart coalescer (`requestRestart`), and the
+    /// resume anchor for the first producer. A sequential origin answers only from byte 0, and
+    /// the demuxer seek that would move the cursor fails silently on a non-seekable pb, so a
+    /// reposition does not fail loudly, it mislabels content. Live sessions are untouched: their
+    /// reopen path re-requests the feed by URL and never seeks.
+    var sequentialOriginPinsProducerToZero: Bool { sequentialOrigin && !isLiveSession }
+
 
     // MARK: - Public API
 
@@ -1128,12 +1136,26 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // can 404 the item into a host reload (device: double spinner). The baseIndex > 0 anchor is
         // the battle-tested restart path (gate at plan[base].startPts, tfdt continuity per 4.9.1).
         if !isLiveSession, let startSeconds = initialStartSeconds, startSeconds > 0 {
-            initialProducerBaseIndex = segmentIndexForPlaylistTime(startSeconds)
-            EngineLog.emit(
-                "[HLSVideoEngine] initial producer anchored at idx=\(initialProducerBaseIndex) "
-                + "(startPosition=\(String(format: "%.2f", startSeconds))s)",
-                category: .session
-            )
+            // A sequential origin cannot honour a resume anchor: the first producer would read
+            // from byte 0 (the only addressable offset) while labelling those bytes segment
+            // idx > 0, and the append playlist - which requires reports contiguous from 0 -
+            // would drop every one of them and serve an empty asset. Produce from 0 and say so;
+            // seeking into an archive means re-requesting it with a shifted start timestamp.
+            if sequentialOriginPinsProducerToZero {
+                EngineLog.emit(
+                    "[HLSVideoEngine] sequential origin ignores startPosition="
+                    + "\(String(format: "%.2f", startSeconds))s: only byte 0 is addressable, "
+                    + "producing from the beginning",
+                    category: .session
+                )
+            } else {
+                initialProducerBaseIndex = segmentIndexForPlaylistTime(startSeconds)
+                EngineLog.emit(
+                    "[HLSVideoEngine] initial producer anchored at idx=\(initialProducerBaseIndex) "
+                    + "(startPosition=\(String(format: "%.2f", startSeconds))s)",
+                    category: .session
+                )
+            }
         }
 
         // Fallback duration from avg_frame_rate for MKVs that drop TrackEntry DefaultDuration
@@ -2093,6 +2115,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
 
     func requestRestart(at idx: Int, authoritative: Bool = false) {
+        // A sequential origin has no restart. performRestart's demuxer seek has nowhere to land
+        // on a non-seekable pb, and it ignores that failure: the new producer would keep reading
+        // wherever the stream stands (or from byte 0 after a fresh reopen) and label those bytes
+        // segment `idx`. That is the same fabricated-position content the declaration exists to
+        // keep out, only silent instead of audible. Surface the loss; the host's re-request with
+        // a shifted start timestamp is the recovery path.
+        if sequentialOriginPinsProducerToZero {
+            EngineLog.emit(
+                "[HLSVideoEngine] restart at idx=\(idx) refused: a sequential origin can only be "
+                + "read from byte 0, so the reposition would mislabel content; surfacing source failure",
+                category: .session
+            )
+            onVODSourceFailed?(FFmpegErr.eio)
+            return
+        }
         restartLock.lock()
         let shouldRun = restartCoalescer.begin(idx, authoritative: authoritative)
         let seekTime = segmentStartSecondsLocked(idx) // under lock; segmentPlan guarded by restartLock (#38)

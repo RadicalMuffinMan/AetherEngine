@@ -53,6 +53,36 @@ the public-API contract.
   in-engine transport still delegates at the pump exit and is deliberately not
   signalled twice. Contributed by @tschuegy (#343).
 
+### Added
+
+- `LoadOptions.sequentialOrigin` and its paired `LoadOptions.declaredDurationSeconds`
+  for origins that fabricate range answers. IPTV timeshift/catch-up archives
+  answer any `Range: bytes=X-` with a plausible `206` whose body actually sits on
+  a coarse internal chunk boundary, so only byte 0 is addressable: the 32 MB
+  range rotations spliced misplaced content into every reconnect (heard as a
+  once-a-minute audio desync), the tail-read duration estimate read a 135-minute
+  window as 9.5 hours, and the static plan's uniform `EXTINF` was wrong for any
+  archive whose GOP cadence does not divide the cut target. Headers cannot expose
+  the lie, so the caller declares it: the reader runs one long-lived unranged GET
+  with no ranged probes and reports a lost connection as `EIO` rather than `EOF`,
+  the declared duration takes precedence over the container's, such a source keeps
+  the native path instead of being forced to software, and the session serves an
+  append-only EVENT playlist carrying the durations actually muxed, completed with
+  `ENDLIST` at true source EOF. Seeking is unavailable by construction; re-request
+  the archive with a shifted start timestamp instead. `aetherctl play` gains
+  `--sequential-origin` / `--declared-duration`. Contributed by @tschuegy (#346).
+
+### Changed
+
+- A sequential origin now refuses every producer reposition, not just the
+  `readError` revive. `performRestart`'s demuxer seek cannot land anywhere on a
+  non-seekable pb and does not treat that as failure, so a scrub-driven or
+  deadline-driven restart would have kept reading wherever the stream stood and
+  labelled those bytes as the target segment: the same fabricated-position
+  content the declaration exists to keep out, only silent. The restart and the
+  resume anchor for the first producer now take the same refusal the revive
+  already took (follow-up to #346).
+
 ## [6.18.1] - 2026-08-09
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.18.1))
