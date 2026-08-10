@@ -507,7 +507,7 @@ final class DisplayCriteriaController {
     /// the engine-writer case (#339). Idempotent: re-arming only clears the record and keeps the observers.
     func armSwitchObservation() {
         #if os(tvOS)
-        guard let window = resolveWindow() else { return }
+        guard resolveWindow() != nil else { return }
         observation.arm()
         #endif
     }
