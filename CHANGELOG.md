@@ -52,8 +52,44 @@ the public-API contract.
   production and publishes `liveSourceReset` on exhaustion; a source with no
   in-engine transport still delegates at the pump exit and is deliberately not
   signalled twice. Contributed by @tschuegy (#343).
+- The software path now folds PTS discontinuities on forward-only sources, not
+  just live ones. A chunked IPTV timeshift archive restarts its timestamps at
+  PTS ~0 on every chunk, and FFmpeg's 33-bit wrap correction reads that backward
+  jump as a ~26.5 h forward one: the renderer waited 25 hours for the frame's
+  display time and the video queue died with `FigVideoQueueRemote -12080`,
+  picture and sound frozen about 90 s into every session. A non-seekable source
+  offers no seek-based recovery either, so it now folds like live. Seekable VOD
+  keeps its trusted container timeline untouched. Contributed by @tschuegy
+  (#347).
+- Software-path audio no longer chops on sources that decode near real time. The
+  combined demux loop paced everything on the video renderer's ~10-frame queue,
+  so interleaved audio could never build more than ~0.3 s of lead over the
+  synchronizer clock: any decode or deinterlace jitter beyond that starved the
+  audio renderer, the clock leapt to the next sample's PTS, and the queued video
+  was suddenly late enough for the layer to drop it (a 1080i50 archive replay
+  measured periodic +0.25 s clock leaps and 17 % renderer drops). Video packets
+  now park in a bounded FIFO drained at the renderer's pace while audio keeps
+  decoding ahead of the clock, and a genuine underrun pauses the clock for a
+  rebuffer instead of letting it free-run, the same policy the DVR feeder arm
+  uses. Live keeps its lockstep pacing. Contributed by @tschuegy (#347).
+- Hardening on the above: the read is paced by the audio lead itself rather than
+  by how many seconds of video happen to fit in the FIFO's packet cap (which
+  moved the effective lead with frame rate), one method owns every wait on the
+  renderer so none of them can wait under a rebuffer hold that only this thread
+  could lift, the #337 unarmed-clock exit reaches the parked path, parked packets
+  are seek-generation checked before decode, and the lead latch resets with the
+  seek instead of pausing the clock on the first post-seek check (follow-up to
+  #347).
 
 ### Added
+
+- A 1 Hz `[SWDiag]` line for software sessions: clock and clock delta, decoded
+  audio lead, parked FIFO depth, rebuffer state, the display layer's own drop
+  counter and accumulated render delay with per-second deltas, queue-target
+  status, surface state and `isReadyForDisplay`. The native path has `[LagDiag]`;
+  software sessions had only the 30 s memprobe, which is too coarse to see the
+  clock leaps and layer-drop bursts a stuttering session is made of.
+  Contributed by @tschuegy (#347).
 
 - `LoadOptions.sequentialOrigin` and its paired `LoadOptions.declaredDurationSeconds`
   for origins that fabricate range answers. IPTV timeshift/catch-up archives
