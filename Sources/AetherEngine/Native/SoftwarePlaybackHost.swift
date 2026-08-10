@@ -525,6 +525,29 @@ final class SoftwarePlaybackHost {
         isLive || !sourceSeekable
     }
 
+    /// Pure decision: whether the combined demux loop stops pulling packets. It stops once
+    /// decoded audio holds `AudioLookaheadPolicy.targetLeadSeconds` over the clock, which is
+    /// what the parked-video FIFO exists to allow; the packet cap is only a memory backstop,
+    /// and letting it do the pacing would make the effective lead a function of frame rate.
+    /// Before the clock is armed the lead is meaningless (the clock reads garbage), so only
+    /// the backstop applies: the loop has to keep reading to produce the buffers that arm it.
+    nonisolated static func shouldHoldDemuxRead(
+        parkedCount: Int,
+        parkedCap: Int,
+        clockArmed: Bool,
+        lastAudioPts: Double,
+        clockSeconds: Double
+    ) -> Bool {
+        if parkedCount >= parkedCap { return true }
+        guard clockArmed, clockSeconds.isFinite else { return false }
+        return AudioLookaheadPolicy.decide(
+            clockArmed: true,
+            preArmPacketsFed: 0,
+            lastFedAudioPTS: lastAudioPts,
+            clockSeconds: clockSeconds
+        ) == .stop
+    }
+
     // MARK: - Load
 
     func load(
@@ -1734,9 +1757,9 @@ final class SoftwarePlaybackHost {
         // drops). Video packets now PARK in a bounded FIFO while audio keeps decoding up to
         // AudioLookaheadPolicy.targetLeadSeconds ahead of the clock, and a genuine underrun
         // pauses the clock for a rebuffer (AudioLookaheadPolicy.clockAction) instead of
-        // letting it free-run, mirroring the DVR feeder arm. Live-without-ring sessions keep
-        // the historical lockstep pacing: their delivery is origin-paced realtime and the DVR
-        // arm covers the sessions that need the pump.
+        // letting it free-run, mirroring the DVR feeder arm. Live sessions keep the historical
+        // lockstep pacing: their delivery is origin-paced realtime, and the ones that need a
+        // pump get it from the DVR feeder arm on its own thread.
         var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
         let parkedVideoCap = 256
         var lastEnqueuedAudioPtsSec = Double.nan
@@ -1757,7 +1780,11 @@ final class SoftwarePlaybackHost {
         }
 
         // Decode+enqueue parked video while the renderer will take it. Never blocks.
+        // Generation-checked: the blocking waits below can sit here across a seek, and the
+        // lockstep gate discards a pre-seek packet for the same reason (decoding one clears
+        // the decoder's skip threshold = visible fast-forward burst).
         func drainParkedVideoNonblocking() {
+            if seekGeneration() != parkedSeekGeneration { return }
             while !parkedVideo.isEmpty, renderer.isReadyForMoreMediaData,
                   !stopRequested(), !backgroundAudioOnly() {
                 let p = parkedVideo.removeFirst()
@@ -1767,12 +1794,84 @@ final class SoftwarePlaybackHost {
             }
         }
 
+        func releaseRebufferHold(_ why: String) {
+            guard rebuffering else { return }
+            rebuffering = false
+            EngineLog.emit("[SWHost] releasing rebuffer hold: \(why)", category: .swPlayback)
+            audioOutput?.setRate(currentRate())
+        }
+
+        // #337 on the decoupled path. The lockstep gate arms the clock off the packet it is
+        // holding when the renderer is full and the selected audio stream will never produce
+        // the buffer the clock waits for; parked, the equivalent packet is the FIFO head. The
+        // gate below is the same shape of park, so it needs the same exit.
+        func armFromParkedVideoIfStuck() {
+            guard let head = parkedVideo.first, let aOut = audioOutput,
+                  SWClockAnchorPolicy.shouldArmFromParkedVideo(
+                    clockArmed: clockArmed(),
+                    isPlaying: isPlaying(),
+                    rendererReadyForMoreData: renderer.isReadyForMoreMediaData,
+                    audioArmingStillPossible: false)
+            else { return }
+            EngineLog.emit(
+                "[SWHost] clock unarmed with \(parkedVideo.count) video packets parked: the selected "
+                + "audio stream (index \(audioStreamIndex)) has produced nothing by the renderer's "
+                + "fill point (audioPacketsSeen=\(audioPacketsSeen)); anchoring on video",
+                category: .swPlayback
+            )
+            armFromVideoPacket(head, aOut)
+        }
+
+        enum ParkWait {
+            /// Hold the read until audio is back under its lead target / the FIFO under its cap.
+            case readGate
+            /// Feed the whole parked tail out (seam flush, end of media).
+            case drainAll
+        }
+
+        // The one place the loop waits on the renderer. A rebuffer hold stops the synchronizer,
+        // and a stopped synchronizer never drains the renderer: this thread is the only one that
+        // could lift the hold, so waiting under it waits forever (the DVR arm may wait because
+        // its pump runs on a second thread). Lift first, then wait.
+        func waitForRenderer(_ reason: ParkWait) {
+            func stillWaiting() -> Bool {
+                switch reason {
+                case .readGate:
+                    return Self.shouldHoldDemuxRead(
+                        parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
+                        clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
+                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
+                case .drainAll:
+                    return !parkedVideo.isEmpty
+                }
+            }
+            while stillWaiting(), !stopRequested(), !backgroundAudioOnly() {
+                if seekGeneration() != parkedSeekGeneration { return }
+                if !isPlaying() {
+                    condition.lock()
+                    while !isPlaying() && !stopRequested() {
+                        autoreleasepool {
+                            _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
+                        }
+                    }
+                    condition.unlock()
+                    continue
+                }
+                releaseRebufferHold("the renderer needs a running clock to take parked video")
+                armFromParkedVideoIfStuck()
+                drainParkedVideoNonblocking()
+                diag?.update(lastAudioPts: lastEnqueuedAudioPtsSec,
+                             parked: parkedVideo.count, rebuffering: rebuffering)
+                if stillWaiting() { Thread.sleep(forTimeInterval: 0.005) }
+            }
+        }
+
         // Pause the master clock when the audio lead is genuinely exhausted, resume once the
         // rebuffer target is met. In this loop there is no ring to distinguish decode lag
         // from a dry source, so a sub-threshold lead IS treated as source-starved - the
         // everHadLead latch keeps that from firing on realtime-paced sources that never had
         // a lead to lose.
-        func applyAudioClockAction(sourceEnded: Bool) {
+        func applyAudioClockAction() {
             guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
             let lead = lastEnqueuedAudioPtsSec.isFinite
                 ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
@@ -1783,7 +1882,9 @@ final class SoftwarePlaybackHost {
                 lastFedAudioPTS: lastEnqueuedAudioPtsSec,
                 clockSeconds: aOut.currentTimeSeconds,
                 atRingEnd: true,
-                sourceEnded: sourceEnded
+                // End of media releases the hold explicitly in the read path below; there is no
+                // ring here whose end this could be read from.
+                sourceEnded: false
             ) {
             case .pauseForRebuffer:
                 rebuffering = true
@@ -1842,28 +1943,21 @@ final class SoftwarePlaybackHost {
                     freeParkedVideo()
                     lastEnqueuedAudioPtsSec = .nan
                     rebuffering = false
+                    // The lead is zero again after a seek, so the latch has to earn itself back:
+                    // keeping it set pauses the clock for a rebuffer on the first post-seek check.
+                    everHadLead = false
                 }
                 drainParkedVideoNonblocking()
-                applyAudioClockAction(sourceEnded: false)
-                // Bounded park: audio has its lead, so block on the renderer taking video
-                // (the historical backpressure shape) before reading further.
-                if parkedVideo.count >= parkedVideoCap {
-                    while !parkedVideo.isEmpty, parkedVideo.count >= parkedVideoCap / 2,
-                          !stopRequested(), !backgroundAudioOnly() {
-                        if renderer.isReadyForMoreMediaData {
-                            drainParkedVideoNonblocking()
-                        } else if !isPlaying() {
-                            condition.lock()
-                            while !isPlaying() && !stopRequested() {
-                                autoreleasepool {
-                                    _ = condition.wait(until: Date(timeIntervalSinceNow: 0.5))
-                                }
-                            }
-                            condition.unlock()
-                        } else {
-                            Thread.sleep(forTimeInterval: 0.005)
-                        }
-                    }
+                applyAudioClockAction()
+                // Read gate: stop pulling once decoded audio holds its target lead. The FIFO cap
+                // is the memory backstop, not the pacing rule - what bounds the lead has to be
+                // the lead itself, or the effective ceiling becomes "however many seconds of
+                // video fit in 256 packets" and moves with frame rate.
+                if Self.shouldHoldDemuxRead(
+                    parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
+                    clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
+                    clockSeconds: audioOutput?.currentTimeSeconds ?? .nan) {
+                    waitForRenderer(.readGate)
                     return true
                 }
             }
@@ -1879,20 +1973,12 @@ final class SoftwarePlaybackHost {
             }
 
             guard let packet else {
-                // Play the parked tail out before the flush, and release a rebuffer hold:
-                // nothing more will arrive, the queues must drain to end-of-media.
-                while !parkedVideo.isEmpty, !stopRequested(), !backgroundAudioOnly() {
-                    if renderer.isReadyForMoreMediaData {
-                        drainParkedVideoNonblocking()
-                    } else {
-                        Thread.sleep(forTimeInterval: 0.005)
-                    }
-                }
+                // Play the parked tail out before the flush: nothing more will arrive, the queues
+                // must drain to end-of-media. The wait lifts a rebuffer hold on its own - held,
+                // the clock would never take the tail and end-of-media would never be reached.
+                releaseRebufferHold("end of media, nothing left to rebuffer from")
+                waitForRenderer(.drainAll)
                 freeParkedVideo()
-                if rebuffering {
-                    rebuffering = false
-                    audioOutput?.setRate(currentRate())
-                }
                 videoDecoder.flush()
                 audioDecoder?.flush()
                 renderer.drainReorderBuffer()
@@ -1922,13 +2008,7 @@ final class SoftwarePlaybackHost {
                         discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
                         // Feed the parked pre-seam tail to the decoder before the flush drops
                         // its reference chain; the seam packet itself parks after this block.
-                        while !parkedVideo.isEmpty, !stopRequested(), !backgroundAudioOnly() {
-                            if renderer.isReadyForMoreMediaData {
-                                drainParkedVideoNonblocking()
-                            } else {
-                                Thread.sleep(forTimeInterval: 0.005)
-                            }
-                        }
+                        waitForRenderer(.drainAll)
                         freeParkedVideo()
                         videoDecoder.flush()
                         audioDecoder?.flush()
@@ -2005,16 +2085,11 @@ final class SoftwarePlaybackHost {
                     // renderer. Ownership moves to the FIFO - no free here.
                     parkedVideo.append(packet)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
-                    // requires a DECLARED audio track, not a producing one).
+                    // requires a DECLARED audio track, not a producing one). The stream that
+                    // produces NO packets at all is #337's case and exits at the read gate.
                     if !clockArmed(), let aOut = audioOutput,
                        audioPacketsSeen >= 50, !audioBuffersProduced {
-                        let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
-                            ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
-                        let resolution = SWClockAnchorPolicy.resolve(
-                            initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
-                        armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
-                                 rate: currentRate(), onClockAnchored: onClockAnchored)
-                        markClockArmed()
+                        armFromVideoPacket(packet, aOut)
                     }
                     drainParkedVideoNonblocking()
                     return true
@@ -2230,7 +2305,9 @@ final class SoftwarePlaybackHost {
             let surface = layer.superlayer != nil
                 ? "\(Int(layer.bounds.width))x\(Int(layer.bounds.height))" : "DETACHED"
             let r4d: String
-            if #available(tvOS 17.4, iOS 17.4, macOS 14.4, *) {
+            // #344: `*` is visionOS's declared floor (1.0), not "anything newer", and
+            // isReadyForDisplay arrived in 1.1. Name the platform or the visionOS build breaks.
+            if #available(tvOS 17.4, iOS 17.4, macOS 14.4, visionOS 1.1, *) {
                 r4d = layer.isReadyForDisplay ? "y" : "n"
             } else {
                 r4d = "-"
