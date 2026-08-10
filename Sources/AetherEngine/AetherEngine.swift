@@ -834,6 +834,10 @@ public final class AetherEngine: ObservableObject {
     /// so the crossing is announced once and not on every tick after it. Cleared per channel by
     /// every reset, because a fresh run's coverage is a fresh question.
     var subtitleResolutionCoverageStated: Set<SubtitleChannel> = []
+    /// #357: the delivery outcome of the last decoding tick per channel, so the line marks the
+    /// moment a channel stopped (or resumed) publishing rather than repeating itself at 2 Hz. nil
+    /// before a channel's first decoding tick.
+    var subtitleDeliveryLastOutcome: [SubtitleChannel: SubtitleDeliveryStatement.Outcome] = [:]
     /// #151: subtitle-only forward side reader filling the session packet store up to
     /// playhead + subtitleDrainLeadSeconds independent of the producer's forward park, so the
     /// drainer's lead window holds cues for host-applied ADVANCE sync offsets (text and bitmap).
@@ -2220,8 +2224,10 @@ public final class AetherEngine: ObservableObject {
     /// entry), and select must not replace it with a playhead-anchored parking reader.
     var nativeSubtitleReadersRunToEOF = false
 
-    /// Per-session subtitle event log counter. Caps diagnostic output; reset on each load.
-    var subtitleCueDiagnosticCount: Int = 0
+    /// #357: budget for the per-cue `[applySubtitleEvent #N]` line, refilled per seek generation.
+    /// Was a per-load counter, which went blind after 20 events and left every later seek landing
+    /// unobservable; see `SubtitleDeliveryStatement.EventBudget`.
+    var subtitleCueDiagnosticBudget = SubtitleDeliveryStatement.EventBudget()
 
     /// Trailing retention window for subtitleCues (seconds). Bounds bitmap-cue (PGS/DVB/DVD) memory:
     /// each cue retains a decoded RGBA CGImage; a 2-hr Blu-ray PGS track emits ~1500-2000 cues.
@@ -2602,7 +2608,7 @@ public final class AetherEngine: ObservableObject {
         selectedDiscTitle = nil
         discChapters = []
         mediaChapters = []
-        subtitleCueDiagnosticCount = 0
+        subtitleCueDiagnosticBudget = .init()
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
         // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
         videoFormat = .sdr
