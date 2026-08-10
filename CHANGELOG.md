@@ -12,6 +12,25 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.19.3] - 2026-08-10
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.3))
+
+### Fixed
+
+- The macOS demo `.dmg` ships the FFmpeg frameworks it links against. They were
+  statically linked once, and the packaging script recorded that as a comment
+  ending "if FFmpegBuild ever switches to dynamic frameworks, this is where
+  they'd be copied to". It since did, so the binary loads nine frameworks
+  through `@rpath` and the bundle contained none of them: the demo aborted at
+  launch with `Library not loaded: @rpath/Libavcodec.framework/...` on every
+  machine, which cost a reporter a round of testing on AetherPlayer#2. The
+  frameworks are now embedded and signed inside out, and the stale comment is
+  replaced by a check that fails the build when an `@rpath` dependency is
+  missing from the bundle.
+
+No library changes. Consumers pinning `6.19.2` get byte-identical engine code.
+
 ## [6.19.2] - 2026-08-10
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.19.2))
