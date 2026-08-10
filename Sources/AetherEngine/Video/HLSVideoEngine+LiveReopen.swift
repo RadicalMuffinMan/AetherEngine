@@ -126,8 +126,27 @@ extension HLSVideoEngine {
     /// un-halted, playlist frozen, host never told to retune. `.none` never reaches an exhaustion
     /// site (it delegates to host retune before any reopen begins) and must stay out so a future
     /// call-site reshuffle cannot double-signal that path.
+    ///
+    /// Exhaustive on purpose: `.none` is proof that "everything except the factory transport"
+    /// was already the wrong shape once, so a transport added later must be classified here by
+    /// hand rather than inherit a default that happens to compile.
     static func liveReopenExhaustionEscalatesToHost(transport: LiveReopenTransport) -> Bool {
-        transport != .none
+        switch transport {
+        case .url, .customFactory:
+            return true
+        case .none:
+            return false
+        }
+    }
+
+    /// The whole escalation, so the two exhaustion sites (barren-cycle cap, reopen attempt cap)
+    /// cannot drift apart: the decision plus BOTH of its effects. The halt is the half that is easy
+    /// to lose, and losing it is what the -15410 zombie is made of; onLiveSourceReset alone (what
+    /// the #65 stall ladder publishes) leaves the dead provider still advertising blocking reloads.
+    func escalateLiveReopenExhaustion(transport: LiveReopenTransport) {
+        guard Self.liveReopenExhaustionEscalatesToHost(transport: transport) else { return }
+        provider?.markLiveProductionHalted()
+        onLiveSourceReset?()
     }
 
     func handlePumpFinished(_ prod: HLSSegmentProducer,
@@ -261,13 +280,10 @@ extension HLSVideoEngine {
                 + "\(barrenNow) reopen cycles; giving up (source considered dead)",
                 category: .session
             )
-            if Self.liveReopenExhaustionEscalatesToHost(transport: reopenTransport) {
-                // #199 follow-up: same last-resort surface for EVERY reopenable transport; the
-                // recoverable exit reason skipped the halt above, so without this the zombie
-                // session holds blocking reloads it can never satisfy and the host is never told.
-                provider?.markLiveProductionHalted()
-                onLiveSourceReset?()
-            }
+            // #199 follow-up: same last-resort surface for EVERY reopenable transport; the
+            // recoverable exit reason skipped the halt above, so without this the zombie
+            // session holds blocking reloads it can never satisfy and the host is never told.
+            escalateLiveReopenExhaustion(transport: reopenTransport)
             return
         }
         EngineLog.emit(
@@ -692,13 +708,10 @@ extension HLSVideoEngine {
             + "source considered permanently lost",
             category: .session
         )
-        if Self.liveReopenExhaustionEscalatesToHost(transport: transport) {
-            // #199 follow-up: the in-engine transport is exhausted; surface the loss the way a
-            // factory-less custom source would have immediately, so the host can retune instead of
-            // holding a zombie session whose blocking-reload advert can never be satisfied.
-            provider?.markLiveProductionHalted()
-            onLiveSourceReset?()
-        }
+        // #199 follow-up: the in-engine transport is exhausted; surface the loss the way a
+        // factory-less custom source would have immediately, so the host can retune instead of
+        // holding a zombie session whose blocking-reload advert can never be satisfied.
+        escalateLiveReopenExhaustion(transport: transport)
     }
 
     /// NSLock unavailable from async contexts; this synchronous helper wraps the check.

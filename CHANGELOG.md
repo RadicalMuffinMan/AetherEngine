@@ -42,6 +42,16 @@ the public-API contract.
   frozen position no longer loops forever), and a live session whose clock has
   not advanced after the reload publishes `liveSourceReset` so the host can
   retune. Contributed by @tschuegy (#342).
+- A live URL source that spends its reopen budget no longer zombifies. Both
+  exhaustion sites (the barren-cycle cap and the reopen attempt cap) escalated
+  only for the custom-factory transport #199 introduced, so the far more common
+  URL session reached the same dead end with its provider left un-halted: it
+  kept advertising blocking reloads it could never answer (-15410 on any held
+  `?_HLS_msn=`, and on an item reload against it), the playlist stayed frozen,
+  and the host was never asked to retune. Every in-engine transport now halts
+  production and publishes `liveSourceReset` on exhaustion; a source with no
+  in-engine transport still delegates at the pump exit and is deliberately not
+  signalled twice. Contributed by @tschuegy (#343).
 
 ## [6.18.1] - 2026-08-09
 
