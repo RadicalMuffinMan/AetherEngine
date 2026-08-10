@@ -2001,6 +2001,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var barrenReopenCycles = 0
     var lastReopenSegmentCount = -1
     static let maxBarrenReopenCycles = 3
+    /// Live muxerFailed in-place rebuilds, bounded by progress like the reopen cycles above: new segments
+    /// since the last death reset the budget (an hours-long channel legitimately crosses several encoder
+    /// restarts, so a session-lifetime gate like the VOD #99 one would be wrong here); consecutive barren
+    /// deaths exhaust it and the session halts + delegates to host retune.
+    var liveMuxerRebuildCycles = 0
+    var lastMuxerRebuildSegmentCount = -1
+    static let maxLiveMuxerRebuildCycles = 3
 
     private func handleVideoShiftKnown(_ shiftPts: Int64, firstItemTfdtPts: Int64) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
