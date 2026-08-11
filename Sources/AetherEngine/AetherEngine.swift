@@ -2204,6 +2204,10 @@ public final class AetherEngine: ObservableObject {
     /// misread as deselect) and applied by `restoreSubtitleSelection`.
     var sessionPreservingReloadInFlight = false
     var pendingNativeRenderingRequest: Bool? = nil
+    /// #357: selection parked by a background teardown for the foreground reload, because on that
+    /// path the two are minutes apart and `stopInternal` has wiped the state the reload snapshots
+    /// itself. Claimed by `consumeReloadSelection`, dropped by any other `load()` and by `stop()`.
+    var backgroundTeardownSelection: BackgroundTeardownSelection?
 
     /// Detached reader that decodes ALL embedded text subtitle streams in one side-demuxer pass into their
     /// ordinal's NativeSubtitleCueStore (#55, all-tracks). Parallel to the packet-store drainer (which drives
@@ -2574,6 +2578,9 @@ public final class AetherEngine: ObservableObject {
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
         activeSecondaryExternalSubtitleTrackID = nil
+        // #357: any load that is not the reload claiming it (which consumed it before calling here)
+        // is a different session; a parked selection must not follow it.
+        backgroundTeardownSelection = nil
         // #170: a stale latched rendering request from a superseded session-preserving reload
         // must not leak into this session; requests for the in-flight reload can only land at
         // suspension points after this prologue, so they survive.
@@ -3443,27 +3450,38 @@ public final class AetherEngine: ObservableObject {
     /// Tear down and reload from the current position. Call after background return; tvOS invalidates
     /// AVIO connections and VT sessions on suspension.
     public func reloadAtCurrentPosition() async throws {
+        // #357: a background teardown already ran stopInternal and parked the selection, because on
+        // that path the live state every snapshot below reads is wiped long before this call. When
+        // nothing was parked this is exactly the pre-#357 live read.
+        let resumesTornDownSession = backgroundTeardownSelection != nil
+        let selection = consumeReloadSelection()
         if isCustomSource {
             // Rebuild on retained reader (seekable only); no URL to reopen.
             guard customSourceIsSeekable, let placeholderURL = loadedURL else { return }
             await reloadWithAudioOverride(
                 url: placeholderURL,
-                audioStreamIndex: activeAudioTrackIndex.map { Int32($0) },
-                expectedGeneration: loadGeneration
+                audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
+                expectedGeneration: loadGeneration,
+                discTitleIDOverride: selection.discTitleID
             )
+            // The reload restores from its own pre-stopInternal snapshot, which a torn-down session
+            // no longer had anything in; replay the parked subtitle pick on top of it.
+            if resumesTornDownSession {
+                restoreSubtitleSelection(from: selection.subtitles, resumeAnchor: nil)
+            }
             return
         }
         guard let url = loadedURL else { return }
         let pos = currentTime
         // Snapshot the disc title before load()'s stopInternal wipes it, so a background-resumed disc image
         // keeps the title the user selected instead of reverting to the main title (#67).
-        let titleID = activeDiscTitleID
+        let titleID = selection.discTitleID
         // #170: session state the from-scratch load() would wipe and re-derive by auto-selection
         // (AirPlay LAN-swap reload, background-return reopen). The explicit audio pick rides the
         // load's own override contract (matching the custom-source branch above); the subtitle
         // session state is seeded into the load and the selection restored after it.
-        let audioToRestore = activeAudioTrackIndex
-        let carryover = captureSubtitleSessionCarryover()
+        let audioToRestore = selection.audioTrackIndex
+        let carryover = selection.subtitles
         sessionPreservingReloadInFlight = true
         // #227: the reconcile has to run on every exit, including a thrown/superseded load, or an edge held
         // during the reload is lost and the session stays on the wrong URL for the current route.
@@ -4109,6 +4127,7 @@ public final class AetherEngine: ObservableObject {
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
         activeSecondaryExternalSubtitleTrackID = nil
+        backgroundTeardownSelection = nil     // #357: leaving playback is not a reload
         pendingNativeRenderingRequest = nil   // #170: the session the latched request targeted is gone
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
@@ -5173,6 +5192,9 @@ public final class AetherEngine: ObservableObject {
     private func teardownVideoForBackground() async {
         let app = UIApplication.shared
         let bgTask = app.beginBackgroundTask(withName: "AetherEngine.bgVideoTeardown")
+        // #357: park the selection first. The foreground reload snapshots at reload time, which on
+        // this path is long after stopInternal wiped what it wants.
+        captureBackgroundTeardownSelection()
         stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
         // Session torn down; host will reload + repause on foreground return.
         state = .paused
@@ -5237,6 +5259,7 @@ public final class AetherEngine: ObservableObject {
         backgroundGraceTask = nil
         if isBackgrounded, currentBackgroundAction() == .teardownVideo {
             EngineLog.emit("[AetherEngine] background grace assertion expired early, synchronous teardown (#127)", category: .engine)
+            captureBackgroundTeardownSelection()   // #357, as in teardownVideoForBackground
             stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
             state = .paused
         }
