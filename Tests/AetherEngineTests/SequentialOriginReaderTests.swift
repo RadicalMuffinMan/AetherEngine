@@ -49,8 +49,9 @@ struct SequentialOriginReaderTests {
     @Test("a body that ends short of its Content-Length reports EIO, not EOF")
     func shortBodyReportsEIO() throws {
         let total: Int64 = 8 * 1024 * 1024
+        let servedBeforeDrop: Int64 = 2 * 1024 * 1024
         let maybeServer = ThrottledOriginServer(totalSize: total, throttleUs: 0,
-                                                respond: { _, _, _ in .serveThenDrop(afterBytes: 2 * 1024 * 1024) })
+                                                respond: { _, _, _ in .serveThenDrop(afterBytes: servedBeforeDrop) })
         let server = try #require(maybeServer)
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/archive.ts")!,
@@ -59,7 +60,13 @@ struct SequentialOriginReaderTests {
         try reader.open()
 
         let (read, last) = drain(reader, upTo: total)
-        #expect(read >= 1 * 1024 * 1024)
+        // What arrived is handed over before the error is, and it is short of the promise. NOT how
+        // much: when a body is cut off, the amount that reaches the delegate before the failure
+        // does is URLSession's to decide, and it drops whatever it has buffered at that moment.
+        // The old `>= 1 MiB` was a bet on most of the 2 MiB surviving that, and a loaded CI runner
+        // collected on it (2026-08-11: 327212 arrived). Measured locally at 1790200 of 2097152 on
+        // an idle machine, so there is no honest floor here, only a property: some, and not all.
+        #expect(read > 0)
         #expect(read < total)
         // AVERROR(EIO) = -5: a sequential origin cannot be resumed at an offset, so the loss must
         // surface as a read error the session can act on. FFmpegErr.eof here would read as
