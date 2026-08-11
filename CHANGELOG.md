@@ -12,6 +12,32 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.20.1] - 2026-08-11
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.20.1))
+
+### Fixed
+
+- The VOD cut gate reads the axis the plan is written in (#358). A
+  keyframe-aligned plan's boundaries are the container index's sync-sample
+  timestamps, and for mov/mp4 those are DECODE timestamps: the mov demuxer
+  builds its index from `current_dts`. The gate compared a packet's
+  PRESENTATION timestamp against them, so every keyframe reached boundaries
+  beyond its own by the sample's composition offset and the cutter consumed
+  them, leaving plan indices that never opened a segment while the playlist
+  kept offering them. On an ordinary encode that offset is two frames and the
+  mismatch is invisible, which is how it survived since #92; on a remux
+  carrying an edit list it is seconds (the reported file: `dts=0 pts=300000`
+  at 1/100000, exactly 3 s). Reproduced without that file by giving a normal
+  encode the same shape with `setts=pts=PTS+N:dts=DTS`: at a 5 s offset with
+  IRAPs every 4.2 s segment 0 was never opened at all and the session never
+  started, and at 3 s with wider boundaries every segment carried a constant
+  2.48 s of plan-versus-content disagreement that nothing reported. Both now
+  read `drift=0.000` throughout. Keyframe gating is unchanged, so #92 holds:
+  the IRAP is still the segment's first sample and its RASL pictures still
+  follow it in decode order (`segverify` 6/6 on a B-frame encode, 5/5 on the
+  offset fixture). Sources with no DTS fall back to the presentation timestamp.
+
 ## [6.20.0] - 2026-08-10
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.20.0))
