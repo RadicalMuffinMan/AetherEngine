@@ -1322,6 +1322,13 @@ public final class AetherEngine: ObservableObject {
     var ccCueSnapshot: [SubtitleCue] = []
     var ccLastSnapshotSeq: Int = 0
 
+    /// AE#359: SUBTITLES renditions the live master declared, ordinal-aligned with the track ids
+    /// published from `liveSubtitleRenditionTrackIDBase`. The fetch task exists only while such a
+    /// track is selected; `liveSubtitleCueID` keeps cue ids unique across the session.
+    var liveSubtitleRenditions: [LiveSubtitleRenditionInfo] = []
+    var liveSubtitleFetchTask: Task<Void, Never>?
+    var liveSubtitleCueID: Int = 0
+
     /// Secondary subtitle reader state mirrors (#47). Driven only through SubtitleChannel.secondary.
     var secondarySidecarTask: Task<Void, Never>?
     var activeSecondaryEmbeddedSubtitleStreamIndex: Int32 = -1
@@ -2574,6 +2581,7 @@ public final class AetherEngine: ObservableObject {
         clock.progress = 0
         audioTracks = []
         subtitleTracks = []
+        teardownLiveSubtitleRenditions()   // AE#359
         externalSubtitleRegistry = [:]
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
@@ -4123,6 +4131,7 @@ public final class AetherEngine: ObservableObject {
         metadata = nil
         audioTracks = []
         subtitleTracks = []
+        teardownLiveSubtitleRenditions()   // AE#359
         externalSubtitleRegistry = [:]
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
