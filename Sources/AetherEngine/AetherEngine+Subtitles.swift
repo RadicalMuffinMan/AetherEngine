@@ -60,6 +60,12 @@ extension AetherEngine {
             selectRemoteHLSSubtitleTrack(id: index)
             return
         }
+        // AE#359: a live SUBTITLES rendition carries no packets in this demuxer; its cues come from the
+        // rendition's own WebVTT playlist, fetched only now that the host has actually asked for it.
+        if Self.isLiveSubtitleRenditionTrackID(index) {
+            selectLiveSubtitleRendition(id: index)
+            return
+        }
         guard index < Self.externalSubtitleTrackIDBase else { return }  // unknown external id: no-op
         guard loadedURL != nil else { return }
 
@@ -1238,6 +1244,10 @@ extension AetherEngine {
     /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader, clear native mov_text stores (#55, all-tracks). `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
     public func clearSubtitle() {
         hostExplicitSubtitleAction = true
+        // AE#359: subtitles off ends the rendition poll. The renditions themselves stay listed, only
+        // the fetching stops, so re-selecting the track starts fresh from the current window.
+        liveSubtitleFetchTask?.cancel()
+        liveSubtitleFetchTask = nil
         // AE#154: a remote-HLS legible selection lives in AVMediaSelection, not the overlay
         // pipeline; deselect it on the item (criteria pinned manual so system caption prefs
         // don't immediately re-select).

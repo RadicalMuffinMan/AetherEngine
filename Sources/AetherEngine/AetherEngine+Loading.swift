@@ -522,6 +522,9 @@ extension AetherEngine {
         // final by the time loadNative runs; nil means muxed audio.
         let liveIngest = customReader as? LiveIngestSourceInfo
         let companionAudioReader = liveIngest?.companionAudioReader
+        // AE#359: same guarantee as the companion reader, the resolver has published these before any
+        // main-stream byte flows, so the list is final here.
+        if let liveIngest { surfaceLiveSubtitleRenditions(liveIngest.subtitleRenditions) }
         // Observed-cadence closure for live-ingest LL-HLS shaping (AetherEngine#167): read per manifest
         // render, so the engine reacts to how the origin ACTUALLY delivers segments rather than trusting its
         // self-reported TARGETDURATION. weak so it never retains the host-owned reader past teardown. The
