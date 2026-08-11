@@ -2844,9 +2844,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // at the IRAP that reaches its plan boundary, so the IRAP is the segment's first sample
                     // and its open-GOP RASL leading pictures stay with it (#92). Routing by DTS against PTS
                     // boundaries used to drop the IRAP (dts < pts) into the previous segment.
+                    // #358: the VOD plan's boundaries are the mov/mp4 index's sync-sample timestamps,
+                    // which are DECODE times, so the gate compares decode times too. Comparing the
+                    // presentation time against them let a keyframe reach boundaries beyond its own
+                    // by its composition offset (3 s on the field report's remux), consuming plan
+                    // indices that then never opened a segment. Keyframe gating is unchanged, so
+                    // #92 holds: the IRAP is still the segment's first sample and its RASL pictures
+                    // still follow it in decode order.
                     let thisVideoSeg = isLive
                         ? liveVideoSegmentIndex(pts: packet.pointee.pts, isKeyframe: isVideoKeyframe)
-                        : vodCutter.index(pts: packet.pointee.pts, isKeyframe: isVideoKeyframe)
+                        : vodCutter.index(pts: packet.pointee.dts != Int64.min
+                                               ? packet.pointee.dts : packet.pointee.pts,
+                                          isKeyframe: isVideoKeyframe)
                     if thisVideoSeg != pumpQoSLastSeg {
                         pumpQoSLastSeg = thisVideoSeg
                         retunePumpQoS()
