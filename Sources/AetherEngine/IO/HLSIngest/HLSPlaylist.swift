@@ -5,6 +5,8 @@ struct HLSVariant: Equatable {
     let uri: String
     /// nil when the variant declares no alternate-audio group.
     let audioGroupID: String?
+    /// nil when the variant declares no subtitle group (AE#359).
+    let subtitleGroupID: String?
 }
 
 /// EXT-X-MEDIA:TYPE=AUDIO with a URI. Companion reader ingests chosen rendition for demuxed-audio variants (ARD-style).
@@ -14,11 +16,24 @@ struct HLSAudioRendition: Equatable {
     let isDefault: Bool
 }
 
+/// EXT-X-MEDIA:TYPE=SUBTITLES with a URI (AE#359). Unlike audio these are never companion-demuxed:
+/// the rendition is a WebVTT playlist of its own, fetched only once the host selects the track.
+/// A line without a URI describes something muxed into the variant and is not a fetchable rendition.
+struct HLSSubtitleRendition: Equatable {
+    let groupID: String
+    let uri: String
+    let name: String
+    let language: String?
+    let isDefault: Bool
+    let isForced: Bool
+}
+
 /// `demuxedAudioGroupIDs` is kept as a stable Set for O(1) membership checks even though it is derivable from `audioRenditions`. EXT-X-MEDIA without a URI means audio is muxed into the variant stream.
 struct HLSMasterPlaylist: Equatable {
     let variants: [HLSVariant]
     let demuxedAudioGroupIDs: Set<String>
     let audioRenditions: [HLSAudioRendition]
+    let subtitleRenditions: [HLSSubtitleRendition]
 }
 
 /// AES-128 clear-key context (Pluto/Samsung-TV+ style). `iv`: explicit EXT-X-KEY IV attribute or big-endian media-sequence number per RFC 8216 §5.2.
@@ -84,12 +99,15 @@ enum HLSPlaylistParser {
         var variants: [HLSVariant] = []
         var demuxedAudioGroups: Set<String> = []
         var audioRenditions: [HLSAudioRendition] = []
+        var subtitleRenditions: [HLSSubtitleRendition] = []
         var pendingBandwidth: Int?
         var pendingAudioGroup: String?
+        var pendingSubtitleGroup: String?
         for line in lines {
             if line.hasPrefix("#EXT-X-STREAM-INF:") {
                 pendingBandwidth = attribute("BANDWIDTH", in: line).flatMap(Int.init) ?? 0
                 pendingAudioGroup = attribute("AUDIO", in: line)
+                pendingSubtitleGroup = attribute("SUBTITLES", in: line)
             } else if line.hasPrefix("#EXT-X-MEDIA:") {
                 if attribute("TYPE", in: line) == "AUDIO",
                    let uri = attribute("URI", in: line),
@@ -100,11 +118,25 @@ enum HLSPlaylistParser {
                         uri: uri,
                         isDefault: attribute("DEFAULT", in: line) == "YES"
                     ))
+                } else if attribute("TYPE", in: line) == "SUBTITLES",
+                          let uri = attribute("URI", in: line),
+                          let group = attribute("GROUP-ID", in: line) {
+                    subtitleRenditions.append(HLSSubtitleRendition(
+                        groupID: group,
+                        uri: uri,
+                        name: attribute("NAME", in: line) ?? "",
+                        language: attribute("LANGUAGE", in: line),
+                        isDefault: attribute("DEFAULT", in: line) == "YES",
+                        isForced: attribute("FORCED", in: line) == "YES"
+                    ))
                 }
             } else if !line.hasPrefix("#"), let bw = pendingBandwidth {
-                variants.append(HLSVariant(bandwidth: bw, uri: line, audioGroupID: pendingAudioGroup))
+                variants.append(HLSVariant(bandwidth: bw, uri: line,
+                                           audioGroupID: pendingAudioGroup,
+                                           subtitleGroupID: pendingSubtitleGroup))
                 pendingBandwidth = nil
                 pendingAudioGroup = nil
+                pendingSubtitleGroup = nil
             }
         }
         guard !variants.isEmpty else {
@@ -113,7 +145,8 @@ enum HLSPlaylistParser {
         return HLSMasterPlaylist(
             variants: variants,
             demuxedAudioGroupIDs: demuxedAudioGroups,
-            audioRenditions: audioRenditions
+            audioRenditions: audioRenditions,
+            subtitleRenditions: subtitleRenditions
         )
     }
 
