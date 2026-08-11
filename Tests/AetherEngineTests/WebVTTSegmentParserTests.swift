@@ -1,9 +1,10 @@
 import XCTest
 @testable import AetherEngine
 
-/// AE#359. Fixtures are real MDR Sachsen segments off
-/// `master-subs-1200.m3u8`, including their 164 hour LOCAL clock: the numbers a cue carries are
-/// meaningless until X-TIMESTAMP-MAP anchors them to the program's 90 kHz clock.
+/// AE#359. Fixtures are real MDR Sachsen segments off `master-subs-1200.m3u8`, including their 164
+/// hour LOCAL clock. The numbers a cue carries mean nothing on their own, and X-TIMESTAMP-MAP does
+/// not rescue them either: measured against this provider its anchor sits two hours off the picture.
+/// What places a cue is the segment it arrived in, see the mapping tests below.
 final class WebVTTSegmentParserTests: XCTestCase {
 
     private let seg133 = """
@@ -72,41 +73,61 @@ final class WebVTTSegmentParserTests: XCTestCase {
 
     // MARK: - Mapping onto the player clock
 
-    func testMapsCueTimesThroughTheAnchorAndTheShift() throws {
-        let segment = try XCTUnwrap(WebVTTSegmentParser.parse(seg133))
-        // Program time of the first cue: anchor 183000/90000 s plus its distance from the LOCAL anchor.
-        let expectedProgram = 183_000.0 / 90_000 + (seconds(164, 4, 24.0) - seconds(159, 4, 22.306))
-        var nextID = 0
-        let cues = WebVTTSegmentParser.cues(from: segment, shiftSeconds: 1000, nextID: &nextID)
-        XCTAssertEqual(cues.first?.startTime ?? 0, expectedProgram - 1000, accuracy: 0.01)
+    private let anchorWall = Date(timeIntervalSince1970: 1_000_000)
+
+    private func cues(_ segment: WebVTTSegment, segmentOffset: Double, anchorEngineTime: Double = 100,
+                      duration: Double = 2, nextID: inout Int) -> [SubtitleCue] {
+        WebVTTSegmentParser.cues(from: segment,
+                                 segmentWallStart: anchorWall.addingTimeInterval(segmentOffset),
+                                 segmentDuration: duration,
+                                 anchorWall: anchorWall,
+                                 anchorEngineTime: anchorEngineTime,
+                                 nextID: &nextID)
     }
 
-    /// The 33 bit MPEGTS clock wraps every ~95443 s. A cue just past a wrap while the session's shift
-    /// sits just before it must land a second later, not 95443 seconds earlier.
-    func testWrapAroundIsFoldedInsteadOfProducingAHugeJump() throws {
-        let range = 8_589_934_592.0 / 90_000
+    /// A cue lands at its segment's distance from the joined segment, plus its offset inside that
+    /// segment. The LOCAL clock's absolute value is irrelevant, which is the whole point: on MDR it
+    /// sits at 164 hours and its X-TIMESTAMP-MAP anchor is two hours off the picture.
+    func testACueLandsAtItsSegmentPlusItsOffsetInside() throws {
+        let segment = try XCTUnwrap(WebVTTSegmentParser.parse(seg133))
+        var nextID = 0
+        let mapped = cues(segment, segmentOffset: 30, nextID: &nextID)
+        // 164:04:24.000 sits 0 s into the 2 s segment starting at 164:04:24.
+        XCTAssertEqual(mapped.first?.startTime ?? 0, 130, accuracy: 0.001)
+        // 164:04:25.920 sits 1.92 s into that same segment.
+        XCTAssertEqual(mapped.last?.startTime ?? 0, 131.92, accuracy: 0.001)
+    }
+
+    func testCueDurationSurvivesTheMapping() throws {
+        let segment = try XCTUnwrap(WebVTTSegmentParser.parse(seg133))
+        var nextID = 0
+        let mapped = cues(segment, segmentOffset: 0, nextID: &nextID)
+        XCTAssertEqual((mapped.first?.endTime ?? 0) - (mapped.first?.startTime ?? 0), 1.44, accuracy: 0.001)
+    }
+
+    /// The offset inside a segment can never exceed the segment, whatever phase the provider's LOCAL
+    /// clock runs on. Without the clamp a misaligned grid would push cues into the next segment.
+    func testTheOffsetInsideASegmentIsClamped() throws {
         let text = """
         WEBVTT
-        X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:90000
+        X-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:0
 
-        00:00:01.000 --> 00:00:02.000
-        after the wrap
+        00:00:07.500 --> 00:00:08.000
+        late
         """
         let segment = try XCTUnwrap(WebVTTSegmentParser.parse(text))
         var nextID = 0
-        // Shift one second before the wrap point; the cue's program time is 2 s, i.e. just after it.
-        let cues = WebVTTSegmentParser.cues(from: segment, shiftSeconds: range - 1, nextID: &nextID)
-        XCTAssertEqual(cues.first?.startTime ?? 0, 3, accuracy: 0.01)
+        let mapped = cues(segment, segmentOffset: 0, duration: 2, nextID: &nextID)
+        XCTAssertLessThanOrEqual(mapped.first?.startTime ?? 0, 102)
+        XCTAssertGreaterThanOrEqual(mapped.first?.startTime ?? 0, 100)
     }
 
     // MARK: - Cross-segment repeats
 
     func testACueRepeatedInTheNextSegmentExtendsTheExistingOne() throws {
         var nextID = 0
-        let first = WebVTTSegmentParser.cues(from: try XCTUnwrap(WebVTTSegmentParser.parse(seg133)),
-                                             shiftSeconds: 0, nextID: &nextID)
-        let second = WebVTTSegmentParser.cues(from: try XCTUnwrap(WebVTTSegmentParser.parse(seg134)),
-                                              shiftSeconds: 0, nextID: &nextID)
+        let first = cues(try XCTUnwrap(WebVTTSegmentParser.parse(seg133)), segmentOffset: 0, nextID: &nextID)
+        let second = cues(try XCTUnwrap(WebVTTSegmentParser.parse(seg134)), segmentOffset: 2, nextID: &nextID)
         let merged = WebVTTSegmentParser.merged(into: first, adding: second, nextID: &nextID)
         XCTAssertEqual(merged.count, 2, "the repeated line must extend its cue, not become a third one")
         let last = try XCTUnwrap(merged.last)
@@ -115,8 +136,7 @@ final class WebVTTSegmentParserTests: XCTestCase {
 
     func testADifferentLineIsAppended() throws {
         var nextID = 0
-        let first = WebVTTSegmentParser.cues(from: try XCTUnwrap(WebVTTSegmentParser.parse(seg133)),
-                                             shiftSeconds: 0, nextID: &nextID)
+        let first = cues(try XCTUnwrap(WebVTTSegmentParser.parse(seg133)), segmentOffset: 0, nextID: &nextID)
         let other = """
         WEBVTT
         X-TIMESTAMP-MAP=LOCAL:159:04:22.306,MPEGTS:183000
@@ -124,19 +144,16 @@ final class WebVTTSegmentParserTests: XCTestCase {
         164:04:26.000 --> 164:04:28.000
         Etwas ganz anderes
         """
-        let second = WebVTTSegmentParser.cues(from: try XCTUnwrap(WebVTTSegmentParser.parse(other)),
-                                              shiftSeconds: 0, nextID: &nextID)
+        let second = cues(try XCTUnwrap(WebVTTSegmentParser.parse(other)), segmentOffset: 2, nextID: &nextID)
         XCTAssertEqual(WebVTTSegmentParser.merged(into: first, adding: second, nextID: &nextID).count, 3)
     }
 
     /// Refetching the same segment (playlist poll before the window moved) must change nothing.
     func testResendingTheSameSegmentIsIdempotent() throws {
         var nextID = 0
-        let cues = WebVTTSegmentParser.cues(from: try XCTUnwrap(WebVTTSegmentParser.parse(seg133)),
-                                            shiftSeconds: 0, nextID: &nextID)
-        let again = WebVTTSegmentParser.cues(from: try XCTUnwrap(WebVTTSegmentParser.parse(seg133)),
-                                             shiftSeconds: 0, nextID: &nextID)
-        let merged = WebVTTSegmentParser.merged(into: cues, adding: again, nextID: &nextID)
-        XCTAssertEqual(merged.count, cues.count)
+        let batch = cues(try XCTUnwrap(WebVTTSegmentParser.parse(seg133)), segmentOffset: 0, nextID: &nextID)
+        let again = cues(try XCTUnwrap(WebVTTSegmentParser.parse(seg133)), segmentOffset: 0, nextID: &nextID)
+        let merged = WebVTTSegmentParser.merged(into: batch, adding: again, nextID: &nextID)
+        XCTAssertEqual(merged.count, batch.count)
     }
 }

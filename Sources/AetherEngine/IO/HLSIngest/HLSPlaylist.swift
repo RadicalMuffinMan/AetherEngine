@@ -47,12 +47,18 @@ struct HLSMediaSegment: Equatable {
     let duration: Double
     let discontinuityBefore: Bool
     let crypt: HLSSegmentCrypt?
+    /// Wall time this segment starts at, from EXT-X-PROGRAM-DATE-TIME plus the durations since the last
+    /// tag. Nil when the playlist carries none. This is the only reference two renditions of a program
+    /// reliably share (AE#359): their PTS bases can differ, their PDT and media sequence do not.
+    let programDateTime: Date?
 
-    init(uri: String, duration: Double, discontinuityBefore: Bool, crypt: HLSSegmentCrypt? = nil) {
+    init(uri: String, duration: Double, discontinuityBefore: Bool, crypt: HLSSegmentCrypt? = nil,
+         programDateTime: Date? = nil) {
         self.uri = uri
         self.duration = duration
         self.discontinuityBefore = discontinuityBefore
         self.crypt = crypt
+        self.programDateTime = programDateTime
     }
 }
 
@@ -163,6 +169,9 @@ enum HLSPlaylistParser {
         // AES-128 keys are "sticky": one EXT-X-KEY tag governs all following segments until the next tag. Pluto/Samsung-TV+ emit one tag per segment with the same URI and an incrementing explicit IV.
         var currentKeyURI: String?
         var currentExplicitIV: Data?
+        // EXT-X-PROGRAM-DATE-TIME is emitted periodically, not per segment; the segments after one
+        // inherit it plus the durations in between.
+        var pendingDateTime: Date?
 
         for line in lines {
             if line.hasPrefix("#EXT-X-TARGETDURATION:") {
@@ -193,6 +202,8 @@ enum HLSPlaylistParser {
                     currentKeyURI = nil
                     currentExplicitIV = nil
                 }
+            } else if line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
+                pendingDateTime = parseProgramDateTime(String(line.dropFirst("#EXT-X-PROGRAM-DATE-TIME:".count)))
             } else if line.hasPrefix("#EXT-X-MAP:") {
                 hasMap = true
             } else if line.hasPrefix("#EXT-X-ENDLIST") {
@@ -208,11 +219,15 @@ enum HLSPlaylistParser {
                 } else {
                     crypt = nil
                 }
+                let segmentDuration = pendingDuration ?? targetDuration ?? 0
+                let segmentDate = pendingDateTime
+                if let segmentDate { pendingDateTime = segmentDate.addingTimeInterval(segmentDuration) }
                 segments.append(HLSMediaSegment(
                     uri: line,
-                    duration: pendingDuration ?? targetDuration ?? 0,
+                    duration: segmentDuration,
                     discontinuityBefore: pendingDiscontinuity,
-                    crypt: crypt
+                    crypt: crypt,
+                    programDateTime: segmentDate
                 ))
                 pendingDuration = nil
                 pendingDiscontinuity = false
@@ -236,6 +251,18 @@ enum HLSPlaylistParser {
     }
 
     /// Parse a `0x`-prefixed hex EXT-X-KEY IV into 16-byte big-endian Data. Returns nil on malformed length (caller falls back to sequence-number IV).
+    /// ISO 8601 with fractional seconds is what every broadcaster emits; the plain form is accepted
+    /// because the spec allows it.
+    private static func parseProgramDateTime(_ raw: String) -> Date? {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: text) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: text)
+    }
+
     private static func parseHexIV(_ raw: String) -> Data? {
         var hex = raw.trimmingCharacters(in: .whitespaces)
         if hex.hasPrefix("0x") || hex.hasPrefix("0X") { hex = String(hex.dropFirst(2)) }

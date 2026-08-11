@@ -33,6 +33,11 @@ protocol LiveIngestSourceInfo: AnyObject, Sendable {
     /// flows, like `companionAudioReader`, so it is final once the load reads it.
     var subtitleRenditions: [LiveSubtitleRenditionInfo] { get }
 
+    /// EXT-X-PROGRAM-DATE-TIME of the segment this reader joined at, nil when the upstream carries no
+    /// PDT. Together with the engine's clock at session start this is the wall-to-player mapping a
+    /// sibling rendition needs (AE#359).
+    var joinWallClock: Date? { get }
+
     /// FFmpeg demuxer name for THIS reader ("mpegts" or "aac"). Blocks, bounded, until the first segment is classified. Classification happens before any FIFO byte; resolving consumes no stream data. Returns nil when the ingest went terminal or timed out.
     func resolveSegmentFormatHint() -> String?
 

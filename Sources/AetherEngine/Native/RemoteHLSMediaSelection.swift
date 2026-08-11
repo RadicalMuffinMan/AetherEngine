@@ -15,6 +15,11 @@ enum RemoteHLSMediaSelection {
     /// (embedded ids are AVStream indices, external ids start at 100_000).
     static let subtitleTrackIDBase = 200_000
 
+    /// Width of that space. The membership test used to be `id >= base`, which silently claimed every
+    /// id range added ABOVE it: the live subtitle renditions at 300_000 (AE#359) were routed here and
+    /// their selection never reached their own path. An id space needs both ends.
+    static let subtitleTrackIDRangeCount = 100_000
+
     /// Value snapshot of an `AVMediaSelectionOption` (not constructible in tests).
     struct LegibleOption: Sendable, Equatable {
         let displayName: String
@@ -110,6 +115,9 @@ enum RemoteHLSMediaSelection {
 
     /// Group-order ordinal backing a synthetic track id; nil for ids outside the remote-HLS range.
     static func ordinal(forTrackID id: Int) -> Int? {
-        id >= subtitleTrackIDBase ? id - subtitleTrackIDBase : nil
+        guard id >= subtitleTrackIDBase, id < subtitleTrackIDBase + subtitleTrackIDRangeCount else {
+            return nil
+        }
+        return id - subtitleTrackIDBase
     }
 }
