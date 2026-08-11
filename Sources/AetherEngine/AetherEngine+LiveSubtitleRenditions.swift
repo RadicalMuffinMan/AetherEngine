@@ -85,12 +85,23 @@ extension AetherEngine {
                            category: .engine)
             return
         }
-        let anchorEngineTime = playlistShiftSeconds
+        var anchorEngineTime = playlistShiftSeconds
         var seen: Set<String> = []
         var loggedFirstBatch = false
         let headers = loadedOptions.httpHeaders
         while !Task.isCancelled {
             guard activeSubtitleTrackIndex == trackID else { return }
+            // The source axis can be re-anchored under a running session (a producer seam republishes
+            // the shift). Everything already placed then refers to an axis that no longer exists, so
+            // the cues go with it rather than staying behind by the delta, which is the shape a viewer
+            // reads as subtitles drifting further out the longer a channel runs.
+            if abs(playlistShiftSeconds - anchorEngineTime) > 0.5 {
+                EngineLog.emit(String(format: "[LiveSubs] source axis moved %.3f -> %.3f, re-anchoring",
+                                      anchorEngineTime, playlistShiftSeconds), category: .engine)
+                anchorEngineTime = playlistShiftSeconds
+                subtitleCues = []
+                seen = []
+            }
             var pollInterval = 2.0
             do {
                 let text = try await Self.fetchText(rendition.playlistURL, headers: headers)
@@ -136,6 +147,15 @@ extension AetherEngine {
                     }
                     subtitleCues = pruned(WebVTTSegmentParser.merged(into: subtitleCues, adding: fresh,
                                                                      nextID: &liveSubtitleCueID))
+                }
+                // One line per poll, the whole alignment in numbers: how far ahead of the picture the
+                // newest cue sits. A viewer reporting "the subtitles lag" cannot tell a wrong anchor
+                // from a stalled fetch, and these two values separate them.
+                if let newest = subtitleCues.last {
+                    EngineLog.emit(String(format: "[LiveSubs] lead=%.1fs cues=%d newest=%.2f source=%.2f shift=%.2f",
+                                          newest.startTime - sourceTime, subtitleCues.count,
+                                          newest.startTime, sourceTime, playlistShiftSeconds),
+                                   category: .engine)
                 }
                 // A rolling window drops segment URIs eventually; the set must not grow with the session.
                 if seen.count > 512 { seen = Set(media.segments.map(\.uri)) }
