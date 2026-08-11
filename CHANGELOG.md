@@ -12,6 +12,37 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.20.2] - 2026-08-11
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.20.2))
+
+### Fixed
+
+- A background teardown hands its selection to the reload that follows it
+  (#357). Every reload path snapshots the state it restores (the #170 subtitle
+  carryover, the audio pick, the disc title) immediately before its own
+  `stopInternal`, which holds only while teardown and reload are the same call.
+  The paused-background teardown is not: it runs `stopInternal` when the app
+  sleeps, and `reloadAtCurrentPosition` runs on foreground return, so the
+  reload snapshotted a session that had already been wiped and restored
+  nothing. For subtitles that leaves the rebuilt session with no drain target,
+  so nothing is decoded, published, or logged, and the delivery, resolution and
+  per-cue instruments all fall silent at once on a session whose subtitle
+  stream is present in the reopened demuxer. Only an explicitly picked track
+  died, because `hostExplicitSubtitleAction` is the one piece of state the
+  teardown leaves standing and it suppresses the preferred-language
+  auto-selection that brought an auto-picked track back. Both teardown paths
+  now park a selection before `stopInternal` and the reload claims it once,
+  custom-source branch included (its disc title and audio pick went the same
+  way). The live read stays authoritative for what survives a teardown (the
+  external track registry, its ordinal counter, the host's subtitle authority)
+  and for a selection made after it, which is newer intent; the snapshot fills
+  only the wiped fields, and any other `load()` or `stop()` drops it. Hosts
+  need no change: a host that already calls `reloadAtCurrentPosition()` on
+  foreground return is covered. Device-verified on iOS, where a host-side cue
+  cache can mask the failure for as long as the 60 s drain lead, so a seek
+  beyond that window is what makes it visible.
+
 ## [6.20.1] - 2026-08-11
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.20.1))
