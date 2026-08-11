@@ -12,6 +12,44 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.21.0] - 2026-08-11
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.21.0))
+
+### Added
+
+- Live HLS subtitle renditions reach the host (#359). The live ingest modelled
+  variants, the audio group and its renditions, and dropped
+  `EXT-X-MEDIA:TYPE=SUBTITLES` on the floor, so a channel offering WebVTT
+  subtitles had no subtitle track at all: `subtitleTracks` stayed empty, and a
+  host's Teletext preference had no decoder to apply to, because a decoder is
+  only built once a track is selected. The group's renditions now surface as
+  `TrackInfo` entries under `liveSubtitleRenditionTrackIDBase` (300_000), and
+  selecting one starts a poll of that rendition's playlist. Nothing is fetched
+  before that: a channel watched without subtitles pays no second HTTP loop.
+- `aetherctl play --live-ingest` loads a URL through `HLSLiveIngestReader` as a
+  custom source, the shape a host uses for a live channel it ingests itself.
+  The live ingest had no CLI harness against a real channel, which is why the
+  gap above went unnoticed.
+
+### Fixed
+
+- Cues of a live subtitle rendition are placed by playlist geometry rather than
+  by `X-TIMESTAMP-MAP` (#359). Measured against a public broadcaster the spec's
+  own anchor does not carry: the rendition writes one constant map whose MPEGTS
+  value sits two hours off the video rendition's PTS. What renditions of a
+  program do share is identical `EXT-X-MEDIA-SEQUENCE` and identical
+  `EXT-X-PROGRAM-DATE-TIME`, so a cue is placed by its segment's wall time plus
+  its offset inside that segment, against the wall time the video ingest joined
+  at. A segment carrying no map is refused rather than placed at face value.
+- `RemoteHLSMediaSelection.ordinal` no longer claims track ids above its own
+  space. The membership test was `id >= base` with no upper bound, so every id
+  range added above it was routed into the AVMediaSelection path, where the
+  symptom is not an error but a selection that silently does nothing.
+- Media playlists carry `EXT-X-PROGRAM-DATE-TIME` through the parser, including
+  the segments that inherit it from an earlier tag, and a segment rebuilt to
+  mark a discontinuity keeps it.
+
 ## [6.20.2] - 2026-08-11
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.20.2))
