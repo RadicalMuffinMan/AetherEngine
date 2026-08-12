@@ -95,7 +95,7 @@ func printUsage() {
       aetherctl audio [--seconds N] <url>
       aetherctl audiotap [--duration S] [--out PATH.wav] [--remote] <url>
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats)
-      aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
+      aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] [--audio-index N] <file>
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--gen-highbitrate-seed]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
       aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
@@ -560,6 +560,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let snapshotMode = takeFlag("--snapshot", from: &rest)
     let inMemory = takeFlag("--memory", from: &rest)
     let forwardOnly = takeFlag("--forward-only", from: &rest)
+    let customAudioIndex = takeIntFlag("--audio-index", from: &rest).map(Int32.init)
     let audioOnlyFlag = takeFlag("--audio-only", from: &rest)
     let reloadFlag = takeFlag("--reload", from: &rest)
     let switchAudioFlag = takeFlag("--switch-audio", from: &rest)
@@ -606,7 +607,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     case "audio":
         exit(runAudio(url: url, seconds: audioSeconds))
     case "customio":
-        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag))
+        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag, audioIndex: customAudioIndex))
     default:
         printUsage()
         exit(64)
