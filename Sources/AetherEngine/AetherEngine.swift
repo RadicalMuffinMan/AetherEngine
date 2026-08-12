@@ -1301,6 +1301,12 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputeVideoRoute() }
     }
 
+    /// #364: the one narrow write into `loadedOptions` outside a load, so a mid-session teletext page
+    /// change survives the internal reopens that replay these options (audio switch, background
+    /// reload). Without it the page would silently revert to the load-time value on the next reopen,
+    /// which is the same defect `matchContentEnabled` had before the replay existed.
+    func setLoadedTeletextPage(_ page: Int?) { loadedOptions.teletextPage = page }
+
     #if DEBUG
     /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
     func setLoadedOptionsForTesting(_ options: LoadOptions) { loadedOptions = options }

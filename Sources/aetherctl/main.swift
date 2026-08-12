@@ -72,6 +72,7 @@ func printUsage() {
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>]
                  [--start-position S] [--switch-audio <index>[@ms]]
+                 [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--sequential-origin] [--declared-duration S]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback] <url>
                      (full load+play session smoke test; --subs activates the first
@@ -80,6 +81,9 @@ func printUsage() {
                       plus PTS-continuity gaps; seekback rewinds 20 s at t=15 and
                       returns to the live edge at t=30; --switch-audio replays a host
                       applying a language preference just after play, default +20 ms;
+                      --teletext-page fixes the caption page at load, while
+                      --switch-teletext-page changes it on the playing channel
+                      (default +20 s, i.e. after --subs has a track showing);
                       --sequential-origin declares a fake-range origin (one unranged
                       GET, no ranged probes) and needs --declared-duration on VOD
                       since the tail estimate is skipped)
@@ -510,6 +514,24 @@ if first == "play" {
         return AudioSwitchRequest(index: index,
                                   delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20) : 20)
     }
+    let teletextPage = takeIntFlag("--teletext-page", from: &rest)
+    // #364: `<page|auto>[@ms]`. The default delay is 20 s, not the audio switch's 20 ms: this one has
+    // to land on a channel that is already showing a teletext track, else the run proves nothing the
+    // load option did not already prove.
+    let teletextSwitch: TeletextPageSwitchRequest? = takeStringFlag("--switch-teletext-page", from: &rest).flatMap { spec in
+        let parts = spec.split(separator: "@", maxSplits: 1).map(String.init)
+        let page: Int?
+        if parts[0].lowercased() == "auto" {
+            page = nil
+        } else if let parsed = Int(parts[0]) {
+            page = parsed
+        } else {
+            print("ERROR: --switch-teletext-page takes <page|auto>[@ms], got '\(spec)'")
+            exit(64)
+        }
+        return TeletextPageSwitchRequest(page: page,
+                                        delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000)
+    }
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -524,6 +546,7 @@ if first == "play" {
     exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
                  audioSwitch: audioSwitch,
+                 teletextPage: teletextPage, teletextSwitch: teletextSwitch,
                  sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration))
 }
 
