@@ -12,6 +12,27 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.21.1] - 2026-08-12
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.21.1))
+
+### Fixed
+
+- A live subtitle rendition re-anchors when the source axis moves under it
+  (#359). The placement pairs a segment's wall time with the session's shift,
+  and a producer seam republishes that shift, which left every cue already
+  placed referring to an axis that no longer existed. Unfixed this reads as
+  subtitles drifting further out the longer a channel runs, and it never
+  appears in a short session, which is exactly the shape that survives a
+  test.
+
+### Added
+
+- `[LiveSubs]` states its anchor once and its running relation about every
+  30 s: the lead of the newest cue over the picture, the cue count and the
+  current shift. A viewer reporting late subtitles cannot tell a misplaced
+  anchor from a stalled fetch, and those two numbers separate them.
+
 ## [6.21.0] - 2026-08-11
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.21.0))
