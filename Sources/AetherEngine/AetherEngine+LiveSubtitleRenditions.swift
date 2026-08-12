@@ -87,7 +87,13 @@ extension AetherEngine {
         }
         var anchorEngineTime = playlistShiftSeconds
         var seen: Set<String> = []
+        // The first batch is worth one line of its own: it is the only place an anchor that landed
+        // in the wrong hour is visible before any cue is due. The state line below then repeats the
+        // same relation periodically.
         var loggedFirstBatch = false
+        // The state line is worth having but not every two seconds: LogTap is a ring buffer, and a
+        // line that repeats 30 times a minute pushes out everything a reader came for.
+        var pollsSinceStateLine = 0
         let headers = loadedOptions.httpHeaders
         while !Task.isCancelled {
             guard activeSubtitleTrackIndex == trackID else { return }
@@ -135,23 +141,22 @@ extension AetherEngine {
                                                          anchorWall: anchorWall,
                                                          anchorEngineTime: anchorEngineTime,
                                                          nextID: &liveSubtitleCueID)
-                    if !loggedFirstBatch, let first = fresh.first {
-                        loggedFirstBatch = true
-                        // One line, once per selection: enough to tell a misplaced anchor from an empty
-                        // rendition. Without it both end as an empty overlay and look identical.
-                        EngineLog.emit(String(
-                            format: "[LiveSubs] first mapped cue start=%.3f end=%.3f "
-                            + "(segmentWall=%@ anchorWall=%@ anchorEngineTime=%.3f playhead=%.3f)",
-                            first.startTime, first.endTime, "\(wallStart)", "\(anchorWall)",
-                            anchorEngineTime, clock.currentTime), category: .engine)
-                    }
                     subtitleCues = pruned(WebVTTSegmentParser.merged(into: subtitleCues, adding: fresh,
                                                                      nextID: &liveSubtitleCueID))
                 }
                 // One line per poll, the whole alignment in numbers: how far ahead of the picture the
                 // newest cue sits. A viewer reporting "the subtitles lag" cannot tell a wrong anchor
                 // from a stalled fetch, and these two values separate them.
-                if let newest = subtitleCues.last {
+                if !loggedFirstBatch, let first = subtitleCues.last {
+                    loggedFirstBatch = true
+                    EngineLog.emit(String(format: "[LiveSubs] anchored at wall %@ = source %.2f, first cue %.2f",
+                                          "\(anchorWall)", anchorEngineTime, first.startTime),
+                                   category: .engine)
+                }
+                pollsSinceStateLine += 1
+                if let newest = subtitleCues.last,
+                   pollsSinceStateLine >= max(1, Int((30 / pollInterval).rounded())) {
+                    pollsSinceStateLine = 0
                     EngineLog.emit(String(format: "[LiveSubs] lead=%.1fs cues=%d newest=%.2f source=%.2f shift=%.2f",
                                           newest.startTime - sourceTime, subtitleCues.count,
                                           newest.startTime, sourceTime, playlistShiftSeconds),
