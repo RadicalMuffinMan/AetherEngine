@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- `setTeletextPage(_:)` changes the teletext caption page while a channel
+  plays (#364). The page used to reach `EmbeddedSubtitleDecoder` only at
+  construction, so it was fixed for the life of a selection and a channel
+  whose caption page libzvbi does not flag as a subtitle page could only be
+  corrected by leaving it, changing a setting and coming back. It now travels
+  with the decoder rebuild the drain path already performs, and only the
+  channels actually showing a teletext track are re-decoded. `teletextPage`
+  reads the page in force; the value lands in the session's load options, so
+  the internal reopens (audio switch, background reload) replay it.
+- `aetherctl play --teletext-page N` fixes the page at load and
+  `--switch-teletext-page <page|auto>[@ms]` changes it on the playing channel,
+  which is what makes the runtime path measurable from the CLI at all.
 
 ## [6.21.1] - 2026-08-12
 

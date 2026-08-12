@@ -293,6 +293,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
     }
 
+    /// #364: re-seed the tap decoders after a session decode option changed under them (the teletext
+    /// page). Same rebuild `attachNativeSubtitleStores` performs, minus the store swap, so the routes
+    /// keep their cue stores and only the decoders are new. Cues already harvested keep the page they
+    /// were decoded with: they are in the rendition the host is serving and are not ours to rewrite.
+    func refreshSubtitleTapDecoders() {
+        restartLock.lock()
+        let hasRoutes = !nativeSubtitleSourceStreamIndicesForSession.isEmpty
+        let prod = producer
+        restartLock.unlock()
+        guard hasRoutes else { return }
+        rebuildSubtitleTapRoutes()
+        armSubtitleTap(on: prod)
+    }
+
     /// Wire the tap onto a producer (initial + every restart).
     private func armSubtitleTap(on prod: HLSSegmentProducer?) {
         guard let prod else { return }

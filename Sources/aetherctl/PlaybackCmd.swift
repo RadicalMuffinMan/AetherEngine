@@ -14,6 +14,14 @@ struct AudioSwitchRequest {
     let delayMilliseconds: Int
 }
 
+/// A host changing the teletext caption page on a channel that is already playing (#364). nil page
+/// means back to libzvbi auto-detect. The delay is what makes the run a test of the runtime path
+/// rather than of the load option: it has to land after a teletext track is selected and showing.
+struct TeletextPageSwitchRequest {
+    let page: Int?
+    let delayMilliseconds: Int
+}
+
 /// Full playback-session smoke test: load a URL exactly like a host app (VOD by
 /// default, `--live` for the live path), autoplay, print 1 Hz transport telemetry,
 /// and optionally activate an embedded subtitle track (`--subs <codec-or-lang>`)
@@ -22,6 +30,7 @@ struct AudioSwitchRequest {
 func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
                     censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false,
                     sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil,
+                    teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil,
                     sequentialOrigin: Bool = false, declaredDuration: Double? = nil) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
@@ -40,7 +49,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition, frameTimes: frameTimes, sidecars: sidecars, audioSwitch: audioSwitch, sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition, frameTimes: frameTimes, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -218,7 +227,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, frameTimes: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, sequentialOrigin: Bool = false, declaredDuration: Double? = nil) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, frameTimes: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, sequentialOrigin: Bool = false, declaredDuration: Double? = nil) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -275,7 +284,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         nativeRemoteHLS: nativeHLS,
         sequentialOrigin: sequentialOrigin,
         declaredDurationSeconds: declaredDuration,
-        externalSubtitles: sidecars
+        externalSubtitles: sidecars,
+        teletextPage: teletextPage
     )
     // #311: installed BEFORE the load on purpose. The engine holds it and arms the host it builds,
     // which is the documented usage and the part a host would otherwise have to re-do per load.
@@ -354,6 +364,20 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
             // A finished stream and a stream that stopped yielding look identical from the
             // buffer counter, and they are different defects (#356).
             print("  AUDIOTAP stream finished (buffers=\(mon.bufferCount))")
+        }
+    }
+
+    // #364: the host changing the caption page on a channel that is already playing. Same detached
+    // shape as the audio switch below, for the same reason: the delay has to be elapsed time next to
+    // a running session, and here it also has to outlast the subtitle selection, or the run measures
+    // the load option it was already able to measure before.
+    if let teletextSwitch {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, teletextSwitch.delayMilliseconds)) * 1_000_000)
+            let target = teletextSwitch.page.map(String.init) ?? "auto"
+            print("  HOSTCALL setTeletextPage(\(target)) at +\(teletextSwitch.delayMilliseconds) ms "
+                  + "(was \(engine.teletextPage.map(String.init) ?? "auto"))")
+            engine.setTeletextPage(teletextSwitch.page)
         }
     }
 
