@@ -595,6 +595,16 @@ public final class AetherEngine: ObservableObject {
     /// an audio-only session, which has a picture nowhere.
     var sessionPublishesVideoDisplaySignal = false
 
+    /// #361: how far the current startup has come, for a host driving a determinate loading bar.
+    /// nil while no startup is running (before the first load, and after `stop()`).
+    ///
+    /// Every value is a checkpoint some piece of the load actually finished, so the number is honest
+    /// in the only sense that matters to a bar: it never runs on a timer, and it never advances on
+    /// an estimate. A startup that errors or is stopped simply never reaches the last checkpoint;
+    /// nothing fakes an ending. Steady republishes are deduped, so a Combine sink on this fires once
+    /// per real step. See `StartupProgress`.
+    @Published public internal(set) var startupProgress: StartupProgress?
+
     /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
     var pendingPreReadySeekSeconds: Double?
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
@@ -1243,6 +1253,62 @@ public final class AetherEngine: ObservableObject {
     /// after a newer load, orphan the successor's producer+loopback server, and resurrect playback after
     /// dismissal. A superseded load throws CancellationError at the first checkpoint.
     var loadGeneration: UInt64 = 0
+
+    /// #361: generation of the startup the user is currently waiting through. Deliberately NOT
+    /// `loadGeneration`, which counts teardowns: an engine-initiated reroute (an HLS playlist found
+    /// on the loopback path, a carriage case rerouted onto ingest) tears down and calls `load()`
+    /// again underneath one uninterrupted wait, and counting that as a new startup would drop a
+    /// host's bar back to zero halfway through a load nobody restarted.
+    private(set) var startupGeneration: UInt64 = 0
+
+    /// Set immediately before an engine-initiated reroute re-enters `load()`, consumed by that
+    /// load's prologue. The one thing that distinguishes a reroute from a fresh request, since by
+    /// the time `load()` runs they look identical.
+    private var startupContinuesAcrossReroute = false
+
+    /// Open a startup sequence for the load now beginning, and return its generation for the call
+    /// sites that have to record checkpoints from detached work. A reroute continues the sequence
+    /// already in flight instead of opening a new one.
+    func beginStartupProgress() -> UInt64 {
+        if startupContinuesAcrossReroute {
+            startupContinuesAcrossReroute = false
+            return startupGeneration
+        }
+        startupGeneration &+= 1
+        startupProgress = StartupProgress(generation: startupGeneration, checkpoint: .dispatched)
+        EngineLog.emit(
+            "[AetherEngine] #361 startup 0/\(StartupCheckpoint.total) dispatched "
+            + "(gen \(startupGeneration))",
+            category: .engine
+        )
+        return startupGeneration
+    }
+
+    /// Mark the next `load()` as the continuation of the startup already running (see
+    /// `startupContinuesAcrossReroute`).
+    func continueStartupAcrossReroute() {
+        startupContinuesAcrossReroute = true
+    }
+
+    /// Record a checkpoint against a startup generation. `generation` defaults to the running one,
+    /// which is what every main-actor call site wants; detached work and Combine sinks that can
+    /// outlive their load pass the generation they captured, so a straggler cannot write into a
+    /// successor's sequence. Ordering, dedupe and supersession all live in `StartupProgress`.
+    func recordStartupCheckpoint(_ checkpoint: StartupCheckpoint, generation: UInt64? = nil) {
+        guard let next = StartupProgress.advanced(
+            from: startupProgress,
+            to: checkpoint,
+            generation: generation ?? startupGeneration
+        ) else { return }
+        startupProgress = next
+        // One line per real step (the guard above has already dropped repeats), so the ladder can be
+        // read off a device trace or an aetherctl run without a host to render it.
+        EngineLog.emit(
+            "[AetherEngine] #361 startup \(next.completed)/\(next.total) "
+            + "\(next.checkpoint) (gen \(next.generation))",
+            category: .engine
+        )
+    }
 
     /// Throws CancellationError when the captured generation is stale. Callers must clean up local resources
     /// before calling; shared state belongs to the successor.
@@ -2509,6 +2575,9 @@ public final class AetherEngine: ObservableObject {
         )
         var remuxOptions = options
         remuxOptions.nativeRemoteHLS = false
+        // #361: the user asked for one thing and is still waiting for it; this reroute is the engine
+        // changing its mind about how to serve it, not a second startup.
+        continueStartupAcrossReroute()
         return .taken(try await load(
             source: .custom(reader, formatHint: "mpegts"),
             startPosition: startPosition,
@@ -2580,6 +2649,9 @@ public final class AetherEngine: ObservableObject {
         DiscReader.clearCache()
         // Capture generation; every suspension point re-checks for supersession.
         let gen = loadGeneration
+        // #361: open the host-visible startup sequence. A reroute re-entering load() continues the
+        // one already running rather than starting a second.
+        let startupGen = beginStartupProgress()
         // For custom sources this is a synthetic placeholder; all I/O runs against the preopened probe demuxer.
         let url: URL
         switch source {
@@ -2681,6 +2753,9 @@ public final class AetherEngine: ObservableObject {
             // #316: this bypass returns before the probe path's registration, so a host that declared
             // sidecars at load time used to get nothing at all, silently. Seat them here instead.
             registerDeclaredExternalSubtitles(options)
+            // #361: the bypass demuxes nothing and runs no panel handshake of its own, so those
+            // checkpoints are credited here rather than left for a probe that never runs.
+            recordStartupCheckpoint(.routed, generation: startupGen)
             do {
                 // AE#246: a VOD playlist honors the resume anchor here the same way the AE#154 reroute
                 // does; without it a rerouted (or directly requested) VOD bypass always restarted at 0.
@@ -2720,6 +2795,14 @@ public final class AetherEngine: ObservableObject {
         // Identity-guarded: a superseding load() has already registered its own probe; unconditioned nil here
         // would strip the successor's abort handle.
         defer { if inFlightProbeDemuxer === probe { inFlightProbeDemuxer = nil } }
+        // #361: the open runs detached and is the longest unobservable stretch of a slow load. Its
+        // stages hop back onto the actor carrying the generation they started under, so an open that
+        // is still unwinding when a newer load has taken over cannot move that load's bar.
+        probe.onOpenProgress = { [weak self] stage in
+            Task { @MainActor in
+                self?.recordStartupCheckpoint(StartupCheckpoint(openStage: stage), generation: startupGen)
+            }
+        }
         var probeOpened = false
         var probeFailure: Error?
         do {
@@ -2818,6 +2901,7 @@ public final class AetherEngine: ObservableObject {
             loadedOptions.nativeRemoteHLS = true
             // #316: the reroute returns before the registration below, same as the direct bypass.
             registerDeclaredExternalSubtitles(loadedOptions)
+            recordStartupCheckpoint(.routed, generation: startupGen)   // #361
             do {
                 try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition)
             } catch is CancellationError {
@@ -2897,6 +2981,9 @@ public final class AetherEngine: ObservableObject {
         //     (required for custom sources).
         let hasVideoStream = probeOpened && probe.videoStreamIndex >= 0
         if Self.shouldUseAudioOnlyPath(audioOnlyRequested: options.audioOnly, probeOpened: probeOpened, hasVideoStream: hasVideoStream) {
+            // #361: this path is decided before the panel handshake and never runs one, so the route
+            // checkpoint credits both.
+            recordStartupCheckpoint(.routed, generation: startupGen)
             // The load seam preserves display criteria (#128 follow-up); an audio-only session never calls
             // apply(), so clear a criteria the previous video session left applied. The engine is a
             // process-wide singleton; without this, music playback keeps the panel in DV/HDR.
@@ -3054,6 +3141,10 @@ public final class AetherEngine: ObservableObject {
             ? effectiveFormat
             : .sdr
         #endif
+        // #361: the handshake above is the second stretch a host cannot see, and on a real SDR->HDR
+        // switch it is seconds long. Recorded on every branch, including the ones with nothing to
+        // wait for, so a suppressed-criteria host advances here too.
+        recordStartupCheckpoint(.displayPrepared, generation: startupGen)
 
         // 3. Dispatch by codec.
         //    Native: HEVC/H.264 (unconditional) and AV1 on platforms with HW decode (iOS 17+/macOS 14+).
@@ -3201,6 +3292,10 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AetherEngine] TEST override: forcing software path", category: .engine)
         }
         EngineLog.emit("[AetherEngine] dispatch: codec=\(detectedCodecID.rawValue) → \(useSoftwarePath ? "software" : "native")", category: .engine)
+        // #361: routing is settled here and not at the first `useSoftwarePath` assignment; the
+        // interlace refute probe and the VideoToolbox capability probe above can both overturn it,
+        // and the refute probe decodes a real sample, which is work worth showing.
+        recordStartupCheckpoint(.routed, generation: startupGen)
 
         // #176 follow-up: IPT-only DV (HEVC P5, AV1 P10.0) must never start on the software path; the
         // decoded IPT-PQ-c2 signal renders as YCbCr (green/purple cast). AV1 P10.0 without HW AV1 decode
@@ -3398,6 +3493,7 @@ public final class AetherEngine: ObservableObject {
                 )
                 var rerouted = loadedOptions
                 rerouted.nativeRemoteHLS = true
+                continueStartupAcrossReroute()   // #361, same wait, different route
                 _ = try await load(source: .url(hlsURL), startPosition: startPosition, options: rerouted)
                 return nil
             }
@@ -4158,6 +4254,11 @@ public final class AetherEngine: ObservableObject {
         stopInternal(resetDisplayCriteria: resetDisplayCriteria,
                      finalTeardown: finalTeardown ?? resetDisplayCriteria)
         state = .idle
+        // #361: the sequence ends here without ever reaching its last checkpoint, which is the whole
+        // point: nothing about a stop should read as a finished startup. Cleared in stop() and not in
+        // stopInternal, because every load() runs stopInternal and a reroute's teardown must leave the
+        // startup it is still serving alone.
+        startupProgress = nil
         clock.currentTime = 0
         clock.bufferedPosition = 0
         clock.progress = 0
