@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A timestamp leap that escapes the timeline rebase no longer turns a VOD session into a
+  long-lived zombie (#369). Three containment gaps, one field trace: the look-behind sample
+  duration is now capped at the discontinuity threshold instead of handing movenc the wrap
+  itself as a duration (device: 8226410192 ticks, rejected as invalid, packet silently lost —
+  the write rc is now logged on first failure too); discontinuity-scale fold runs now reach
+  the fold counters instead of being discarded above 64 indices, so the #358 recovery arms
+  actually arm for exactly the folds most certain to trigger them; and the advance-path
+  backpressure park skips a release target beyond the sequential playlist's advertisable
+  frontier, which only this pump's own finalize reports can move — parking on it was waiting
+  for oneself. Deliberately unchanged: `OutputTimestampSanitizer` keeps latching, because
+  movenc latches monotonicity on its own once a wrapped packet is accepted, and a sanitizer
+  reset would only convert garbage timestamps into rejected writes.
 
 ## [6.25.1] - 2026-08-13
 
