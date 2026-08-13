@@ -114,6 +114,40 @@ struct SequentialAppendPlaylistTests {
                 "a source running past its declared window must not outgrow the asset")
     }
 
+    // MARK: - Startup gate (#370)
+
+    @Test("one finalized segment releases the startup gate")
+    func startupGateReleasesOnFirstSegment() {
+        // A published duration needs the NEXT segment's ledger open, so the old 2-segment demand
+        // was really 3 segment opens (~12-18 s of media) through a possibly-stalling origin.
+        let provider = makeProvider()
+        provider.appendSequentialSegmentDuration(index: 0, durationSeconds: 6.0)
+        #expect(provider.waitForSequentialStartupSegments(timeout: 0.2))
+    }
+
+    @Test("an empty session times out instead of blocking past its deadline")
+    func startupGateTimesOutEmpty() {
+        let provider = makeProvider()
+        #expect(!provider.waitForSequentialStartupSegments(timeout: 0.05))
+    }
+
+    @Test("EOF with zero segments still releases the gate")
+    func startupGateReleasesOnEnded() {
+        let provider = makeProvider()
+        provider.markSequentialEnded()
+        #expect(provider.waitForSequentialStartupSegments(timeout: 0.2))
+    }
+
+    @Test("a dead pump releases a held startup GET immediately")
+    func startupGateAborts() {
+        let provider = makeProvider()
+        provider.abortSequentialStartupWait()
+        let start = Date()
+        #expect(!provider.waitForSequentialStartupSegments(timeout: 5.0))
+        #expect(Date().timeIntervalSince(start) < 1.0,
+                "the abort must release the wait, not let it sit out the timeout")
+    }
+
     // MARK: - Blast radius
 
     /// Live playlists must render exactly as before. Their segment URIs carry the media sequence

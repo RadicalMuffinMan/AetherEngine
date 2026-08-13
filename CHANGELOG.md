@@ -10,7 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A sequential-origin session now serves its EVENT playlist from the first finalized
+  segment and no longer spends the origin's prefix on the keyframe-spacing scan (#370).
+  The startup gate reused a live sliding-window constant and demanded 2 published
+  durations — which, because a duration is only final when the NEXT segment's ledger
+  opens, meant 3 segment opens (~12-18 s of media) before AVPlayer's held playlist GET
+  was answered; on a stalling origin the GET sat out the full 30 s and the asset load
+  died on -12884 with ~12 s of media already on disk. A one-segment EVENT playlist is
+  legal HLS and the refresh counter already defeats the -12888 patience the live
+  constant guards against. The spacing scan's seek is a silent no-op on the
+  non-seekable sequential pb, so it consumed up to 30 s of the single byte-0-only
+  connection without the pump ever seeing those packets; sequential plans now go
+  straight to the target stride (the #358 holes the scan softens don't bite the append
+  playlist, whose zero-duration holes get no URI). A pump that dies before publishing
+  anything now also releases a held startup GET immediately instead of letting it sit
+  out the rest of its timeout.
 
 ## [6.25.1] - 2026-08-13
 

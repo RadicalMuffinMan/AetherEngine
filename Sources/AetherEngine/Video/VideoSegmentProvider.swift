@@ -281,6 +281,19 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private var _seqDurations: [Double] = []
     /// Producer reached true source EOF: the next playlist build appends ENDLIST. Guarded by stateLock.
     private var _seqEnded = false
+    /// #370: the pump died before publishing anything; a held startup-playlist GET must not sit out
+    /// the rest of its timeout for a session that is already failing. Guarded by stateLock.
+    private var _seqStartupAborted = false
+
+    /// #370: never hold the first media playlist for more than ONE published duration. The live
+    /// constant this gate reused (`LiveEdgePolicy.minStartupSegments = 2`) guards a SLIDING window
+    /// whose live-edge holdback can't fit one segment; an EVENT playlist starts at media sequence 0,
+    /// grows append-only, and its refresh counter already defeats AVPlayer's unchanged-playlist
+    /// patience (-12888). The cost of demanding 2 was concrete: a published duration needs the NEXT
+    /// segment's ledger open, so "2 durations" = 3 segment opens ≈ 12-18 s of media through a
+    /// possibly-stalling origin — the field session held AVPlayer's playlist GET for the full 30 s
+    /// and the asset load timed out (-12884) with ~12 s of media already on disk.
+    static let sequentialStartupSegments = 1
 
     init(
         cache: SegmentCache,
@@ -421,7 +434,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         firstSegmentCondition.unlock()
     }
 
-    /// Hold the first media playlist until the startup segments exist (mirrors the live gate:
+    /// Hold the first media playlist until the startup segment exists (mirrors the live gate:
     /// an empty playlist is a broken asset to AVPlayer, which never re-polls it). A fast
     /// archive origin cuts the first segments within a second.
     func waitForSequentialStartupSegments(timeout: TimeInterval) -> Bool {
@@ -430,11 +443,25 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         defer { firstSegmentCondition.unlock() }
         while true {
             stateLock.lock()
-            let ready = _seqDurations.count >= LiveEdgePolicy.minStartupSegments || _seqEnded
+            let ready = _seqDurations.count >= Self.sequentialStartupSegments || _seqEnded
+            let aborted = _seqStartupAborted
             stateLock.unlock()
             if ready { return true }
+            if aborted { return false }
             if !firstSegmentCondition.wait(until: deadline) { return false }
         }
+    }
+
+    /// #370: release a held startup-playlist GET when the pump dies before publishing anything.
+    /// The session is failing anyway; holding the server thread for the rest of the timeout only
+    /// delays the host's failure surface.
+    func abortSequentialStartupWait() {
+        stateLock.lock()
+        _seqStartupAborted = true
+        stateLock.unlock()
+        firstSegmentCondition.lock()
+        firstSegmentCondition.broadcast()
+        firstSegmentCondition.unlock()
     }
 
     /// Called on each playlist build. For live: advances firstVisible to max(0, highWater - window),

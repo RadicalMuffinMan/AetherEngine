@@ -223,6 +223,9 @@ extension HLSVideoEngine {
                     + "revive cannot resume at an offset, surfacing source failure",
                     category: .session
                 )
+                // #370: a startup-playlist GET may still be held on the server thread; the session
+                // is failing, so release it instead of sitting out the rest of its timeout.
+                provider?.abortSequentialStartupWait()
                 onVODSourceFailed?(code, "Source read failed")
             } else if Self.shouldReviveVODAfterReadError(
                 isLive: isLiveSession,
@@ -273,6 +276,7 @@ extension HLSVideoEngine {
                 + "(0 packets written, 0 segments cached); surfacing fatal source failure",
                 category: .session
             )
+            provider?.abortSequentialStartupWait()   // #370: release a held startup-playlist GET
             onVODSourceFailed?(FFmpegErr.eio, "Source produced no playable media")
             return
         }
