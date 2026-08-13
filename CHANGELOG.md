@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.23.0] - 2026-08-13
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.23.0))
+
 ### Added
 
 - `startupProgress` publishes how far a load has come, for hosts drawing a
