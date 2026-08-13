@@ -2022,6 +2022,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             segmentBoundaries: segmentBoundaries,
             planAnchorVideoPts: firstKeyframePts,
             isLive: isLiveSession,
+            // #368: a forward-only chunked archive folds its chunk-seam PTS resets (incl. the
+            // libavformat 33-bit wrap correction) the way live folds program boundaries; without
+            // it the leap walks the cutter to the plan tail and the session deadlocks.
+            foldsSequentialTimeline: sequentialOriginPinsProducerToZero,
             packedSideAudioStartPts: packedSideAudioStartPts,
             packedSideAudioFallbackDurationPts: packedSideAudioFallbackDurationPts,
             bufferAheadSegments: forwardWindowSegments,
@@ -2117,6 +2121,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Live program-boundary rebase. Unlike `handleVideoShiftKnown`, does NOT fire `onPlaylistShiftChanged`:
     /// AVPlayer renders at ~buffer+holdback behind the producer edge, so the host must keep the OLD shift
     /// until playback crosses `seamOutputSeconds`. Internal `playlistShiftSeconds` tracks the edge immediately.
+    /// #368: sequential chunk-seam rebases arrive here too, deliberately — same deferred-shift contract.
     func handleLiveTimelineRebase(_ shiftPts: Int64, seamOutputSeconds: Double) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         setPlaylistShiftSeconds(seconds)
