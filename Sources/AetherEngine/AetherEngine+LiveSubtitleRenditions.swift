@@ -72,10 +72,11 @@ extension AetherEngine {
 
     /// Poll the rendition playlist and turn its new segments into cues.
     ///
-    /// The first pass takes everything the playlist currently lists, which is roughly the window the
-    /// DVR holds, so enabling subtitles and then jumping back does not land in a hole. Afterwards only
-    /// unseen segment URIs are fetched, which is also what makes a poll that arrives before the window
-    /// moved cost one small request and nothing else.
+    /// The first pass starts 120 s behind the playhead, not at the head of the playlist: a rendition
+    /// playlist can list a whole DVR window (3600 entries at MDR), and walking it from the front means
+    /// thousands of fetches for content that gets pruned on arrival. The backfill covers a viewer who
+    /// turns subtitles on and then jumps back a little. Afterwards only unseen segment URIs are
+    /// fetched, which is what makes a poll arriving before the window moved cost one small request.
     private func runLiveSubtitleFetchLoop(rendition: LiveSubtitleRenditionInfo, trackID: Int) async {
         // The wall time the engine's own timeline starts at. Without it a cue cannot be placed against
         // the picture at all, and guessing would put subtitles minutes away from the dialogue, so the
