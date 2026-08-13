@@ -2017,19 +2017,29 @@ extension AetherEngine {
     /// exactly this deselect, cleared the subtitle). So `select(nil)` is asserted UNCONDITIONALLY the moment
     /// the group loads (a manual deselect registered before AVKit's ready-time pass keeps it from engaging),
     /// then re-asserted on a tight 40 ms cadence for the first second, where the old 250 ms cadence let
-    /// auto-selected cues flash for up to ~0.5 s at start (iOS device), and relaxes to 250 ms afterwards.
+    /// auto-selected cues flash for up to ~0.5 s at start (iOS device).
     /// Bails the instant the host requests a native track (`setNativeSubtitleRendering` / PiP, AirPlay, or
     /// external-display entry sets `nativeSubtitleReapplyOrdinal`), which owns selection from then on. A no-op
     /// when native subtitles are not prepared (no legible group, e.g. tvOS overlay-only).
+    ///
+    /// Sodalite#65: the load-time burst is not enough, because the system also selects the rendition
+    /// LATER. iOS 26's automatic captions (Settings > Accessibility > Subtitles & Captioning: "show when
+    /// muted", "show when skipping back", "show when languages differ") turn captions on minutes into a
+    /// session, and once the burst had run out nothing held them back: AVKit rendered the rendition the
+    /// host keeps around for PiP and AirPlay only, as an empty grey caption box over the frame (the text
+    /// itself stayed invisible under the host's transparent style rules). So the burst hands over to a
+    /// media-selection observer that stays armed for the item's whole life and deselects again on every
+    /// foreign selection, bounded only against a selection fight it cannot win.
     func forceNativeLegibleDeselectedUntilHostSelects() {
+        cancelNativeLegibleDeselectPin()
         guard nativeSubtitleReapplyOrdinal == nil, let item = currentAVPlayer?.currentItem else { return }
         currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
-        Task { @MainActor [weak self] in
+        nativeLegibleDeselectPinTask = Task { @MainActor [weak self] in
             guard let self,
                   let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
                   !group.options.isEmpty else { return }
             var attempts = 0
-            while attempts < 29,
+            while attempts < 25,
                   self.nativeSubtitleReapplyOrdinal == nil,
                   self.currentAVPlayer?.currentItem === item {
                 if attempts == 0 || item.currentMediaSelection.selectedMediaOption(in: group) != nil {
@@ -2037,9 +2047,68 @@ extension AetherEngine {
                     EngineLog.emit("[AetherEngine] Sodalite#38 native legible force-deselected (attempt \(attempts))", category: .engine)
                 }
                 attempts += 1
-                try? await Task.sleep(nanoseconds: attempts < 25 ? 40_000_000 : 250_000_000)
+                try? await Task.sleep(nanoseconds: 40_000_000)
+            }
+            guard self.nativeSubtitleReapplyOrdinal == nil,
+                  self.currentAVPlayer?.currentItem === item else { return }
+            self.armNativeLegibleReselectionObserver(item: item, group: group)
+        }
+    }
+
+    /// Sodalite#65: hold the deselect for the rest of the session. `mediaSelectionDidChangeNotification`
+    /// fires for the system's automatic captions as well as for the engine's own selects, so the handler
+    /// only acts on a selection that is present while the host has not asked for a native track; the
+    /// engine's own `select(nil)` reads back as nil and re-enters nothing.
+    private func armNativeLegibleReselectionObserver(item: AVPlayerItem, group: AVMediaSelectionGroup) {
+        nativeLegibleDeselectPinItem = item
+        nativeLegibleDeselectPinGroup = group
+        nativeLegibleDeselectPinObserver = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.mediaSelectionDidChangeNotification,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
+            MainActor.assumeIsolated {
+                guard let self,
+                      let pinned = self.nativeLegibleDeselectPinItem,
+                      let group = self.nativeLegibleDeselectPinGroup,
+                      pinned === self.currentAVPlayer?.currentItem else { return }
+                // The host owns selection from the moment it asks for a native track (PiP, AirPlay,
+                // external display); its own select fires this notification too.
+                guard self.nativeSubtitleReapplyOrdinal == nil else {
+                    self.cancelNativeLegibleDeselectPin()
+                    return
+                }
+                guard let selected = pinned.currentMediaSelection.selectedMediaOption(in: group) else { return }
+                guard self.nativeLegibleDeselectPinBurst.admit(now: Date().timeIntervalSinceReferenceDate) else {
+                    EngineLog.emit(
+                        "[AetherEngine] Sodalite#65: the system keeps re-selecting legible option "
+                        + "\"\(selected.displayName)\"; standing down, the caption box stays",
+                        category: .engine)
+                    self.cancelNativeLegibleDeselectPin()
+                    return
+                }
+                pinned.select(nil, in: group)
+                EngineLog.emit(
+                    "[AetherEngine] Sodalite#65: legible option \"\(selected.displayName)\" was selected "
+                    + "from outside the engine (iOS automatic captions); deselected again",
+                    category: .engine)
             }
         }
+    }
+
+    /// Drops the pin's task, observer and burst budget. Called by the next `load()`, by `stopInternal`,
+    /// and by the pin itself once the host takes over selection.
+    func cancelNativeLegibleDeselectPin() {
+        nativeLegibleDeselectPinTask?.cancel()
+        nativeLegibleDeselectPinTask = nil
+        if let observer = nativeLegibleDeselectPinObserver {
+            NotificationCenter.default.removeObserver(observer)
+            nativeLegibleDeselectPinObserver = nil
+        }
+        nativeLegibleDeselectPinItem = nil
+        nativeLegibleDeselectPinGroup = nil
+        nativeLegibleDeselectPinBurst.reset()
     }
 
     // MARK: - Remote-HLS bypass legible selection (AE#154)
