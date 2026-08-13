@@ -316,7 +316,17 @@ extension AetherEngine {
                 // held as a stale arrival until the next composition trims it (the old
                 // reader's lead-in behavior; without this, enabling subs mid-sentence
                 // shows nothing until the next line).
-                pgsStaleArrivalGates[channel, default: PGSStaleArrivalGate()].reconstructing = true
+                // #357: the gate's hold and candidate belong to the position this tick is leaving.
+                // A held cue keeps its open-ended placeholder end, so the first post-seek trim
+                // (`resolveHeld`) closes it at a successor start AHEAD of the new playhead and
+                // republishes pre-seek history as the active line, the same defect the store-side
+                // close below prevents. Nothing is lost by dropping it: the backscan re-decodes the
+                // window from the packet store, so anything that can still claim this landing comes
+                // back through `admitDuringReconstruction`.
+                var gate = pgsStaleArrivalGates[channel] ?? PGSStaleArrivalGate()
+                gate.reset()
+                gate.reconstructing = true
+                pgsStaleArrivalGates[channel] = gate
                 window = (from, through)
             }
             if subtitleDrainDecoders[channel] == nil {
@@ -348,6 +358,12 @@ extension AetherEngine {
             // handful of cues. One bind, one publish, and only when the batch changed something.
             var cues = retainedSubtitleCues(for: channel)
             var didMutate = false
+            // #357: a cue still carrying its open-ended placeholder end cannot claim this landing.
+            // Its successor's trim is what closes it, and a jump past it outran that successor; see
+            // closeOpenEndedCues.
+            if isReset, Self.closeOpenEndedCues(&cues, startingBefore: window.from) {
+                didMutate = true
+            }
             // #357: what this tick did, counted as it happens. The cursor below advances over every
             // packet whether or not the decoder built anything from it, so without these counts a
             // window of undecodable packets is indistinguishable in the log from a window that
@@ -975,6 +991,38 @@ extension AetherEngine {
     nonisolated static func insertCueSorted(_ cue: SubtitleCue, into cues: inout [SubtitleCue]) -> Bool {
         var id = cue.id
         return insertCueSorted(cue, into: &cues, nextID: &id)
+    }
+
+    /// #357: close every cue still carrying its open-ended placeholder window that began before
+    /// `boundary`, at `boundary`. Called on a reset tick, where `boundary` is the start of the
+    /// window the reconstruction is about to decode (playhead minus backscan).
+    ///
+    /// Two mechanisms bound an open PGS cue in steady state and neither one survives a seek past it.
+    /// The trim needs a SUCCESSOR (`applySubtitleEvent`, `pgsTrimAt`), which after a jump arrives
+    /// only when the new landing point's first composition does, seconds or tens of seconds later.
+    /// `pruneCues` filters on `endTime`, and a placeholder end is by construction never older than
+    /// the retention window, however far the playhead moved. So the pre-seek cue stays in the
+    /// published window with a window that covers the new playhead, and every host that asks which
+    /// cue is active renders it (report: a cue from 2549.8 s shown at 2855.15 s for 24.5 s).
+    ///
+    /// The reconstruction window is the right boundary because it is the one the engine already
+    /// defines as how far it looks back at a landing: nothing before it is re-decoded, so nothing
+    /// before it can be confirmed as still open. Cues stay in the retained store for a backward
+    /// seek, only their unconfirmed end is retired. An authored duration is untouched, which is what
+    /// separates this from a blanket "drop the pre-seek set": a long ASS sign keeps its own end.
+    /// Returns whether any cue was closed.
+    @discardableResult
+    nonisolated static func closeOpenEndedCues(_ cues: inout [SubtitleCue],
+                                               startingBefore boundary: Double) -> Bool {
+        var changed = false
+        for i in 0..<cues.count {
+            let cue = cues[i]
+            guard cue.startTime < boundary, cue.endTime > boundary,
+                  cue.endTime - cue.startTime > subtitleOpenEndedWindowSeconds else { continue }
+            cues[i] = cue.with(endTime: boundary)
+            changed = true
+        }
+        return changed
     }
 
     /// Prune cues whose `endTime` is older than the retention window. The caller passes

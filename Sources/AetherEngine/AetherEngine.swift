@@ -2274,6 +2274,13 @@ public final class AetherEngine: ObservableObject {
     /// evicted cues are re-emitted after a producer restart (fresh EmbeddedSubtitleDecoder, empty dedupe set).
     let subtitleCueRetentionSeconds: Double = 300
 
+    /// #357: shortest window that can only be FFmpeg's open-ended placeholder, not an authored
+    /// duration. A PGS composition carries no end of its own, so the decoder stamps it with
+    /// `end_display_time = UINT32_MAX` (~49.7 days) and the successor composition's `pgsTrimAt`
+    /// closes it. An hour is far past any authored subtitle window and far short of the placeholder,
+    /// so the test never has to know which decoder produced the cue.
+    nonisolated static let subtitleOpenEndedWindowSeconds: Double = 3600
+
     /// #15: native WebVTT readers must stay ahead of AVPlayer's subtitle prefetch (~240s burst at PiP start),
     /// otherwise far segments are fetched empty and cached empty for the VOD rendition. Larger than the inline
     /// reader's 90s lead; only runs while a native rendition is selected (PiP), so the extra read is bounded.
