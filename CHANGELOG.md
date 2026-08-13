@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- `startupProgress` publishes how far a load has come, for hosts drawing a
+  determinate loading bar instead of an indeterminate spinner (#361). It is a
+  fixed ladder of nine checkpoints, each recorded by the code that finishes the
+  work it names, so the number never runs on a timer and never advances on an
+  estimate: a slow stretch holds and a skipped one jumps. Two of those
+  checkpoints cover stretches a host previously had no visibility into at all,
+  and they are the two that dominate a slow start: the source open, split into
+  connection, container and stream analysis, and the display-criteria
+  handshake. The value is scoped to a startup generation that counts the waits
+  a user actually sat through rather than teardowns, so an engine-initiated
+  reroute (an HLS playlist discovered on the loopback path) continues the bar
+  instead of dropping it back to zero mid-load. Monotonic and deduped; a load
+  that fails or is stopped never reaches the last checkpoint.
 
 ## [6.22.1] - 2026-08-13
 

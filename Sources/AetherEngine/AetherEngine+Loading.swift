@@ -105,7 +105,10 @@ extension AetherEngine {
             .dropFirst()
             .filter { $0 }
             .prefix(1)
-            .sink { [weak self] _ in self?.hasFirstFrameReadyForDisplay = true }
+            .sink { [weak self] _ in
+                self?.hasFirstFrameReadyForDisplay = true
+                self?.recordStartupCheckpoint(.presenting)   // #361: the picture is up
+            }
             .store(in: &cancellables)
     }
 
@@ -144,6 +147,7 @@ extension AetherEngine {
             category: .engine
         )
         hasFirstFrameReadyForDisplay = true
+        recordStartupCheckpoint(.presenting)   // #361
     }
 
     /// #353: mirror a software host's settled picture size onto the public `softwareDisplaySize`.
@@ -200,6 +204,14 @@ extension AetherEngine {
             .sink { [weak self] ready in
                 guard let self = self else { return }
                 self.isSessionReady = ready
+                if ready {
+                    // #361: an audio session has a picture nowhere, so its ladder ends at readiness
+                    // rather than stalling one checkpoint short of the end forever.
+                    self.recordStartupCheckpoint(.ready)
+                    if !self.sessionPublishesVideoDisplaySignal {
+                        self.recordStartupCheckpoint(.presenting)
+                    }
+                }
                 if ready, settlePausedAtReadiness, self.state == .loading {
                     self.state = .paused
                 }

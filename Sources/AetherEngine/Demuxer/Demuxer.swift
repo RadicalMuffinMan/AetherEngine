@@ -4,6 +4,20 @@ import Libavcodec
 import Libavutil
 
 
+/// The stages an `open()` passes through, reported as each one finishes (#361). Deliberately the
+/// three boundaries the open really has: the source coming up (connection, redirects, first bytes),
+/// the container being identified, and the stream analysis that follows it. There is nothing
+/// finer-grained to report without reaching inside `avformat_find_stream_info`, which is exactly the
+/// stretch a host most wants to see move, and exactly the one FFmpeg does not narrate.
+enum DemuxerOpenStage: Sendable {
+    /// The AVIO provider is open: the connection stands and its first bytes have arrived.
+    case sourceOpened
+    /// `avformat_open_input` returned.
+    case containerOpened
+    /// The stream-info pass returned (or was skipped by profile).
+    case streamsProbed
+}
+
 /// Open-time tuning for the demuxer + its AVIO reader. `.playback` is
 /// the default everywhere; `.stillExtraction` switches AVIO to a
 /// random-access profile (no read-ahead prefetch, small seek chunk) and
@@ -224,6 +238,13 @@ public final class Demuxer: @unchecked Sendable {
         didSet { (avioProvider as? AVIOReader)?.onNetworkPhaseChanged = onNetworkPhaseChanged }
     }
 
+    /// #361: emitted as each stage of `open()` finishes, so the engine can publish startup progress
+    /// through the one stretch of a load a host cannot otherwise see. Called on whatever thread the
+    /// open runs on (the playback open is detached off the main actor), never after `open()` returns.
+    /// Set only on the playback probe demuxer; every other demuxer (side readers, still extraction)
+    /// leaves it nil and emits nothing.
+    var onOpenProgress: (@Sendable (DemuxerOpenStage) -> Void)?
+
     // MARK: - Disc titles / chapters (#67)
 
     private(set) var discTitles: [DiscTitle] = []
@@ -375,8 +396,12 @@ public final class Demuxer: @unchecked Sendable {
             throw DemuxerError.openFailed(code: ret)
         }
         formatContext = openedCtx
+        // #361: a local file has no connection to come up, so the source stage is credited by this
+        // one rather than reported separately.
+        onOpenProgress?(.containerOpened)
 
         try probeStreams(openedCtx)
+        onOpenProgress?(.streamsProbed)
     }
 
     /// Open a custom `IOReader` source. `formatHint` disambiguates probing when
@@ -447,6 +472,7 @@ public final class Demuxer: @unchecked Sendable {
     ) throws {
         try provider.open()
         avioProvider = provider
+        onOpenProgress?(.sourceOpened)   // #361
 
         guard let ctx = avformat_alloc_context() else {
             avioProvider?.close()
@@ -471,8 +497,10 @@ public final class Demuxer: @unchecked Sendable {
             throw DemuxerError.openFailed(code: ret)
         }
         formatContext = ctxPtr  // avformat_open_input may reallocate
+        onOpenProgress?(.containerOpened)   // #361
 
         try probeStreams(ctxPtr!)
+        onOpenProgress?(.streamsProbed)     // #361
         // #281: every parse seek this open performs has happened by now, so the provider can drop
         // the cold-start state that only exists to serve them. Deliberately after probeStreams:
         // find_stream_info is where the trailing-index ping-pong lives, not avformat_open_input.

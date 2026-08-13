@@ -148,6 +148,16 @@ player.$hasFirstFrameReadyForDisplay
                        // stays true across a seek), so a cover lifted on isSessionReady lifts onto
                        // black. Latched for the load, false again at the next load() / stop().
                        // For "has this seek reached the screen" use seekEvents .landed instead.
+player.$startupProgress // StartupProgress?, for a determinate loading bar: .completed of .total
+                       // checkpoints, .fraction, and .stage naming the work in flight. Every value
+                       // is work some part of the load actually finished, never a timer and never an
+                       // estimate, so a slow stretch holds and a skipped one jumps. It covers the
+                       // two stretches a host cannot otherwise see: the source open (connection,
+                       // container, stream analysis) and the display-criteria handshake. Scoped to
+                       // .generation, which counts the startups a user waited through rather than
+                       // teardowns, so an engine-initiated reroute continues the bar instead of
+                       // resetting it. Monotonic and deduped; nil before the first load and after
+                       // stop(); a load that fails simply never reaches the last checkpoint.
 player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession).
                        // nil on the .software route: that pipeline renders into its own display
                        // layer, and the property is cleared so AVKit cannot hold a player nothing
