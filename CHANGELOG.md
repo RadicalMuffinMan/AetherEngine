@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A VOD source that produces nothing at all now reports it instead of leaving the
+  host on a playlist that will never gain a segment. The decision for that
+  (`isFatalVODPumpExit`, #126) is about what the pump produced, not about how it
+  died, but it only fired on a read error, so a source that runs to EOF without
+  ever writing a packet fell through every arm: measured on such a file, the host
+  sat at `state=playing phase=rebuffering` for the whole session while the
+  provider answered `404 init.mp4 empty`. It now also covers `.eof`, and the
+  gate-starvation re-anchor reports whether it actually re-anchored so a spent
+  arm reaches the same surface rather than ending on a bare return. An ordinary
+  EOF after real playback is untouched: what keeps this safe is the
+  produced-nothing condition, which such a session does not meet.
 
 ## [6.25.0] - 2026-08-13
 

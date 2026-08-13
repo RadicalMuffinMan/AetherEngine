@@ -2,16 +2,32 @@ import Foundation
 
 extension HLSVideoEngine {
 
-    /// #126 pure decision: a non-live pump exit on a read error with nothing ever produced
-    /// (no packets written, empty segment cache) is a dead source. The playlist exists but no
-    /// segment will ever land, so AVPlayer parks in waitingToPlay forever unless this surfaces.
+    /// #126 pure decision: a non-live pump exit with nothing ever produced (no packets written,
+    /// empty segment cache) is a dead source. The playlist exists but no segment will ever land,
+    /// so AVPlayer parks in waitingToPlay forever unless this surfaces.
+    ///
+    /// EOF counts, and used not to. The restriction to `.readError` did not follow from the
+    /// reasoning above (which is about what was produced, not about how the pump died), and it let
+    /// a whole class through: a source libavformat can demux but not deliver keyframed packets from
+    /// runs to the end of the file, writes nothing, and exits `.eof`. Measured on such a file, the
+    /// host sat at `state=playing phase=rebuffering` for the whole session while the provider
+    /// answered `404 init.mp4 empty`. What keeps this safe is the produced-nothing condition, not
+    /// the reason: an ordinary EOF after real playback has packets and segments behind it.
+    ///
+    /// Teardown (`.stopRequested`) is excluded because it is not a failure, and the reasons that
+    /// own a recovery arm (`.muxerFailed`, `.needsAudioSampleEntryPrime`, `.backpressureWedge`)
+    /// never reach this decision: their arms return first.
     static func isFatalVODPumpExit(
         reason: HLSSegmentProducer.PumpExitReason,
         isLive: Bool,
         packetsWritten: Int,
         cachedSegments: Int
     ) -> Bool {
-        guard !isLive, case .readError = reason else { return false }
+        guard !isLive else { return false }
+        switch reason {
+        case .readError, .eof: break
+        default: return false
+        }
         return packetsWritten == 0 && cachedSegments == 0
     }
 
@@ -235,14 +251,30 @@ extension HLSVideoEngine {
             hadRestartTarget: prod.hasRestartTarget,
             lastDroppedKeyframePts: prod.lastPregateDroppedKeyframePts
         ) {
-            handleVODGateStarvationExit(prod)
-            return
+            // Falls through when the re-anchor is spent or has nowhere to aim, so a session that
+            // produced nothing still reaches the terminal surface below instead of the bare return
+            // this arm used to end on.
+            if handleVODGateStarvationExit(prod) { return }
         }
         // Sequential append playlist: TRUE source EOF (not a stop, not a re-anchor) completes
         // the playlist with ENDLIST so AVPlayer can reach end-of-media - a growing playlist
         // without ENDLIST never ends.
         if case .eof = reason, !isLiveSession, sequentialOrigin {
             provider?.markSequentialEnded()
+        }
+        if Self.isFatalVODPumpExit(
+            reason: reason,
+            isLive: isLiveSession,
+            packetsWritten: prod.packetsWrittenCount,
+            cachedSegments: cache?.count ?? 0
+        ) {
+            EngineLog.emit(
+                "[HLSVideoEngine] #126 VOD pump reached \(reason) without producing anything "
+                + "(0 packets written, 0 segments cached); surfacing fatal source failure",
+                category: .session
+            )
+            onVODSourceFailed?(FFmpegErr.eio, "Source produced no playable media")
+            return
         }
         guard isLiveSession else { return }
         let reopenTransport = Self.liveReopenTransport(
@@ -365,7 +397,10 @@ extension HLSVideoEngine {
     /// of the file; producing from its segment folds the tail content into the cache so playback
     /// reaches end-of-media (via the tail-park completion) instead of dying at -12889 on a
     /// segment no anchoring can produce. Bounded by its own #99-shaped gate.
-    func handleVODGateStarvationExit(_ prod: HLSSegmentProducer) {
+    /// Returns whether a re-anchor was actually requested. False means this arm is done with the
+    /// session and the caller decides what a pump that produced nothing means.
+    @discardableResult
+    func handleVODGateStarvationExit(_ prod: HLSSegmentProducer) -> Bool {
         let lastKeyPts = prod.lastPregateDroppedKeyframePts
         restartLock.lock()
         let plan = segmentPlan
@@ -380,7 +415,7 @@ extension HLSVideoEngine {
                 + "(no keyframe at/after the plan boundary in this session)",
                 category: .session
             )
-            return
+            return false
         }
         guard let idx = Self.planSegmentIndex(forSourcePts: lastKeyPts, plan: plan) else {
             EngineLog.emit(
@@ -388,7 +423,7 @@ extension HLSVideoEngine {
                 + "(pts=\(lastKeyPts)) maps to no plan segment; not re-anchoring",
                 category: .session
             )
-            return
+            return false
         }
         EngineLog.emit(
             "[HLSVideoEngine] #169 VOD gate starved to EOF at seg\(prod.anchoredBaseIndex): "
@@ -397,6 +432,7 @@ extension HLSVideoEngine {
             category: .session
         )
         requestRestart(at: idx, authoritative: true)
+        return true
     }
 
     /// AE#222: rebuild the session with the captured audio frame as the muxer's moov prime.
