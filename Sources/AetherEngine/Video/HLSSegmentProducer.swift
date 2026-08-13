@@ -221,6 +221,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var seqNextReportIndex: Int? = nil
     private var seqReadyReports: [Int: Double] = [:]
 
+    /// #369: highest sequential index the append playlist can currently advertise (only entries
+    /// with a real duration get a URI). Pump-thread only; read by the advance park to detect a
+    /// release target beyond the advertisable frontier.
+    private var seqHighestAdvertisedIndex = Int.min
+
+    /// #369: one-shot latches for the containment logs. Pump-thread only.
+    private var loggedVideoWriteFailure = false
+    private var loggedSequentialParkSkip = false
+
     /// Order-preserving funnel for sequential finalize reports.
     private func emitSequentialReport(index: Int, duration: Double) {
         let base = seqNextReportIndex ?? index
@@ -229,9 +238,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
         var next = base
         while let d = seqReadyReports.removeValue(forKey: next) {
             onSequentialSegmentFinalized?(next, d)
+            if d > 0 { seqHighestAdvertisedIndex = next }   // #369: zero-duration holes get no URI
             next += 1
         }
         seqNextReportIndex = next
+    }
+
+    /// #369: the advance park releases on a consumer fetch of `target`, but a sequential append
+    /// playlist can only advertise up to the frontier this pump's OWN finalize reports have fed
+    /// it — parking on an index beyond that is waiting for oneself (field case: a fold-to-tail
+    /// parked at target=364 while the playlist ended at seg61). A negative target releases
+    /// instantly, so it is no deadlock. Pure for the unit test.
+    static func sequentialParkWouldSelfDeadlock(target: Int, highestAdvertised: Int) -> Bool {
+        target >= 0 && target > highestAdvertised
     }
 
     /// Forward discontinuity threshold. Distinct from NOPTS-dts repair (+1 tick scale); only fires on genuine multi-second leaps.
@@ -1714,6 +1733,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if !isLive, newIdx > currentMuxerSegmentIndex + 1 {
             let folded = (currentMuxerSegmentIndex + 1)..<newIdx
             cache.noteFolded(folded)
+            if folded.count > SegmentCache.maxFoldRunLength {
+                // #369: a leap this wide is not a long GOP — a timeline jump escaped the rebase.
+                EngineLog.emit(
+                    "[HLSSegmentProducer] #369 cut leap of \(folded.count) plan indices "
+                    + "(discontinuity-scale; a timeline jump escaped the rebase)",
+                    category: .session
+                )
+            }
             EngineLog.emit(
                 "[HLSSegmentProducer] #358 plan indices \(folded.lowerBound)...\(folded.upperBound - 1) "
                 + "folded into seg-\(newIdx) (no IRAP reached their boundary)",
@@ -1731,7 +1758,24 @@ final class HLSSegmentProducer: @unchecked Sendable {
             if !awaitLiveWindowHeadroom(head: newIdx) { return nil }
         } else {
             let backpressureTarget = newIdx - bufferAheadSegments
-            if !awaitBackpressureRelease(target: backpressureTarget, head: newIdx, context: "advance") { return nil }
+            if onSequentialSegmentFinalized != nil,
+               Self.sequentialParkWouldSelfDeadlock(target: backpressureTarget,
+                                                    highestAdvertised: seqHighestAdvertisedIndex) {
+                // #369: skip the self-deadlocking park; the disk budget below stays the resource
+                // bound, and normal parking resumes as soon as the frontier catches back up.
+                if !loggedSequentialParkSkip {
+                    loggedSequentialParkSkip = true
+                    EngineLog.emit(
+                        "[HLSSegmentProducer] #369 backpressure park skipped: "
+                        + "target=\(backpressureTarget) is beyond the advertisable "
+                        + "frontier=\(seqHighestAdvertisedIndex); the frontier only advances "
+                        + "while this pump runs",
+                        category: .session
+                    )
+                }
+            } else if !awaitBackpressureRelease(target: backpressureTarget, head: newIdx, context: "advance") {
+                return nil
+            }
             if !awaitPrefetchDiskBudgetRelease(head: newIdx, context: "advance") { return nil }
         }
         if checkShouldStop() { return nil }
@@ -3328,17 +3372,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// (`Packet duration: -N ... out of range` -> DTS clamp + `pts has no value` -> wrong trun timing,
     /// the #92 transient blocky glitch). Falls back to the source packet's own positive duration, then
     /// `fallback`, only when no usable forward delta exists (EOF tail, NOPTS, or a non-increasing next).
+    /// #369: `capTicks` bounds the inferred delta — a sample longer than a discontinuity is
+    /// definitionally invalid. Across a 33-bit PTS wrap the look-behind delta IS the wrap
+    /// (device: 8226410192 ticks ≈ 91404 s; movenc rejects it as "Application provided duration
+    /// ... is invalid" and the packet is lost), so an over-cap delta falls back like a
+    /// non-forward one.
     static func resolveVideoSampleDuration(
         existingDuration: Int64,
         dts: Int64,
         nextDts: Int64?,
-        fallback: Int64
+        fallback: Int64,
+        capTicks: Int64
     ) -> Int64 {
         if let next = nextDts, dts != Int64.min, next != Int64.min {
             let inferred = next - dts
-            if inferred > 0 { return inferred }
+            if inferred > 0, inferred <= capTicks { return inferred }
         }
         return existingDuration > 0 ? existingDuration : fallback
+    }
+
+    /// #369: the sample-duration cap in source-video ticks (`discontinuityThresholdSeconds`, so
+    /// live rebases and the duration cap share one definition of "discontinuity").
+    private var videoSampleDurationCapTicks: Int64 {
+        sourceVideoTbSeconds > 0
+            ? Int64(Self.discontinuityThresholdSeconds / sourceVideoTbSeconds)
+            : Int64.max
     }
 
     private func finalizeAndWriteVideo(
@@ -3350,7 +3408,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             existingDuration: packet.pointee.duration,
             dts: packet.pointee.dts,
             nextDts: nextDts,
-            fallback: videoFallbackDurationPts
+            fallback: videoFallbackDurationPts,
+            capTicks: videoSampleDurationCapTicks
         )
 
         packet.pointee.stream_index = muxer.videoOutputStreamIndex
@@ -3401,7 +3460,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let frameSegmentIndex = currentMuxerSegmentIndex
 
         av_packet_rescale_ts(packet, sourceVideoTimeBase, muxer.muxerVideoTimeBase)
-        let written = muxer.writePacket(packet).written
+        let write = muxer.writePacket(packet)
+        if write.rc < 0, !loggedVideoWriteFailure {
+            // #369: this rc used to be dropped on the floor; the field failure (movenc rejecting a
+            // wrap-scale sample duration) was only findable through libav's own stderr line.
+            loggedVideoWriteFailure = true
+            EngineLog.emit(
+                "[HLSSegmentProducer] #369 video packet write failed rc=\(write.rc) "
+                + "dts=\(packet.pointee.dts) duration=\(packet.pointee.duration) (muxer TB; "
+                + "first occurrence only)",
+                category: .session
+            )
+        }
+        let written = write.written
 
         if let frameObserver,
            let source = Self.cmTime(ticks: frameSourcePts, timeBase: sourceVideoTimeBase),
