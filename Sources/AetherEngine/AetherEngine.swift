@@ -1425,6 +1425,17 @@ public final class AetherEngine: ObservableObject {
     /// Session-scoped; cancelled on load()/stop() alongside the other subtitle tasks.
     var remoteHLSSubtitleDiscoveryTask: Task<Void, Never>? = nil
 
+    /// Sodalite#38 / #65: the pin that keeps the native legible rendition deselected while the host
+    /// draws subtitles itself. The task is the load-time burst, the observer holds the deselect for
+    /// the rest of the item's life against iOS 26's automatic captions, and the burst budget stops
+    /// the pin from spinning if the system re-selects after every deselect. Session-scoped, all four
+    /// dropped together by `cancelNativeLegibleDeselectPin()`.
+    var nativeLegibleDeselectPinTask: Task<Void, Never>? = nil
+    var nativeLegibleDeselectPinObserver: NSObjectProtocol? = nil
+    var nativeLegibleDeselectPinItem: AVPlayerItem? = nil
+    var nativeLegibleDeselectPinGroup: AVMediaSelectionGroup? = nil
+    var nativeLegibleDeselectPinBurst = NativeLegibleDeselectPin()
+
     /// #316: the loopback origin standing in front of a remote HLS master to carry the host's declared
     /// sidecars as legible renditions. Nil whenever the bypass plays the origin URL directly, which is
     /// every live source, every source without declared sidecars, and every refused rewrite.
@@ -2604,6 +2615,7 @@ public final class AetherEngine: ObservableObject {
         resetSubtitleOCRState()   // Phase D: new session, new axis
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
+        cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being replaced
         remoteHLSSubtitleProxy?.tearDown()   // #316
         remoteHLSSubtitleProxy = nil
         injectedSubtitleRenditionNames = [:]
@@ -4149,6 +4161,7 @@ public final class AetherEngine: ObservableObject {
         resetSubtitleOCRState()   // Phase D: new session, new axis
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
+        cancelNativeLegibleDeselectPin()   // Sodalite#65: the pin belongs to the item being torn down
         // #316: the proxy serves exactly one session's master; a standing socket outliving it would keep a
         // port and a decode task alive for a source nobody plays any more.
         remoteHLSSubtitleProxy?.tearDown()
