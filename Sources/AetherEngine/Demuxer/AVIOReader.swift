@@ -657,7 +657,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // container never begins with '#' (TS syncs on 0x47; MP4/MKV open with binary box/EBML markers),
             // so an #EXTM3U prefix is an unambiguous misroute. The host is pointed at the HLS entry points.
             if isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(firstWindowPrefix()) {
-                EngineLog.emit("[AVIOReader] HLS playlist body on the raw live path (AE#140); failing closed. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.", category: .demux)
+                EngineLog.emit("[AVIOReader] HLS playlist body on the raw live path (AE#140); stopping here. A URL source is routed onto the live ingest by load() (AE#363); a custom reader keeps the typed rejection.", category: .demux)
                 markClosed()
                 close()
                 throw AVIOReaderError.hlsPlaylistOnRawLivePath

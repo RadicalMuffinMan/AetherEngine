@@ -2888,10 +2888,40 @@ public final class AetherEngine: ObservableObject {
             throw DemuxerError.openFailed(code: -1)
         }
 
-        // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. The AVIOReader detected the
-        // #EXTM3U body and failed closed instead of looping its endless-feed reconnect forever. Surface a
-        // typed, actionable rejection so the host routes m3u8 through LoadOptions.nativeRemoteHLS or
-        // HLSLiveIngestReader, not the generic isLive raw path.
+        // AE#363: an HLS playlist URL on the raw-byte live path, which AE#140 detects at the byte source
+        // (#EXTM3U where a container's first byte belongs) instead of looping its endless-feed reconnect.
+        // That detection stays; its destination changes. AE#140 handed the host a typed rejection naming
+        // HLSLiveIngestReader, and the engine can build that reader itself: it is the only live path that
+        // puts LoadOptions.httpHeaders on the playlist, on every segment and on every AES key, which is
+        // exactly what a tokenized IPTV origin enforces. Telling a host to go and wire the one path that
+        // would have worked is not an answer the engine has to give. The VOD side of the same misroute
+        // has rerouted itself since AE#154.
+        if RemoteHLSMediaSelection.shouldRouteLiveOntoIngest(
+            failure: probeFailure, isCustomSource: isCustomSource),
+           case .url(let livePlaylistURL) = source {
+            EngineLog.emit(
+                "[AetherEngine] AE#363: HLS playlist on the raw live path; routing through the "
+                + "live-ingest reader (headers ride every fetch)",
+                category: .engine
+            )
+            // #361: the host is still waiting for the load it asked for, so this is the same startup
+            // taking a different route, not a second one.
+            continueStartupAcrossReroute()
+            return try await load(
+                source: .custom(
+                    HLSLiveIngestReader(playlistURL: livePlaylistURL,
+                                        httpHeaders: loadedOptions.httpHeaders),
+                    formatHint: "mpegts"
+                ),
+                startPosition: startPosition,
+                options: loadedOptions,
+                audioSourceStreamIndex: audioSourceStreamIndex,
+                discTitleID: discTitleID
+            )
+        }
+
+        // A custom source carries the same misroute with no playlist URL to ingest from, so it keeps the
+        // AE#140 typed rejection: the host built that reader and only the host can re-point it.
         if let readerError = probeFailure as? AVIOReaderError, case .hlsPlaylistOnRawLivePath = readerError {
             state = .error("HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.")
             throw AetherEngineError.hlsPlaylistOnRawLivePath
@@ -5469,8 +5499,10 @@ public final class AetherEngine: ObservableObject {
 public enum AetherEngineError: Error, LocalizedError {
     case noVideoStream
     case noAudioStream
-    /// AE#140: an HLS playlist URL (m3u8) was handed to `load(isLive:)` on the generic raw-byte path.
-    /// Route m3u8 sources through `LoadOptions.nativeRemoteHLS` or `HLSLiveIngestReader` instead.
+    /// AE#140: an HLS playlist body arrived on the generic raw-byte live path. Since AE#363 a `.url`
+    /// source is routed onto the live ingest instead of throwing, so this reaches a host only for a
+    /// custom `IOReader`, which has no playlist URL for the engine to ingest from: re-point the reader,
+    /// or hand the playlist URL to `load(url:)` (with `isLive: true`) and let the engine route it.
     case hlsPlaylistOnRawLivePath
     /// #176 follow-up: HEVC P5 / AV1 P10.0 carry only an IPT-PQ-c2 signal (no compatible base layer);
     /// the software path would decode it as YCbCr (green/purple cast), so the load fails instead.

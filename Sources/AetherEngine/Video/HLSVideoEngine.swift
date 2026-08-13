@@ -808,7 +808,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// the source body, so it is the one that produces the reader's HLS classification. Interpolating
     /// that typed error into `openFailed(reason:)` erased its domain and made a reroutable remote-HLS
     /// source terminal; the classification is rethrown verbatim so `load()` can still reach the AE#154
-    /// reroute (`hlsPlaylistOnVODPath`) or the AE#140 fail-closed rejection (`hlsPlaylistOnRawLivePath`).
+    /// reroute (`hlsPlaylistOnVODPath`) or the live-path classification (`hlsPlaylistOnRawLivePath`,
+    /// which AE#363 routes onto the live ingest for a URL source and rejects for a custom reader).
     /// Every other failure keeps the historical wrapped shape.
     static func openFailure(from error: Error) -> Error {
         if let readerError = error as? AVIOReaderError {
