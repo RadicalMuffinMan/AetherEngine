@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.24.0] - 2026-08-13
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.24.0))
+
 ### Changed
 
 - A live `.m3u8` on the raw live path is now routed onto the live ingest
