@@ -27,8 +27,9 @@ extension AetherEngine {
         if pendingRecoverySeekClockTarget == nil {
             // AE#105: fold the disc's clip-0 STC base back out so the published playhead sits on the same
             // 0-based axis as the MPLS duration (origin 0 for normal/live -> no-op).
-            clock.currentTime = PresentationAxis.display(sourcePTS: value + playlistShiftSeconds,
-                                                         origin: sourcePresentationOrigin)
+            clock.currentTime = PresentationAxis.display(
+                sourcePTS: value + playlistShiftSeconds,
+                origin: displayOrigin(forShift: playlistShiftSeconds))
         }
         // Live edge must fold with the same playlistShiftSeconds as the playhead; opposite sign would make behindLiveSeconds meaningless.
         if isLive {
@@ -654,8 +655,9 @@ extension AetherEngine {
                 let activeShift = self.presentationAxis.shiftSeconds(atItemSeconds: self.nativeClockSeconds) ?? seconds
                 self.playlistShiftSeconds = activeShift
                 // Re-fold immediately so currentTime doesn't lag the next periodic tick (origin-corrected).
-                self.clock.currentTime = PresentationAxis.display(sourcePTS: self.nativeClockSeconds + activeShift,
-                                                                  origin: self.sourcePresentationOrigin)
+                self.clock.currentTime = PresentationAxis.display(
+                    sourcePTS: self.nativeClockSeconds + activeShift,
+                    origin: self.displayOrigin(forShift: activeShift))
                 // sourceTime re-folds on next $renderedTime tick; keeping it there tracks the rendered picture, not the optimistic clock (#49).
                 EngineLog.emit(
                     "[AetherEngine] VOD shift published: \(String(format: "%.3f", seconds))s "
@@ -941,6 +943,10 @@ extension AetherEngine {
             latchedPresentationOrigin = session.sourceStartSeconds
             sourcePresentationOrigin = session.sourceStartSeconds
         }
+        // #368: a sequential archive's source timestamps restart at every chunk seam, so no single
+        // source PTS anchors its display axis. It publishes the item axis instead, which the producer
+        // pins to 0 and `declaredDurationSeconds` measures.
+        displayAxisIsItemAxis = session.sequentialOriginPinsProducerToZero
         nativeSubtitleRenditionsServed = served.subtitleRenditionsServed
         extractorYieldState.activate(session: session)
 
@@ -1061,7 +1067,12 @@ extension AetherEngine {
                 self.checkPendingScrubLanding(rendered: value)
                 // #65: mirror AVPlayer's rendered (playlist-axis) position for off-main wedge re-anchoring.
                 self.renderedPositionMirror.set(value)
-                self.clock.sourceTime = value + shift
+                // #368: on a sequential origin the "source PTS" of a rendered frame is whatever the
+                // current archive chunk and libavformat's wrap correction made of it, so publishing it
+                // would break both the documented `sourceTime == currentTime in steady play` relation
+                // and host-rendered sidecar cues (whose times are relative to the archive start, i.e.
+                // the item axis). Every other source keeps true source PTS for cue alignment.
+                self.clock.sourceTime = self.displayAxisIsItemAxis ? value : value + shift
                 // bufferedPosition = the end of the contiguous safe range (origin -> disk), expressed on
                 // the display axis as the playhead plus contiguously available seconds ahead of it: the
                 // segments AVPlayer already fetched, plus the disk SegmentCache band above them, which is
@@ -1072,7 +1083,7 @@ extension AetherEngine {
                 // the buffer bar aligned with currentTime (0 off disc). AE#105, #207 follow-up.
                 // See docs issue #33 follow-up.
                 let renderedDisplay = PresentationAxis.display(
-                    sourcePTS: value + shift, origin: self.sourcePresentationOrigin)
+                    sourcePTS: value + shift, origin: self.displayOrigin(forShift: shift))
                 let readAhead = self.nativeVideoSession?
                     .contiguousForwardReadAheadSeconds(playlistSeconds: value) ?? 0
                 self.clock.bufferedPosition = renderedDisplay + max(0, readAhead)
