@@ -12,6 +12,32 @@ the public-API contract.
 
 ### Fixed
 
+- A source whose selected audio track is sparsely interleaved no longer ends in
+  a permanent black screen (#366). The first segment of an AC-3 / E-AC-3 source
+  cannot be cut until one parsed audio packet has reached the muxer, and the
+  search for that packet read forward from where the pump stopped, bounded at
+  128 MiB. That bound is a byte bound, so what it buys shrinks as the bitrate
+  grows: five minutes of a 3 Mbps encode, ten seconds of a 97 Mbps UHD remux,
+  and a legacy dub track can have its first packet hundreds of MiB in. When the
+  forward scan comes back empty the engine now seeks to a handful of positions
+  and takes any frame the track yields there, which is enough because AC-3 and
+  E-AC-3 are one complete syncframe per packet and the prime frame's timestamp
+  is discarded anyway. Measured on a fixture whose first audio packet sits at
+  211 MiB: the forward scan and the midpoint probe find nothing, the 90 % probe
+  finds a frame after two packets, and the session plays with the audio landing
+  exactly at its source timestamp. Nothing in the container points at the track:
+  `AVStream.start_time` for that track reads 0.
+- A VOD session that exhausts its muxer-failure revive budget now reports the
+  failure to the host (#366). The arm was a bare `return`: no producer, no
+  restart and no error, so the provider answered `404 init.mp4 empty` forever
+  while AVPlayer sat in `waitingToPlay`, which reaches the viewer as a black
+  screen with nothing in it to act on. Its sibling arm for read errors has
+  surfaced its own exhaustion since AE#169. The terminal failure now carries a
+  reason as well as a code, so a source that could not be muxed no longer
+  reports itself as a failed read (three of the existing call sites, the #358
+  unproducible segment and the sequential-origin reposition among them, were
+  reporting the same wrong cause).
+
 - A HEVC source whose config record is Annex B while its packets are
   length-prefixed no longer produces a session with no picture (#365). The mp4
   muxer decides whether to convert samples by looking at the extradata

@@ -470,7 +470,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// #126: fires when a VOD pump dies on a read error having produced nothing (zero packets
     /// written, empty cache). The playlist exists but no segment will ever land, so AVPlayer
     /// would sit in waitingToPlay forever; the engine surfaces a fatal error instead.
-    var onVODSourceFailed: (@Sendable (Int32) -> Void)?
+    var onVODSourceFailed: (@Sendable (Int32, String) -> Void)?
     /// Session-long FLAC bridge for codecs illegal in fMP4. Engine-owned (not producer-owned) so
     /// encoder state survives producer restarts; `startSegment()` rebases PTS on each restart.
     var audioBridge: AudioBridge?
@@ -522,6 +522,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// arrives, which no probe can predict: movenc rejects an immediate moov for E-AC-3 regardless of
     /// extradata, so a pre-flight cannot tell a video-first interleave apart from a healthy source.
     var sessionAudioMoovPrimeFrame: [UInt8]?
+    /// AE#366: a producer searched the whole source for a frame that can build the audio sample
+    /// entry and found none. Structural (never set from a read failure), so the session stops paying
+    /// for the search on every later revive attempt.
+    var sessionAudioMoovPrimeUnobtainable = false
 
     /// AE#222 (under `restartLock`): bounded rebuild for a pump that deferred its first cut. One attempt is
     /// enough by construction (the prime is captured before the restart and reused for the session's whole
@@ -1510,7 +1514,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // from it, so the session ends with an error the host can act on instead of a picture
             // that never moves again while the engine still reports playing.
             unrecoverableGapHandler: isLiveSession ? nil : { [weak self] _ in
-                self?.onVODSourceFailed?(FFmpegErr.eio)
+                self?.onVODSourceFailed?(FFmpegErr.eio, "Source segment could not be produced")
             },
             restartActivity: isLiveSession ? nil : { [weak self] in
                 self?.restartInFlight ?? false
@@ -2025,6 +2029,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // AE#222: nil until a pump proved this source cuts its first segment before any audio packet
             // arrives; from then on every producer of the session muxes moov from this frame.
             audioMoovPrimeFrame: sessionAudioMoovPrimeFrame,
+            // AE#366: once one producer has searched the whole source for an audio frame and come
+            // back empty, later ones must not repeat the search per revive attempt.
+            audioMoovPrimeKnownUnobtainable: sessionAudioMoovPrimeUnobtainable,
             epoch: nextProducerEpoch()
         )
         // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
@@ -2188,7 +2195,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 + "read from byte 0, so the reposition would mislabel content; surfacing source failure",
                 category: .session
             )
-            onVODSourceFailed?(FFmpegErr.eio)
+            onVODSourceFailed?(FFmpegErr.eio, "Source cannot be repositioned")
             return
         }
         restartLock.lock()
