@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A sequential-origin VOD session now folds a timeline discontinuity the way live folds a
+  program boundary (#368). IPTV timeshift archives are chunked recordings whose every chunk
+  restarts near PTS 0; libavformat's 33-bit wrap correction turns that backward seam into a
+  +2^33 leap (device: dts delta 8226410192 ticks — 363524400 + 8226410192 = 2^33 exactly),
+  which reached the keyframe-gated cutter unmodified and walked its monotonic index to the
+  plan tail. After that the session was structurally dead: the playlist froze, the
+  backpressure park waited on a segment the playlist can never advertise, and the wedge
+  recovery's reposition is exactly what a sequential origin refuses. The existing live
+  rebase (both streams, same thresholds) now also runs for sequential-origin VOD; cutter,
+  ledger and append playlist need no change because they already operate on post-shift
+  output time. No `EXT-X-DISCONTINUITY` is added at the seam: the archive is
+  content-continuous and the output timeline stays continuous after the rebase.
 
 ## [6.25.1] - 2026-08-13
 

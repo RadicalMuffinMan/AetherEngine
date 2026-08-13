@@ -170,6 +170,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Live mode: cuts at keyframes past targetSegmentDurationSeconds; ignores segmentBoundaries.
     private let isLive: Bool
 
+    /// #368: a sequential-origin VOD session folds timeline discontinuities the way live does.
+    /// IPTV timeshift archives are chunked recordings; each chunk restarts near PTS 0, and
+    /// libavformat's 33-bit wrap correction turns the backward seam into +2^33 (device: dts delta
+    /// 8226410192 ticks, 363524400 + 8226410192 = 2^33 exactly). Without a rebase that leap reaches
+    /// the cutter as item-axis time and walks its index to the plan tail, after which the session is
+    /// structurally dead (frozen playlist, permanent park, refused re-anchor). The SW host already
+    /// folds these seams for forward-only VOD (SoftwarePlaybackHost.shouldFoldTimeline); this is the
+    /// producer-path equivalent. `isSourceReplay` stays in the shared path untouched: it requires a
+    /// recent unplanned reconnect, which a sequential origin (single connection, no reconnect)
+    /// can never have.
+    private let foldsSequentialTimeline: Bool
+
+    /// The timeline-rebase gate for both stream rebases: live program boundaries and sequential
+    /// chunk seams share one definition of "discontinuity" (the thresholds below).
+    private var rebasesTimelineOnDiscontinuity: Bool { isLive || foldsSequentialTimeline }
+
     private var liveCurrentSegmentIndex: Int
     private var liveSegmentStartPtsSeconds: Double = 0
     private var liveFirstSegmentOpened = false
@@ -224,6 +240,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Tighter backward threshold (1.5 s) because any backward leap past the 0.5 s monotonic-glitch ceiling is a program boundary.
     /// 10 s symmetric threshold left a dead zone for short SSAI bumpers (~5 s reset); audio stutter resulted.
     static let discontinuityBackwardThresholdSeconds: Double = 1.5
+
+    /// #368: rebase math of the video-stream timeline rebase; pure so the 2^33 chunk-seam wrap can be
+    /// pinned in a unit test against the device trace. Output dts continues one fallback frame past
+    /// the last output, whatever the source leaped to.
+    static func rebasedVideoShift(
+        srcDts: Int64,
+        lastSrcDts: Int64,
+        oldShift: Int64,
+        fallbackDurationPts: Int64
+    ) -> (newShift: Int64, continuationDts: Int64) {
+        let lastOutputDts = lastSrcDts - oldShift
+        let continuationDts = lastOutputDts + max(fallbackDurationPts, 1)
+        return (srcDts - continuationDts, continuationDts)
+    }
 
     /// Derive audio shift so boundary packet lands exactly on the video seam regardless of source base.
     /// Fixes amux ad creatives (Pluto: video clock starts at 0, audio near 2^33); copying video shift directly hangs audio.
@@ -697,6 +727,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Fires at live program boundary with updated videoShiftPts and seamOutputSeconds (AVPlayer clock position of the seam).
     /// Distinct from onVideoShiftKnown: the new shift is at the producer edge, AVPlayer renders it buffer+holdback later.
+    /// #368: also fires at a sequential chunk-seam rebase — the source-PTS consumers (A53 caption tap,
+    /// subtitle mapping) need the playlist axis moved the same way there.
     var onLiveTimelineRebase: (@Sendable (_ shiftPts: Int64, _ seamOutputSeconds: Double) -> Void)?
 
     enum PumpExitReason: Sendable, CustomStringConvertible {
@@ -855,6 +887,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         segmentBoundaries: [Int64],
         planAnchorVideoPts: Int64 = 0,
         isLive: Bool = false,
+        foldsSequentialTimeline: Bool = false,
         packedSideAudioStartPts: Int64? = nil,
         packedSideAudioFallbackDurationPts: Int64 = 0,
         bufferAheadSegments: Int = 10,
@@ -914,6 +947,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             baseIndex: baseIndex
         )
         self.isLive = isLive
+        self.foldsSequentialTimeline = foldsSequentialTimeline
         self.liveCurrentSegmentIndex = baseIndex
         self.videoFallbackDurationPts = videoFallbackDurationPts
         self.audioFallbackDurationPts = audioFallbackDurationPts
@@ -2304,10 +2338,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         category: .session
                     )
                 }
-                // Live timeline rebase: a program boundary resets source dts to a small value.
-                // Per-frame monotonic gate would bump to lastValid+1, exceed reset pts, and DROP every subsequent packet.
-                // Correct repair: rebase OUTPUT dts to one frame past last output; add #EXT-X-DISCONTINUITY at seam.
-                if isLive, isVideoPkt, lastVideoSourceDts != Int64.min,
+                // Timeline rebase: a live program boundary — or, #368, a sequential-origin archive
+                // chunk seam — resets source dts to a distant value. Per-frame monotonic gate would
+                // bump to lastValid+1, exceed reset pts, and DROP every subsequent packet.
+                // Correct repair: rebase OUTPUT dts to one frame past last output; live additionally
+                // adds #EXT-X-DISCONTINUITY at the seam.
+                if rebasesTimelineOnDiscontinuity, isVideoPkt, lastVideoSourceDts != Int64.min,
                    videoShiftPts != Int64.min, packet.pointee.dts != Int64.min {
                     let jumpTicks = packet.pointee.dts - lastVideoSourceDts
                     let thresholdSeconds = jumpTicks < 0
@@ -2325,14 +2361,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             exitReason = .sourceReplay
                             break readLoop
                         }
-                        let lastOutputDts = lastVideoSourceDts - videoShiftPts
-                        let continuationDts = lastOutputDts + max(videoFallbackDurationPts, 1)
-                        let newShift = packet.pointee.dts - continuationDts
+                        let (newShift, continuationDts) = Self.rebasedVideoShift(
+                            srcDts: packet.pointee.dts,
+                            lastSrcDts: lastVideoSourceDts,
+                            oldShift: videoShiftPts,
+                            fallbackDurationPts: videoFallbackDurationPts
+                        )
                         EngineLog.emit(
-                            "[HLSSegmentProducer] live video timeline rebase: "
+                            "[HLSSegmentProducer] video timeline rebase (\(isLive ? "live" : "sequential")): "
                             + "jumpTicks=\(jumpTicks) srcDts=\(packet.pointee.dts) "
                             + "lastSrcDts=\(lastVideoSourceDts) oldShift=\(videoShiftPts) "
-                            + "newShift=\(newShift) lastOutDts=\(lastOutputDts)",
+                            + "newShift=\(newShift) continuationDts=\(continuationDts)",
                             category: .session
                         )
                         if packedSideAudioClock != nil {
@@ -2352,8 +2391,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             firstActualVideoPts = packet.pointee.pts
                         }
                         lastRawVideoPts = Int64.min
-                        pendingDiscontinuityFlag = true
-                        pendingForceCutFlag = true
+                        if isLive {
+                            // Live consumers get #EXT-X-DISCONTINUITY plus a forced cut. A sequential
+                            // chunk seam (#368) wants neither: the archive is content-continuous, the
+                            // output timeline stays continuous after the rebase, and the append
+                            // playlist's EXTINF comes from real muxed durations. (Both flags feed
+                            // only the live segment bookkeeping.)
+                            pendingDiscontinuityFlag = true
+                            pendingForceCutFlag = true
+                        }
                         // Hand seam OUTPUT dts (not video shift) to audio: audio derives its own shift from its OWN srcDts,
                         // so differing audio source bases (Pluto amux: audio near 2^33) are absorbed.
                         if let audio = audioConfig {
@@ -2376,7 +2422,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         onLiveTimelineRebase?(newShift, seamOutputSeconds)
                     }
                 }
-                if isLive, isAudioPkt, lastAudioSourceDts != Int64.min,
+                if rebasesTimelineOnDiscontinuity, isAudioPkt, lastAudioSourceDts != Int64.min,
                    audioShiftPts != Int64.min, packet.pointee.dts != Int64.min,
                    let audio = audioConfig {
                     let jumpTicks = packet.pointee.dts - lastAudioSourceDts
@@ -2455,7 +2501,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         }
                         pendingAudioInheritSeamOut = nil
                         EngineLog.emit(
-                            "[HLSSegmentProducer] live audio timeline rebase: "
+                            "[HLSSegmentProducer] audio timeline rebase (\(isLive ? "live" : "sequential")): "
                             + "jumpTicks=\(jumpTicks) srcDts=\(packet.pointee.dts) "
                             + "lastSrcDts=\(lastAudioSourceDts) oldShift=\(audioShiftPts) "
                             + "newShift=\(newShift) "
