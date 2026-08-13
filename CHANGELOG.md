@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.23.1] - 2026-08-13
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.23.1))
+
+### Fixed
+
+- A bitmap subtitle now ends where its author ended it, not where the next
+  landing happened to decode (#362). A PGS set has no end of its own; whatever
+  packet follows on the stream closes it. The drain decodes a window bounded at
+  the playhead plus its lead, and that forward edge falls wherever it falls:
+  where it landed between a set and its clear, the set was published open, the
+  cursor moved on, and the next thing to touch it was a composition at the next
+  seek landing, tens or hundreds of seconds later. The packet store already
+  held that clear, so an open set now takes its end from there, and the forward
+  prefetch parks a margin beyond the drain window so the answer is stored
+  before the set publishes.
+- A stretch of a title no longer loses its subtitles after a seek burst (#362).
+  A seek restarts the pump behind the landing while the store still holds an
+  island the previous run harvested further ahead, and the drain decoded across
+  that hole and carried its cursor past it, so the packets arriving a second
+  later were never read. A tick now stops where the harvest ORDER breaks rather
+  than where the gaps are widest, which is what separates a hole nobody has
+  read from a silence the author left. The wait ends when the harvest closes
+  the hole, when the playhead reaches it, or on a tick budget, so a silence can
+  never stall delivery, and a tick that waited states itself in the delivery
+  line.
+
 ## [6.23.0] - 2026-08-13
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.23.0))

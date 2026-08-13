@@ -121,6 +121,7 @@ enum SubtitleOverlayDrainer {
     /// region always decodes whole, and the caller crosses the hole anyway once its tick budget is
     /// spent. What it does change is the cursor's claim: a tick that stopped at a hole no longer
     /// reports determination past it, which is the honest reading and the one #250 asks for.
+    ///
     /// `resumeFrom` is the packet the cursor sits on, i.e. the last one a steady tick decoded, and
     /// it is not optional detail: a hole that opens right at the cursor leaves a window holding
     /// nothing but the island, so there is no pair inside it to compare and the tick would decode
