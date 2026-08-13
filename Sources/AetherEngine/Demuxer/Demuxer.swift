@@ -1144,14 +1144,19 @@ public final class Demuxer: @unchecked Sendable {
 
     /// Seek via avformat_seek_file (not av_seek_frame: assertion failures
     /// in matroskadec.c with nested elements).
-    func seek(to seconds: Double) {
+    ///
+    /// Returns whether the reposition took. Nearly every caller seeks somewhere it is about to read
+    /// from regardless, so the result is discardable; a caller that would otherwise read the wrong
+    /// region on a forward-only source (AE#366's prime hunt) has to be able to ask.
+    @discardableResult
+    func seek(to seconds: Double) -> Bool {
         accessLock.lock()
         defer { accessLock.unlock() }
-        guard let ctx = formatContext else { return }
+        guard let ctx = formatContext else { return false }
         if let reader = timeSeekableReader {
-            guard repositionTimeSeekable(reader, toSourceSeconds: seconds, streamIndex: -1) else { return }
+            guard repositionTimeSeekable(reader, toSourceSeconds: seconds, streamIndex: -1) else { return false }
             resetAfterTimeSeek(ctx)
-            return
+            return true
         }
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
         let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
@@ -1162,6 +1167,7 @@ public final class Demuxer: @unchecked Sendable {
         }
         avformat_flush(ctx)  // prevents assertion failures in matroskadec.c
         lastReadClipIdx = -1  // AE#105: post-seek reads may land mid-clip; require a fresh clean crossing
+        return ret >= 0
     }
 
     /// Seek on one stream's native timestamp axis, never before `timestamp`.

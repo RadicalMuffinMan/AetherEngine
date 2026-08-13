@@ -171,6 +171,15 @@ extension HLSVideoEngine {
         // and re-arms (post-EOF: rebuilds) the audio bridge. Live: the restart path is VOD-only (empty
         // segmentPlan), so the live arm rebuilds the producer in place on the same connection instead.
         if case .muxerFailed = reason {
+            // AE#366: the exit reason is only `.needsAudioSampleEntryPrime` when a frame was actually
+            // captured, so a source whose selected track cannot prime the moov arrives HERE. Record
+            // the structural verdict before the revive arm rebuilds: without it every attempt pays
+            // the full search again (~256 MiB of reads) to reach the same answer.
+            if prod.audioMoovPrimeUnobtainable {
+                restartLock.lock()
+                sessionAudioMoovPrimeUnobtainable = true
+                restartLock.unlock()
+            }
             if isLiveSession {
                 handleLiveMuxerFailure(prod)
             } else {
@@ -198,7 +207,7 @@ extension HLSVideoEngine {
                     + "revive cannot resume at an offset, surfacing source failure",
                     category: .session
                 )
-                onVODSourceFailed?(code)
+                onVODSourceFailed?(code, "Source read failed")
             } else if Self.shouldReviveVODAfterReadError(
                 isLive: isLiveSession,
                 packetsWritten: prod.packetsWrittenCount,
@@ -211,7 +220,7 @@ extension HLSVideoEngine {
                     + "(readError \(code)); surfacing fatal source failure",
                     category: .session
                 )
-                onVODSourceFailed?(code)
+                onVODSourceFailed?(code, "Source read failed")
             }
             return
         }
@@ -333,7 +342,7 @@ extension HLSVideoEngine {
             // The session is dead: no producer will be rebuilt and AVPlayer would park
             // in waitingToPlay forever. Surface the same terminal failure as the
             // produced-nothing arm so the host can tear down or retry.
-            onVODSourceFailed?(code)
+            onVODSourceFailed?(code, "Source read failed")
             return
         }
         let frozen = currentPlaybackPositionProvider?() ?? 0
@@ -480,6 +489,13 @@ extension HLSVideoEngine {
                 + "(\(attempts) failures, cap \(cap)); giving up (source not muxable in this session)",
                 category: .session
             )
+            // AE#366: this used to be a bare return, and the session then had no producer, no
+            // restart and no error: the provider answered `404 init.mp4 empty` forever while
+            // AVPlayer sat in waitingToPlay, which reaches the viewer as a permanent black screen
+            // with nothing in it to act on. The readError arm above has surfaced its own exhaustion
+            // since AE#169; this is the same shape and gets the same last word. -22 is what movenc
+            // returns for the moov it cannot write, so the code carries the real cause.
+            onVODSourceFailed?(FFmpegErr.einval, "Source audio cannot be muxed")
             return
         }
         let frozen = currentPlaybackPositionProvider?() ?? 0
@@ -600,7 +616,7 @@ extension HLSVideoEngine {
                 + "gap, so the source cannot be played past it; failing instead of re-anchoring.",
                 category: .session
             )
-            onVODSourceFailed?(FFmpegErr.eio)
+            onVODSourceFailed?(FFmpegErr.eio, "Source segment could not be produced")
             return
         }
 
