@@ -10,7 +10,35 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- A HEVC source whose config record is Annex B while its packets are
+  length-prefixed no longer produces a session with no picture (#365). The mp4
+  muxer decides whether to convert samples by looking at the extradata
+  ("extradata is Annex B, assume the bitstream is too"), so on such a source it
+  ran its Annex-B converter over MP4-framed samples and emptied them: measured
+  on a 1080p fixture, a 2,158,448 B segment came out at 61,912 B while the
+  init.mp4 stayed perfectly valid and AVPlayer reached `readyToPlay` without
+  ever producing a frame. The engine now measures the framing on real packets at
+  open and converts the record to an hvcC when the two disagree, so the muxer's
+  own test comes out right. This is the shape a Matroska remux has when its
+  CodecPrivate is Annex B or missing entirely, in which case libavformat
+  synthesises Annex-B extradata from the first in-band parameter sets. The
+  predicate mirrors movenc for H.264 as well (there it reformats on anything
+  that is not an `avcC`), though an H.264 source of that shape usually fails
+  further upstream: its parser cannot split the packets either.
+- The DV Profile 7 to 8.1 rewrite is no longer a silent no-op on an Annex-B
+  source (#365). Its NAL walk assumed length prefixes, so on start-code framing
+  it read `00 00 01 40` as a 320-byte NAL, found no RPU, and shipped the P7 RPU
+  and the enhancement layer inside a container the muxer had already rewritten
+  to 8.1. It now takes the measured framing and emits the packet in the framing
+  it received.
+- The in-band parameter-set rebuild (#19) no longer runs on Annex-B extradata.
+  Bytes 21 and 22 of an Annex-B HEVC record pass its two checks by construction
+  rather than by luck (the `00 00 03` emulation-prevention pattern in a Main10
+  VPS sits exactly there), so it scanned a buffer that is not a config record at
+  all. `canonicalizeHEVCConfigRecord` has always had the `configurationVersion`
+  guard; this path never did.
 
 ## [6.24.0] - 2026-08-13
 

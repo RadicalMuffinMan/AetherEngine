@@ -47,6 +47,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let colorOverride: MP4SegmentMuxer.ColorOverride?
         /// Optional replacement for `codecpar.extradata` before write_header.
         let extradataOverride: [UInt8]?
+        /// Framing measured on real packets (#365). Nil falls back to deriving it from the extradata,
+        /// which is only correct while the two agree; on a source where they do not, every walker
+        /// downstream (A53 captions, the DV P7 RPU rewrite) reads the packet at the wrong offsets.
+        let nalFramingOverride: VideoNALFraming?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
@@ -56,7 +60,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             convertP7ToProfile81: Bool = false,
             rewriteDoviConfigTo81: Bool = false,
             colorOverride: MP4SegmentMuxer.ColorOverride? = nil,
-            extradataOverride: [UInt8]? = nil
+            extradataOverride: [UInt8]? = nil,
+            nalFramingOverride: VideoNALFraming? = nil
         ) {
             self.codecpar = codecpar
             self.timeBase = timeBase
@@ -66,6 +71,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             self.rewriteDoviConfigTo81 = rewriteDoviConfigTo81
             self.colorOverride = colorOverride
             self.extradataOverride = extradataOverride
+            self.nalFramingOverride = nalFramingOverride
         }
     }
 
@@ -864,7 +870,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         case AV_CODEC_ID_HEVC: a53CodecKind = .hevc
         default: a53CodecKind = nil
         }
-        a53NALFraming = A53SEIParser.nalFraming(
+        // #365: the measured framing wins when the session has one. Deriving it from the extradata is
+        // a guess that only holds while both ends agree, and a source where they disagree is exactly
+        // the one whose packets nobody can walk.
+        a53NALFraming = video.nalFramingOverride ?? A53SEIParser.nalFraming(
             codec: a53CodecKind ?? .h264,
             extradata: video.codecpar.pointee.extradata.map { UnsafePointer($0) },
             size: Int(video.codecpar.pointee.extradata_size))
@@ -2816,7 +2825,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // Probe the enhancement-layer type once (latching on the first RPU seen, before
                         // conversion strips it); a FEL source loses refinement in the P8.1 conversion.
                         if !loggedEnhancementLayerType,
-                           let elType = DoviRpuConverter.enhancementLayerType(packet) {
+                           let elType = DoviRpuConverter.enhancementLayerType(
+                               packet, framing: a53NALFraming) {
                             loggedEnhancementLayerType = true
                             if elType == "FEL" {
                                 EngineLog.emit(
@@ -2827,7 +2837,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 )
                             }
                         }
-                        if !DoviRpuConverter.convertPacketToProfile81(packet) {
+                        if !DoviRpuConverter.convertPacketToProfile81(
+                            packet, framing: a53NALFraming) {
                             if !loggedP7ConversionFailure {
                                 loggedP7ConversionFailure = true
                                 EngineLog.emit(
