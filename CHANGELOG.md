@@ -12,6 +12,22 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.22.1] - 2026-08-13
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.22.1))
+
+### Fixed
+
+- A seek no longer carries a pre-seek subtitle into the new position (#357).
+  A PGS composition has no end of its own: it is published with FFmpeg's
+  open-ended placeholder end and closed when its successor arrives. A jump
+  outruns that successor, and the retention prune filters on the end time,
+  which a placeholder can never age out of, so the old cue stayed in the
+  published window covering the new playhead and every host that asks which
+  cue is active rendered it. A reset tick now retires the unconfirmed end at
+  the start of its reconstruction window, on the store and on the #100 hold
+  alike. An authored duration is untouched.
+
 ## [6.22.0] - 2026-08-13
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.22.0))
