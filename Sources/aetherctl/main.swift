@@ -471,6 +471,10 @@ if first == "play" {
     // #240: absolute far-seek targets, cycled one per --seek-every tick (e.g. 600,30,302,640).
     let seekPattern = takeStringFlag("--seek-pattern", from: &rest)
         .map { $0.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) } } ?? []
+    // #362: stop seeking after N seeks, so a run can be a BURST and then play. The reported
+    // shape needs both halves: the burst leaves the store in the state under test, and only the
+    // playing half shows what the overlay carries through it.
+    let seekCount = takeIntFlag("--seek-count", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
     let censusThresholdMB = takeIntFlag("--census-threshold-mb", from: &rest)
@@ -543,7 +547,7 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,

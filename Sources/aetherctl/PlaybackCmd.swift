@@ -27,7 +27,7 @@ struct TeletextPageSwitchRequest {
 /// and optionally activate an embedded subtitle track (`--subs <codec-or-lang>`)
 /// and log every overlay cue that arrives. Repro harness for "loads but never
 /// plays" reports and for live teletext end-to-end validation (#107).
-func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
+func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false,
                     censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false,
                     sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil,
                     teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil,
@@ -44,12 +44,12 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
         print("[aetherctl] audio switch: selectAudioTrack(index: \(audioSwitch.index)) "
               + "\(audioSwitch.delayMilliseconds) ms after the load returns")
     }
-    print("aetherctl play: \(url.absoluteString) (seconds=\(seconds) live=\(live) nativeHLS=\(nativeHLS) liveIngest=\(liveIngest) dvrWindow=\(dvrWindow.map { String($0) } ?? "nil") subs=\(subsPick ?? "off") hostCalls=\(hostCalls.isEmpty ? "none" : hostCalls.joined(separator: "+")) audioStats=\(audioStats) seekEvery=\(seekEvery.map { String($0) } ?? "off") seekPattern=\(seekPattern.isEmpty ? "off" : seekPattern.map { String($0) }.joined(separator: "/")) startPosition=\(startPosition.map { String($0) } ?? "0"))")
+    print("aetherctl play: \(url.absoluteString) (seconds=\(seconds) live=\(live) nativeHLS=\(nativeHLS) liveIngest=\(liveIngest) dvrWindow=\(dvrWindow.map { String($0) } ?? "nil") subs=\(subsPick ?? "off") hostCalls=\(hostCalls.isEmpty ? "none" : hostCalls.joined(separator: "+")) audioStats=\(audioStats) seekEvery=\(seekEvery.map { String($0) } ?? "off") seekCount=\(seekCount.map { String($0) } ?? "unbounded") seekPattern=\(seekPattern.isEmpty ? "off" : seekPattern.map { String($0) }.joined(separator: "/")) startPosition=\(startPosition.map { String($0) } ?? "0"))")
     print("")
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, startPosition: startPosition, frameTimes: frameTimes, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -227,7 +227,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], startPosition: Double? = nil, frameTimes: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, sequentialOrigin: Bool = false, declaredDuration: Double? = nil) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, sequentialOrigin: Bool = false, declaredDuration: Double? = nil) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -527,7 +527,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         // #220 repro affordance: a periodic short backward seek drives the subtitle drain
         // through .resetAndDecode and re-anchors the #151 forward prefetcher, the churn a
         // rebuffering remote source produces on its own. Steady-state runs cannot reach it.
-        if let seekEvery, seekEvery > 0, tick > 10, Double(tick).truncatingRemainder(dividingBy: seekEvery) == 0 {
+        if let seekEvery, seekEvery > 0, tick > 10, Double(tick).truncatingRemainder(dividingBy: seekEvery) == 0,
+           seekLandings.count < (seekCount ?? .max) {
             // #240: `--seek-pattern` walks a list of absolute targets instead of the short
             // backward hop, because the two exercise different machinery. A 6 s rewind lands in
             // the segment cache and never restarts the producer; a far seek restarts it, and the

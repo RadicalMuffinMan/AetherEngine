@@ -884,6 +884,13 @@ public final class AetherEngine: ObservableObject {
     /// step ahead of the decode, which is what `SubtitlePacketStore.firstPTS(streamIndex:after:)`
     /// needs to answer at all.
     nonisolated static let subtitleForwardPrefetchLeadMarginSeconds: Double = 15
+    /// #362: how many ticks a hole may hold the cursor before the tick decodes across it anyway.
+    /// The second backstop; the first is the playhead reaching the hold, which ends it regardless.
+    /// Generous on purpose (10 s at 2 Hz): the hold delays a region the drain is filling 60 s ahead
+    /// of the playhead, while a budget that expires before the pump has closed the hole puts the
+    /// cursor past unread content, which is the defect itself. Measured: 6 ticks was too short for
+    /// a 15 s hole on a fixture the pump refilled at roughly 4 s of content per second.
+    nonisolated static let subtitleDrainHarvestGapTicks: Int = 20
     nonisolated static let subtitleDrainBackscanSeconds: Double = 15
     nonisolated static let subtitleDrainJumpThresholdSeconds: Double = 2.5
     nonisolated static let subtitleDrainTickNanoseconds: UInt64 = 500_000_000

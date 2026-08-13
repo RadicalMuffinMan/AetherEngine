@@ -58,6 +58,11 @@ enum SubtitleDeliveryStatement {
         case trimOnly
         /// Cues reached the retained array.
         case published
+        /// #362: the tick stopped at a hole in the harvest and decoded nothing past it. A designed
+        /// wait with a tick budget, not a failure, but it has to name itself: without this line a
+        /// held tick reads as `empty`, which says the store was never fed here when in fact it was
+        /// fed on both sides and the middle is on its way.
+        case harvestHole
     }
 
     /// The per-tick counts, in the order the tick produces them. Kept as plain numbers rather than
@@ -83,6 +88,10 @@ enum SubtitleDeliveryStatement {
         var reconstructing = false
         /// Set when the tick could not build a decoder for the channel at all.
         var decoderMissing = false
+        /// #362: where the tick stopped because the harvest has a hole there, nil when it read its
+        /// whole window. The position is the point of the line: it says which stretch of the source
+        /// is waiting, so a report can be matched against the producer's own log.
+        var harvestGapAt: Double? = nil
 
         /// Cues an event carried that the gate did not pass. The subtraction is safe: `admitted`
         /// can exceed the tick's own `cues` when a finalized candidate seeded by an earlier tick is
@@ -91,6 +100,9 @@ enum SubtitleDeliveryStatement {
 
         var outcome: Outcome {
             if decoderMissing { return .noDecoder }
+            // #362 before `empty`: a held tick decodes nothing by decision, and the two states have
+            // opposite answers to "is anything coming".
+            if packets == 0, harvestGapAt != nil { return .harvestHole }
             if packets == 0 { return .empty }
             if events == 0 { return .undecodable }
             if published > 0 { return .published }
@@ -152,7 +164,8 @@ enum SubtitleDeliveryStatement {
             "recon=\(tally.reconstructing ? 1 : 0)",
             "outcome=\(tally.outcome.rawValue)",
         ]
-        return fields.joined(separator: " ")
+        guard let gapAt = tally.harvestGapAt else { return fields.joined(separator: " ") }
+        return (fields + ["gapAt=\(String(format: "%.2f", gapAt))"]).joined(separator: " ")
     }
 
     /// Budget for the per-cue `[applySubtitleEvent #N]` line, refilled per seek generation.

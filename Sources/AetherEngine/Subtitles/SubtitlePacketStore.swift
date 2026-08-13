@@ -17,14 +17,21 @@ struct StoredSubtitlePacket: Sendable {
     /// only in packet side data (the decoder never puts them in the ASS line), so a rebuilt packet
     /// loses the cue's placement unless the string rides along with the payload.
     let webvttSettings: String?
+    /// #362: when this entry was harvested, on the store's own monotonic append counter. A harvest
+    /// reads a stream forwards, so within one run PTS and sequence rise together; a PTS-ascending
+    /// pair whose sequence DESCENDS is two different runs meeting, and the span between them is one
+    /// nobody has read. That is the only signal that separates a hole in the harvest from a silence
+    /// in the source, and the drain needs it to decide whether waiting can bring anything.
+    let sequence: UInt64
 
     init(ptsSeconds: Double, durationSeconds: Double, flags: Int32, payload: Data,
-         webvttSettings: String? = nil) {
+         webvttSettings: String? = nil, sequence: UInt64 = 0) {
         self.ptsSeconds = ptsSeconds
         self.durationSeconds = durationSeconds
         self.flags = flags
         self.payload = payload
         self.webvttSettings = webvttSettings
+        self.sequence = sequence
     }
 }
 
@@ -90,6 +97,8 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// targets, never evicted by aggregate pressure. `lastTouchByStream` orders non-protected
     /// streams coldest-first for eviction; a monotonic counter (no wall clock) drives it.
     private var totalBytes: Int = 0
+    /// #362: monotonic harvest order, stamped on every appended entry. See `StoredSubtitlePacket`.
+    private var appendCounter: UInt64 = 0
     private var protectedStreams: Set<Int32> = []
     private var lastTouchByStream: [Int32: UInt64] = [:]
     private var touchCounter: UInt64 = 0
@@ -128,11 +137,17 @@ final class SubtitlePacketStore: @unchecked Sendable {
         let before = bytesByStream[streamIndex] ?? 0
         var entries = entriesByStream[streamIndex] ?? []
         var bytes = before
+        // #362: a re-harvest of a packet already stored takes the FRESH sequence. It is a new
+        // observation of that position by the run doing the writing, and that is exactly what the
+        // drain reads it for: the run has now covered this PTS, so the span behind it is no longer
+        // a hole. Keeping the old sequence would leave a boundary the drain waits at forever.
+        appendCounter &+= 1
         let entry = StoredSubtitlePacket(ptsSeconds: ptsSeconds,
                                          durationSeconds: durationSeconds,
                                          flags: flags,
                                          payload: payload,
-                                         webvttSettings: webvttSettings)
+                                         webvttSettings: webvttSettings,
+                                         sequence: appendCounter)
         // #235: several packets legitimately share a PTS. ASS/SSA authors overlapping lines on
         // identical Start/End, and a karaoke or layered-style track puts a whole burst of distinct
         // Dialogue events on one timestamp. Only a byte-identical payload is the pump and the
@@ -355,7 +370,15 @@ final class SubtitlePacketStore: @unchecked Sendable {
         guard let entries = entriesByStream[streamIndex] else { return nil }
         var index = Self.lowerBound(entries, ptsSeconds)
         while index < entries.count, entries[index].ptsSeconds <= ptsSeconds { index += 1 }
-        return index < entries.count ? entries[index].ptsSeconds : nil
+        guard index < entries.count else { return nil }
+        // Deliberately answered even across a harvest hole, where the next stored packet belongs to
+        // an older run and the real successor is still on its way. The answer is then too late, but
+        // it is BOUNDED and self-correcting: the clear that lands when the hole fills trims the cue
+        // to its authored end. Refusing to answer leaves the cue carrying the open placeholder, and
+        // the next seek launders that into #357's window boundary, which nothing ever corrects.
+        // Measured both ways on the fixture: answering, 0 to 2 sets ended late; refusing, 4 to 5,
+        // the worst by 74 s.
+        return entries[index].ptsSeconds
     }
 
     func frontier(streamIndex: Int32) -> Double? {
@@ -385,5 +408,6 @@ final class SubtitlePacketStore: @unchecked Sendable {
         protectedStreams.removeAll()
         totalBytes = 0
         touchCounter = 0
+        appendCounter = 0
     }
 }

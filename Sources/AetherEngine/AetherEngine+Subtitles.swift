@@ -351,6 +351,42 @@ extension AetherEngine {
                 count: entries.count,
                 cap: Self.subtitleDrainMaxPacketsPerTick,
                 ptsAt: { entries[$0].ptsSeconds })
+            // #362: stop at a hole the harvest is still filling instead of decoding across it and
+            // moving the cursor to its far side, which is how a stretch of the film loses its
+            // subtitles entirely: after a seek the pump refills from behind the landing while an
+            // island the previous run harvested sits further ahead, and the cursor never comes back.
+            // The hold is anchored on the near side and budgeted in ticks, so a boundary the harvest
+            // never closes costs a bounded delay and then decodes exactly as before.
+            var decodeEnd = batchEnd
+            var gapHoldAt: Double? = nil
+            var gapHoldSequence: UInt64 = 0
+            var gapHoldTicksLeft = 0
+            let held = subtitleDrainCursors[channel]
+            // The playhead catching up to the hold ends it whatever the budget says: from there on
+            // the island is what the viewer is about to need, and waiting would dark the overlay
+            // for content that IS stored. That, not the tick budget, is the real bound.
+            if let heldAt = held?.harvestGapAt, heldAt >= playhead,
+               (held?.harvestGapTicksLeft ?? 0) > 0, !isReset,
+               !SubtitleOverlayDrainer.harvestGapHoldResumes(
+                firstSequence: entries.first?.sequence,
+                heldSequence: held?.harvestGapSequence ?? 0) {
+                // Still waiting: the window past the hold begins with the same island as before.
+                decodeEnd = 0
+                gapHoldAt = heldAt
+                gapHoldSequence = held?.harvestGapSequence ?? 0
+                gapHoldTicksLeft = (held?.harvestGapTicksLeft ?? 0) - 1
+            } else if let cut = SubtitleOverlayDrainer.harvestGapCut(
+                count: batchEnd,
+                ptsAt: { entries[$0].ptsSeconds },
+                sequenceAt: { entries[$0].sequence },
+                resumeFrom: isReset ? nil : held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
+                notBefore: playhead), held?.harvestGapAt != cut.at || (held?.harvestGapTicksLeft ?? 0) > 0 {
+                decodeEnd = cut.index
+                gapHoldAt = cut.at
+                gapHoldSequence = cut.sequence
+                gapHoldTicksLeft = held?.harvestGapAt == cut.at
+                    ? (held?.harvestGapTicksLeft ?? 0) - 1 : Self.subtitleDrainHarvestGapTicks
+            }
             // #271: bind the channel's cue array ONCE for the whole batch. `subtitleCues` is
             // `@Published`, whose wrapper exposes get/set and no `_modify`, so passing it inout per
             // event both copy-on-writes the array and publishes it: every consumer then walks a
@@ -369,11 +405,14 @@ extension AetherEngine {
             // window of undecodable packets is indistinguishable in the log from a window that
             // delivered normally.
             var tally = SubtitleDeliveryStatement.Tally()
-            tally.packets = batchEnd
+            tally.packets = decodeEnd
             // The cursor only advances to an actually-decoded packet's PTS: a window that is
             // empty because the producer has not reached it yet must be rescanned next tick.
             var lastDecoded = subtitleDrainCursors[channel]?.lastDecodedPts
-            for entry in entries[..<batchEnd] {
+            // #362: the cursor's own harvest sequence rides with it, so the next tick can tell
+            // whether its first entry was read by the same run or is the far side of a hole.
+            var lastDecodedSequence = subtitleDrainCursors[channel]?.lastDecodedSequence ?? 0
+            for entry in entries[..<decodeEnd] {
                 if let event = Self.decodeStoredSubtitlePacket(entry, with: decoder) {
                     tally.events += 1
                     tally.cues += event.cues.count
@@ -387,19 +426,25 @@ extension AetherEngine {
                     }
                 }
                 lastDecoded = entry.ptsSeconds
+                lastDecodedSequence = entry.sequence
             }
             if case .resetAndDecode = plan, batchEnd == 0 {
                 // Fresh window with nothing stored yet: anchor just behind the window start so
                 // steady ticks rescan it without re-triggering the discontinuity path.
                 lastDecoded = window.from
+                lastDecodedSequence = 0
             }
             // #276: floor now, ceiling after the statement below states it.
             let runRetained = retained ?? .init(from: coverageStart ?? window.from, through: nil)
             subtitleDrainCursors[channel] = SubtitleDrainCursor(
                 lastDecodedPts: lastDecoded ?? window.from,
+                lastDecodedSequence: lastDecoded == nil ? 0 : lastDecodedSequence,
                 lastPlayhead: playhead,
                 coverageStart: coverageStart ?? window.from,
-                retained: runRetained)
+                retained: runRetained,
+                harvestGapAt: gapHoldAt,
+                harvestGapSequence: gapHoldSequence,
+                harvestGapTicksLeft: gapHoldTicksLeft)
             // #143/#204: a renderable composition at/after the playhead ends reconstruction while
             // decoding above. If the pass remains active with a candidate after the whole window,
             // finalize it. Raw packet presence cannot answer this: the landing line's own zero-object
@@ -408,7 +453,12 @@ extension AetherEngine {
             // #271: "after the whole window" is now literal. A capped batch leaves the rest of the
             // window undecoded, and its successor composition may sit in the remainder, so the pass
             // carries into the next tick instead of finalizing on a partial view.
-            if batchEnd == entries.count,
+            // #362: a hole hold is not a partial view of the landing. Holes are honoured only at or
+            // after the playhead, so everything that can seed the candidate has decoded, and the
+            // remainder sits beyond a gap the harvest has not closed. Waiting for that would keep
+            // the overlay dark for the whole hold budget, which is the one thing #143 exists to
+            // prevent; the successor trims the published line when the hole does fill.
+            if decodeEnd == entries.count || gapHoldAt != nil,
                SubtitleOverlayDrainer.shouldFinalizeReconstruction(
                 reconstructing: pgsStaleArrivalGates[channel]?.reconstructing ?? false,
                 hasCandidate: pgsStaleArrivalGates[channel]?.hasReconstructionCandidate ?? false) {
@@ -428,6 +478,7 @@ extension AetherEngine {
                 }
             }
             tally.reconstructing = pgsStaleArrivalGates[channel]?.reconstructing ?? false
+            tally.harvestGapAt = gapHoldAt
             // #362: every cue still open takes its end from the next packet the store holds on this
             // stream. Run over the whole retained array rather than this batch's cues: a set left
             // open by an earlier tick (its successor not harvested yet, the batch cap, the window's
