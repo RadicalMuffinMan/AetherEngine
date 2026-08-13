@@ -392,6 +392,7 @@ extension AetherEngine {
         // generic live HLS origins (IPTV / Stremio add-on channels) enforce per-stream Referer /
         // User-Agent / Authorization headers, so LoadOptions.httpHeaders rides into the AVURLAsset (#119).
         // forwardBufferDuration: 0 = system-adaptive; the 4 s VOD floor caused a 3-4 s black screen on live startup.
+        if loadGeneration == bypassGeneration { recordStartupCheckpoint(.sessionConstructed) }   // #361
         host.load(url: playbackURL,
                   startPosition: startPosition,
                   perFrameHDR: true,
@@ -1285,6 +1286,11 @@ extension AetherEngine {
         // and recovery reloads keep their own contracts.
         let inPlaceHandover = pendingInPlaceItemHandover
         pendingInPlaceItemHandover = false
+        // #361: recorded here rather than after the loader returns, because on the paths that await
+        // their host's load the session is ready before the return and this checkpoint would arrive
+        // behind one it must precede. The generation guard is what keeps a superseded loader from
+        // writing into its successor's sequence.
+        if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }
         host.load(url: playbackURL,
                   startPosition: startPosition,
                   perFrameHDR: true,
@@ -1463,6 +1469,7 @@ extension AetherEngine {
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
             Task { @MainActor in self?.setReaderNetworkPhase(phase) }
         }
+        if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
         try await Task.detached(priority: .userInitiated) {
             [host, preopenedDemuxer, url, sourceHTTPHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
@@ -1532,6 +1539,7 @@ extension AetherEngine {
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
             Task { @MainActor in self?.setReaderNetworkPhase(phase) }
         }
+        if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
         try await Task.detached(priority: .userInitiated) {
             [host, preopenedDemuxer, url, sourceHTTPHeaders, probesize, maxAnalyzeDuration, sequentialOrigin, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
@@ -1597,6 +1605,7 @@ extension AetherEngine {
 
         // No detached hop: AudioAVPlayerHost.load is MainActor + replaceCurrentItem-based (no blocking I/O), and the host is SHARED. Detaching opened a reorder window where a superseded load A's body ran after successor B, putting A's item back on the shared AVPlayer.
         try checkLoadCurrent(generation)
+        recordStartupCheckpoint(.sessionConstructed)   // #361, past the guard above
         try await host.load(url: url, startPosition: startPosition, httpHeaders: httpHeaders)
         // Superseded: don't tear the shared host down (successor may be using it); just unwind before play()/state writes.
         try checkLoadCurrent(generation)

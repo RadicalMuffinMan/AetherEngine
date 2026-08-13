@@ -28,8 +28,17 @@ public enum StartupCheckpoint: Int, CaseIterable, Sendable, Comparable {
     /// The backend host is constructed and handed its item.
     case sessionConstructed
     /// The session reports itself ready (`isSessionReady`).
+    ///
+    /// Measured on the native path, this one is usually overtaken by the frame: AVPlayer's layer
+    /// holds a picture before the item publishes `readyToPlay`, so the bar steps straight from
+    /// `sessionConstructed` to `presenting` there. It is kept because the software and audio paths
+    /// do pass it in order, and because on a start where the picture lags readiness it is the only
+    /// movement in that stretch.
     case ready
-    /// The first frame is on screen. Audio sessions, which have no picture, reach this at readiness.
+    /// The first frame is on screen, and the end of the ladder. Deliberately not "playing": on the
+    /// native path `state` becomes `.playing` before the item is ready, so a ladder ending there
+    /// would report a finished startup over a black screen, and a paused mount would never finish
+    /// at all. Audio sessions, which have a picture nowhere, reach this at readiness.
     case presenting
 
     public static func < (lhs: StartupCheckpoint, rhs: StartupCheckpoint) -> Bool {

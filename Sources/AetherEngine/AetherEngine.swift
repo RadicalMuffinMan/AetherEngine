@@ -1276,6 +1276,11 @@ public final class AetherEngine: ObservableObject {
         }
         startupGeneration &+= 1
         startupProgress = StartupProgress(generation: startupGeneration, checkpoint: .dispatched)
+        EngineLog.emit(
+            "[AetherEngine] #361 startup 0/\(StartupCheckpoint.total) dispatched "
+            + "(gen \(startupGeneration))",
+            category: .engine
+        )
         return startupGeneration
     }
 
@@ -2765,7 +2770,6 @@ public final class AetherEngine: ObservableObject {
                 state = .error("Failed to load: \(error.localizedDescription)")
                 throw error
             }
-            recordStartupCheckpoint(.sessionConstructed, generation: startupGen)   // #361
             // No probe ran on this bypass; there is nothing to report.
             return nil
         }
@@ -2906,7 +2910,6 @@ public final class AetherEngine: ObservableObject {
                 state = .error("Failed to load: \(error.localizedDescription)")
                 throw error
             }
-            recordStartupCheckpoint(.sessionConstructed, generation: startupGen)   // #361
             return nil
         }
 
@@ -3046,7 +3049,6 @@ public final class AetherEngine: ObservableObject {
                 state = .error("Failed to load: \(error.localizedDescription)")
                 throw error
             }
-            recordStartupCheckpoint(.sessionConstructed, generation: startupGen)   // #361
             startAtmosConfirmation()
             return sourceProbe
         }
@@ -3354,7 +3356,6 @@ public final class AetherEngine: ObservableObject {
                     preopenedDemuxer: probeOpened ? probe : nil,
                     generation: gen
                 )
-                recordStartupCheckpoint(.sessionConstructed, generation: startupGen)   // #361
                 playbackBackend = .software
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: true
@@ -3397,7 +3398,6 @@ public final class AetherEngine: ObservableObject {
                     preopenedDemuxer: probeOpened ? probe : nil,
                     generation: gen
                 )
-                recordStartupCheckpoint(.sessionConstructed, generation: startupGen)   // #361
                 playbackBackend = .native
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: false
