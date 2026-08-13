@@ -1067,8 +1067,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    b) numOfArrays>0 but carrying non-parameter-set arrays (libx265's user-data SEI_PREFIX, AE#187):
         //       strip everything but VPS/SPS/PPS. Apple TV hardware rejects an hvcC with an SEI array
         //       (tracks count=0 / -12848); macOS + the tvOS Simulator tolerate it, so it is device-only.
+        //    c) Annex-B extradata (#365): a Matroska remux whose CodecPrivate is Annex B, or one with
+        //       none at all where libavformat synthesised it from in-band parameter sets. The mp4
+        //       muxer reads that as "the bitstream is Annex B too" and rewrites every sample; when the
+        //       packets are in fact length-prefixed it empties them. Measured on packets, then the
+        //       record is converted so the muxer's own test comes out right.
+        let framingNormalization = normalizeVideoFraming(
+            demuxer: dem,
+            videoStreamIndex: videoIndex,
+            codecpar: codecpar,
+            isLive: isLiveSession
+        )
+        let measuredVideoNALFraming = framingNormalization.measuredFraming
+
         let hevcExtradataOverride: [UInt8]?
-        if let rebuilt = rebuildHEVCExtradataWithInBandParameterSets(
+        if let normalized = framingNormalization.extradataOverride {
+            hevcExtradataOverride = normalized
+        } else if let rebuilt = rebuildHEVCExtradataWithInBandParameterSets(
             demuxer: dem,
             videoStreamIndex: videoIndex,
             codecpar: codecpar,
@@ -1159,7 +1174,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             convertP7ToProfile81: convertP7ToProfile81,
             rewriteDoviConfigTo81: rewriteDoviConfigTo81,
             colorOverride: p5ColorOverride,
-            extradataOverride: hevcExtradataOverride
+            extradataOverride: hevcExtradataOverride,
+            nalFramingOverride: measuredVideoNALFraming
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
