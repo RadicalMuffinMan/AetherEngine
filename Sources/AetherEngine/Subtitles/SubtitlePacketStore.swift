@@ -343,6 +343,21 @@ final class SubtitlePacketStore: @unchecked Sendable {
         return entries.filter { $0.ptsSeconds >= from && $0.ptsSeconds <= through }
     }
 
+    /// #362: PTS of the first stored packet on `streamIndex` strictly after `ptsSeconds`.
+    ///
+    /// A PGS display set has no end of its own and is closed by whatever packet follows it on the
+    /// stream, its own clear or the next composition alike. So this IS the authored end of a set,
+    /// available from the harvest long before the drain window's forward edge reaches it. Strictly
+    /// after, because one display set can reach the store as several same-PTS chunks (raw SUP, split
+    /// MPEG-TS PES) and closing a set at its own start would render nowhere.
+    func firstPTS(streamIndex: Int32, after ptsSeconds: Double) -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entries = entriesByStream[streamIndex] else { return nil }
+        var index = Self.lowerBound(entries, ptsSeconds)
+        while index < entries.count, entries[index].ptsSeconds <= ptsSeconds { index += 1 }
+        return index < entries.count ? entries[index].ptsSeconds : nil
+    }
+
     func frontier(streamIndex: Int32) -> Double? {
         lock.lock(); defer { lock.unlock() }
         return entriesByStream[streamIndex]?.last?.ptsSeconds

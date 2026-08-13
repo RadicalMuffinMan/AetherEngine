@@ -428,6 +428,17 @@ extension AetherEngine {
                 }
             }
             tally.reconstructing = pgsStaleArrivalGates[channel]?.reconstructing ?? false
+            // #362: every cue still open takes its end from the next packet the store holds on this
+            // stream. Run over the whole retained array rather than this batch's cues: a set left
+            // open by an earlier tick (its successor not harvested yet, the batch cap, the window's
+            // forward edge) is closed by the first tick that finds the answer stored, without waiting
+            // for the drain window to reach it. Runs before the boundary close can launder it and
+            // before the publish below, so the host never sees the placeholder at all.
+            if Self.closeOpenEndedCues(&cues, atNextPacket: {
+                store.firstPTS(streamIndex: streamIndex, after: $0)
+            }) {
+                didMutate = true
+            }
             // Retention prune, once per batch instead of once per event: it depends only on the
             // playhead, which the batch does not move.
             if isSubtitleActive(for: channel),
@@ -502,7 +513,7 @@ extension AetherEngine {
     }
 
     /// Start (or re-anchor) the forward prefetcher: a subtitle-only side demuxer that fills the
-    /// session packet store up to playhead + subtitleDrainLeadSeconds independent of the
+    /// session packet store past playhead + subtitleDrainLeadSeconds independent of the
     /// producer's forward park (#102), so `$subtitleCues` holds cues a host-applied ADVANCE sync
     /// offset can find, text and bitmap alike. Best effort: if it wedges or fails to open, the
     /// drainer keeps working off the pump's harvest exactly as before.
@@ -510,8 +521,11 @@ extension AetherEngine {
         let anchor = max(0, startAt ?? sourceTime)
         // Phase D: while the OCR worker is armed the prefetcher must out-run the worker's
         // 240 s window, or the packet store never holds what the worker wants to decode.
+        // #362: otherwise it parks a margin BEYOND the drain window, so the set at the window's
+        // forward edge has its own clear stored and can be closed where the author closed it.
         let lead = subtitleOCRArmedOrdinal != nil
-            ? Self.subtitleOCRPrefetchLeadSeconds : Self.subtitleDrainLeadSeconds
+            ? Self.subtitleOCRPrefetchLeadSeconds
+            : Self.subtitleDrainLeadSeconds + Self.subtitleForwardPrefetchLeadMarginSeconds
         // #240: a live session moves its own cursor. Only a changed lead still needs a rebuild
         // (the loop captures it at start), and only a live task can be handed the request at all.
         if let reanchor = subtitleForwardPrefetchReanchor,
@@ -1011,6 +1025,10 @@ extension AetherEngine {
     /// seek, only their unconfirmed end is retired. An authored duration is untouched, which is what
     /// separates this from a blanket "drop the pre-seek set": a long ASS sign keeps its own end.
     /// Returns whether any cue was closed.
+    ///
+    /// #362: this is the LAST resort, not the first. `closeOpenEndedCues(_:atNextPacket:)` closes an
+    /// open set at the packet the author put there; only a set with no stored successor at all
+    /// reaches this boundary, and its end is then owned by the seek rather than by the author.
     @discardableResult
     nonisolated static func closeOpenEndedCues(_ cues: inout [SubtitleCue],
                                                startingBefore boundary: Double) -> Bool {
@@ -1020,6 +1038,37 @@ extension AetherEngine {
             guard cue.startTime < boundary, cue.endTime > boundary,
                   cue.endTime - cue.startTime > subtitleOpenEndedWindowSeconds else { continue }
             cues[i] = cue.with(endTime: boundary)
+            changed = true
+        }
+        return changed
+    }
+
+    /// #362: close every cue still carrying the placeholder window at the PTS of the next packet
+    /// stored on its stream, which for a bitmap set is its authored end (its own clear composition,
+    /// or the successor that replaces it, whichever the author put there first).
+    ///
+    /// The drain decodes a window bounded at `playhead + lead`, and that forward edge falls wherever
+    /// it falls. When it lands between a set and the clear a few seconds later, the set publishes
+    /// open, the cursor moves on, and nothing goes back for the clear: the next reset starts at a new
+    /// landing, so the set is closed by whatever composition turns up next, tens or hundreds of
+    /// seconds away (report: 3.55 s authored, 76.7 s delivered, and 817 s in the same session).
+    ///
+    /// The answer was already in the store. The pump harvests packets far ahead of the drain window,
+    /// so the clear is retained at the moment the set publishes and no decode is needed to read its
+    /// PTS: the successor's own `pgsTrimAt` would set exactly this end when the window eventually
+    /// reaches it. Where the store has nothing after the set (the harvest frontier, a cut file) the
+    /// cue stays open, because there is no authored answer there and the alternatives are all
+    /// laundered ends. Returns whether any cue was closed.
+    @discardableResult
+    nonisolated static func closeOpenEndedCues(_ cues: inout [SubtitleCue],
+                                               atNextPacket nextPacketPTS: (Double) -> Double?) -> Bool {
+        var changed = false
+        for i in 0..<cues.count {
+            let cue = cues[i]
+            guard cue.endTime - cue.startTime > subtitleOpenEndedWindowSeconds,
+                  let end = nextPacketPTS(cue.startTime),
+                  end > cue.startTime, end < cue.endTime else { continue }
+            cues[i] = cue.with(endTime: end)
             changed = true
         }
         return changed

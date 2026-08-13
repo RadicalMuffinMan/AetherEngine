@@ -873,6 +873,17 @@ public final class AetherEngine: ObservableObject {
     /// array-clear sites.
     var nextRetainedSubtitleCueID: Int = 0
     nonisolated static let subtitleDrainLeadSeconds: Double = 60
+    /// #362: how far the forward prefetch (#151) parks BEYOND the drain window's forward edge.
+    ///
+    /// Without it the two lines coincide, and that is where a bitmap set loses its authored end: the
+    /// last set inside the drain window publishes with FFmpeg's open placeholder, and the clear that
+    /// closes it a few seconds later is past the edge, so it is neither decoded nor stored, and
+    /// nothing can read it. The set is then closed by whatever composition the next landing decodes,
+    /// tens or hundreds of seconds later. The margin costs no extra bytes over a session (the reader
+    /// is sequential either way, the park only decides when), it just keeps the harvest one authored
+    /// step ahead of the decode, which is what `SubtitlePacketStore.firstPTS(streamIndex:after:)`
+    /// needs to answer at all.
+    nonisolated static let subtitleForwardPrefetchLeadMarginSeconds: Double = 15
     nonisolated static let subtitleDrainBackscanSeconds: Double = 15
     nonisolated static let subtitleDrainJumpThresholdSeconds: Double = 2.5
     nonisolated static let subtitleDrainTickNanoseconds: UInt64 = 500_000_000
