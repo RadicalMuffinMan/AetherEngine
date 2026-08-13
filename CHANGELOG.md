@@ -10,6 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.25.0] - 2026-08-13
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.0))
+
+### Added
+
+- `VideoNALFraming`, the framing of a packet payload (Annex B or length-prefixed).
+  `DoviRpuConverter.convertPacketToProfile81` and `enhancementLayerType` take it as a
+  defaulted parameter, so existing calls are unchanged; a caller that hands them Annex-B
+  packets now has a way to say so.
+
 ### Fixed
 
 - A source whose selected audio track is sparsely interleaved no longer ends in
