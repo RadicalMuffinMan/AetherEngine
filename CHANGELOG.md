@@ -10,7 +10,35 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- A live `.m3u8` on the raw live path is now routed onto the live ingest
+  instead of failing closed (#363). The AE#140 detection stays (an `#EXTM3U`
+  body where a container's first byte belongs), only its destination changes:
+  the engine builds the `HLSLiveIngestReader` it used to name in the error, and
+  that reader puts `LoadOptions.httpHeaders` on the playlist, on every segment
+  and on every AES key, which is what a tokenized IPTV origin enforces per
+  request. `AetherEngineError.hlsPlaylistOnRawLivePath` still exists and still
+  throws for a custom `IOReader`, which has no playlist URL to ingest from.
+
+### Fixed
+
+- A live remote-HLS session that the origin refuses outright no longer dies at
+  the mount (#363). HTTP 401 and 403 reach the item as `NSURLError` -1013 and
+  -1102, and the engine now hands such a session to the live ingest, whose
+  fetcher is a different client at that origin: configured headers on every
+  request, at most four concurrent fetches, no AVFoundation user agent. Gated
+  by `LoadOptions.nativeRemoteHLSIngestFallback` like the #168 carriage
+  recovery, fires once per session, and is deliberately not remembered for the
+  next load, because a refusal can be an expired token or a full connection
+  cap rather than a property of the master.
+- `aetherctl` can drive a header-enforcing origin at last: `play --header
+  "Name: Value"` (repeatable) fills `LoadOptions.httpHeaders` and rides into
+  the ingest reader, and `hlsfixture` grew `--require-header`,
+  `--deny-status`, `--deny-user-agent`, `--deny-segments-only`,
+  `--redirect-entry` / `--redirect-host` / `--redirect-port`, `--media-origin`
+  and `--segments-dir`. The last one serves pre-cut, GOP-aligned segments, so a
+  live run can be asked whether it PLAYS rather than only whether it routed.
 
 ## [6.23.1] - 2026-08-13
 

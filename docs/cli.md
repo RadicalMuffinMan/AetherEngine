@@ -96,9 +96,11 @@ overlay pipeline stays empty (same as AE#154).
 
 `--host-calls overlapseek` (pair it with `--sw`) runs three drills at t=8, each making a transport call while a seek's demuxer reposition is still in flight, which is the window #254 opened by moving that reposition off the main actor: **A** a second same-target seek (the #292 report: a scrub arriving as two seeks, the second superseding the first), **B** a `pause()`, **C** a `play()` from paused. `seektest` cannot reach any of this because it awaits every seek, so its bursts are strictly serial. Each drill heals the session with pause + play first, so a defect one drill provokes is not inherited by the next, and each reports its own PASS / FAIL / INCONCLUSIVE (`inWindow=NO` means the call arrived after the landing and the run proves nothing). Exit 4 when any drill fails, 5 when any is inconclusive. Before the #292 fix, A and C land the clock at `rate=0.0` while the engine reports `.playing` and B silently keeps playing through the pause.
 
-`--live-ingest` loads the URL through `HLSLiveIngestReader` as a custom source, which is the shape a host uses for a live channel it ingests and re-serves itself (Sodalite's direct live path). Pair it with `--live`. This is the only way to exercise the live ingest against a real channel from the CLI: plain `--live` sends an m3u8 to the raw live path, which rejects it by design, and `hlslive` only serves local `.ts` files. AE#359 (the master's SUBTITLES renditions were parsed away) survived precisely because this path had no harness; `--live-ingest --subs <lang>` now reproduces and verifies it in 40 s against a public broadcaster URL.
+`--live-ingest` loads the URL through `HLSLiveIngestReader` as a custom source, which is the shape a host uses for a live channel it ingests and re-serves itself (Sodalite's direct live path). Pair it with `--live`. It reaches the reader DIRECTLY, which is what a repro of the reader itself needs; since AE#363 plain `--live` also ends up there, but by way of the engine's own route (the raw live path detects the playlist and hands it to the ingest), so use `--live-ingest` when the reader is the subject and plain `--live` when the routing is. `hlslive` only serves local `.ts` files. AE#359 (the master's SUBTITLES renditions were parsed away) survived precisely because this path had no harness; `--live-ingest --subs <lang>` reproduces and verifies it in 40 s against a public broadcaster URL.
 
-`--native-hls` sets `LoadOptions.nativeRemoteHLS`, the path a host uses for a live channel AVPlayer can play itself. It is the only way to exercise the #168 carriage watchdog and the #293 carriage probe from the CLI (`hlslive` loads the ingest reader directly and never mounts natively). Pair it with `--live`; without that the m3u8 goes to the raw live path, which rejects it by design.
+`--header "Name: Value"` (repeatable) fills `LoadOptions.httpHeaders` and, on `--live-ingest`, the reader's own fetches. Origins that enforce a per-request `User-Agent` / `Referer` / `Authorization` (tokenized IPTV, STB profiles) could not be driven from the CLI at all before AE#363; pair it with `hlsfixture --require-header` below to have both ends of the contract in one run.
+
+`--native-hls` sets `LoadOptions.nativeRemoteHLS`, the path a host uses for a live channel AVPlayer can play itself. It is the only way to exercise the #168 carriage watchdog, the #293 carriage probe and the AE#363 origin-refusal reroute from the CLI (`hlslive` loads the ingest reader directly and never mounts natively). Pair it with `--live`; without that the m3u8 takes the raw live path, which since AE#363 routes it onto the ingest instead of mounting AVPlayer at all.
 
 `--switch-audio <index>[@ms]` replays a host applying a viewer's language preference just after playback starts (default +20 ms, the #337 field case): the engine rebuilds the session with the new stream at `resumeAt = 0`, which is the only shape where the rebuilt session's video renderer can fill before the newly selected stream's first packet arrives. Pick a stream whose first packet sits late in the mux and the run before the fix reads `state=playing cur=0.00` for its whole length with a first frame on screen; the end-of-run verdict names it. `--audio-stats` alongside it re-installs the tap after the switch, because the tap is bound to the software host the switch replaces and would otherwise report silence for a session that is playing fine. Build a fixture with a late track by offsetting one input: `ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30:duration=40 -f lavfi -i sine=frequency=440:duration=40 -itsoffset 12 -f lavfi -i sine=frequency=660:duration=28 -map 0:v -map 1:a -map 2:a -c:v libx264 -c:a libopus late-audio.mkv`.
 
@@ -180,6 +182,25 @@ Runs the rewind matrix across the native and SW paths (`--path native|sw|both`).
 ## hlsfixture
 
 Slices a local `.ts` into a sliding live HLS playlist and serves it over loopback, with fault knobs (`--master` indirection, `--codecs`, `--resolution`, `--discontinuity-at`, `--slow-refresh`, `--drop-segment`, `--encrypted`, `--fmp4`, `--port`, `--segment-seconds`) and a `--self-test` mode that runs `HLSLiveIngestReader` against it end to end. Every request is logged as one `[HLSFixture] REQ <path>` line, so what a load actually costs the origin is countable rather than arguable.
+
+`--segments-dir <dir>` serves pre-cut segments (`ffmpeg -i in.ts -c copy -f hls -hls_time 4 -hls_flags independent_segments -hls_segment_filename seg%d.ts out.m3u8`) instead of byte slices, sorted numerically. Byte slices start mid-GOP, which is fine for "did it route" and useless for "did it play": the run rebuffers forever because nothing decodes. Use the directory whenever the question is playthrough.
+
+### The header-enforcing origin (AE#363)
+
+A tokenized IPTV origin refuses anything that arrives without its per-request header, which is a shape none of the fixtures could produce, so neither live client could be driven against one:
+
+```bash
+# portal on 8099 answers /entry.m3u8 with a 302 to the "CDN edge" on 8100, both enforcing the header
+aetherctl hlsfixture --segments-dir ./segs --master --codecs "avc1.4d401f,mp4a.40.2" \
+  --resolution 1280x720 --require-header "User-Agent: Mozilla/5.0 (QtEmbedded; TestSTB)" \
+  --redirect-entry --redirect-port 8100 --port 8099
+aetherctl play --live --header "User-Agent: Mozilla/5.0 (QtEmbedded; TestSTB)" \
+  --seconds 60 http://127.0.0.1:8099/entry.m3u8
+```
+
+The REQ log then carries the verdict per request (`auth=ok` / `auth=MISSING -> 403`), which is what makes "who lost the header, and on which hop" a measurement. Knobs: `--require-header "Name: Value"`, `--deny-status N` (401 and 403 reach the engine as different `NSURLError` codes), `--deny-segments-only` (refuse after readyToPlay rather than at the master), `--deny-user-agent S` (refuse `AppleCoreMedia` and serve everyone else, the one origin shape that tells the AVPlayer bypass and the engine's own ingest fetcher apart), `--redirect-entry` / `--redirect-host` / `--redirect-port` (portal-to-edge 302, cross-origin by host name and port while staying on loopback), `--media-origin H:P` (master's variants point at a second origin absolutely).
+
+Measured with it before AE#363 was written, and worth knowing before suspecting the engine: `LoadOptions.httpHeaders` survive BOTH shapes on the AVPlayer bypass on macOS, the cross-origin 302 and the absolutely referenced second origin. Every request arrived with the header and the session played through.
 
 `--codecs` / `--resolution` write `CODECS=` / `RESOLUTION=` onto both `EXT-X-STREAM-INF` lines. Without them AVFoundation reports no `videoAttributes` for the variants, so everything that reads master evidence (the #168 watchdog, the #293 probe gate) sees a master advertising no video at all and the fixture quietly stops carrying the case under test.
 

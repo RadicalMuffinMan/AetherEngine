@@ -343,6 +343,21 @@ extension AetherEngine {
                 }
             }
             .store(in: &nativeCancellables)
+        // AE#363: same destination, different evidence. The origin refused AVPlayer (401 / 403) rather
+        // than serving something it could not demux, and the ingest fetcher is a different client at that
+        // origin. The verdict is NOT remembered for the next load: a refusal can be a token that expired
+        // or a connection cap that was momentarily full, neither of which is a property of the master.
+        host.$remoteHLSOriginRefused
+            .filter { $0 }
+            .prefix(1)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.rerouteRemoteHLSOntoLiveIngest(url: url, expectedGeneration: bypassGeneration,
+                                                              rememberVerdict: false, evidence: "origin refusal")
+                }
+            }
+            .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
         // settlePausedAtReadiness off when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
         // #124: a paused mount (autoplay=false) skips that play(), so the readiness sink settles .loading -> .paused.
@@ -405,7 +420,7 @@ extension AetherEngine {
                   httpHeaders: options.httpHeaders,
                   // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting it
                   // back would ping-pong), and hosts can opt out via LoadOptions.
-                  armVideoCarriageWatchdog: RemoteHLSIngestFallback.shouldArm(
+                  armIngestFallback: RemoteHLSIngestFallback.shouldArm(
                       isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback),
                   // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
                   // origin that stops answering; it does not cover one that answers everything while
@@ -490,20 +505,27 @@ extension AetherEngine {
     /// session runs the full loopback pipeline, including the probe-time display-criteria handshake the
     /// bypass lacks. `LoadOptions.httpHeaders` ride onto the ingest fetches so header-enforcing origins
     /// keep working (#119). The generation guard drops a verdict that a newer load()/stop() has outrun.
+    ///
+    /// AE#363 added a second caller with different evidence (the origin refused the mount) and therefore
+    /// a different memory contract: only a carriage verdict is a property of the master and worth
+    /// remembering, a refusal can be an expired token or a full connection cap.
     @MainActor
-    private func rerouteRemoteHLSOntoLiveIngest(url: URL, expectedGeneration: UInt64) async {
+    private func rerouteRemoteHLSOntoLiveIngest(url: URL, expectedGeneration: UInt64,
+                                                rememberVerdict: Bool = true,
+                                                evidence: String? = nil) async {
         guard loadGeneration == expectedGeneration else {
             EngineLog.emit("[AetherEngine] #168: ingest reroute dropped (session superseded)", category: .engine)
             return
         }
+        let reason = evidence.map { "AE#363: \($0)" }
+            ?? "#168: nativeRemoteHLS built no video track for a master that advertises video"
         EngineLog.emit(
-            "[AetherEngine] #168: nativeRemoteHLS built no video track for a master that advertises video; "
-            + "rerouting onto the live-ingest loopback path (TS -> fMP4 remux)",
+            "[AetherEngine] \(reason); rerouting onto the live-ingest loopback path (TS -> fMP4 remux)",
             category: .engine
         )
         // #199: remember the verdict so the next load of this master (host retune after an ingest
         // death, zap-back) skips the doomed native mount and its watchdog grace entirely.
-        rerouteVerdictMemory.record(url, now: Date())
+        if rememberVerdict { rerouteVerdictMemory.record(url, now: Date()) }
         var options = loadedOptions
         options.nativeRemoteHLS = false
         let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders)

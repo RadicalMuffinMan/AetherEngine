@@ -536,6 +536,18 @@ if first == "play" {
         return TeletextPageSwitchRequest(page: page,
                                         delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20_000) : 20_000)
     }
+    // AE#363: LoadOptions.httpHeaders, repeatable as `--header "Name: Value"`. Header-enforcing
+    // origins (IPTV STB profiles, Referer-locked CDNs) had no CLI harness at all, so neither the
+    // AVPlayer bypass nor the ingest reader could be driven against one from here.
+    var playHeaders: [String: String] = [:]
+    while let spec = takeStringFlag("--header", from: &rest) {
+        guard let colon = spec.firstIndex(of: ":") else {
+            print("ERROR: --header expects \"Name: Value\", got '\(spec)'")
+            exit(64)
+        }
+        playHeaders[String(spec[..<colon]).trimmingCharacters(in: .whitespaces)] =
+            String(spec[spec.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+    }
     rejectStrayFlags(rest, subcommand: "play")
     if let playThrottleKbps {
         AetherEngine.setSourceThrottleKbpsForTesting(playThrottleKbps)
@@ -551,7 +563,8 @@ if first == "play" {
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
-                 sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration))
+                 sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration,
+                 httpHeaders: playHeaders))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {
