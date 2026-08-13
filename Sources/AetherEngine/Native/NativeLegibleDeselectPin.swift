@@ -1,5 +1,19 @@
 import Foundation
 
+/// A caption request the system made on its own, published by `AetherEngine.systemCaptionRequest`.
+///
+/// `language` is the BCP 47 tag of the legible option the system picked (`extendedLanguageTag`),
+/// nil for an untagged rendition. The host resolves it against its own subtitle tracks rather than
+/// receiving a track id: the rendition ordinals are matched by language rank, not positionally, so
+/// the language is the value that survives the round trip intact.
+public struct SystemCaptionRequest: Equatable, Sendable {
+    public let language: String?
+
+    public init(language: String?) {
+        self.language = language
+    }
+}
+
 /// Burst policy for the native legible deselect pin (Sodalite#38 follow-up).
 ///
 /// The pin re-asserts `select(nil)` whenever something outside the engine selects a legible

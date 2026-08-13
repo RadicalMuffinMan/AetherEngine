@@ -954,6 +954,17 @@ public final class AetherEngine: ObservableObject {
     /// parked the session; the host must negotiate a fresh transcode URL and call `load`. No replay; subscribe per session.
     public let liveSourceReset = PassthroughSubject<Void, Never>()
 
+    /// Fires when the SYSTEM turned captions on by itself, i.e. selected a legible option in the item that
+    /// neither the host nor the user asked for. On iOS 26 that is Settings > Accessibility > Subtitles &
+    /// Captioning > Automatic Subtitles (show when muted, on skip back, on a language mismatch); those
+    /// toggles have no read API, so acting on the selection is the only way to honour them.
+    ///
+    /// The engine still deselects the option (its renditions exist for PiP, AirPlay and external screens,
+    /// and rendering them in fullscreen draws a caption box over the host's own subtitles). A host that
+    /// wants the behaviour renders the request itself: it knows which of the three triggers plausibly
+    /// fired and which of its own tracks matches. No replay; subscribe per session.
+    public let systemCaptionRequest = PassthroughSubject<SystemCaptionRequest, Never>()
+
     // MARK: - Scrub thumbnails
 
     /// LRU (cap 2) of FrameExtractor contexts for cache-backed scrub thumbnails (live and

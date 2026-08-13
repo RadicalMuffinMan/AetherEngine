@@ -2091,8 +2091,12 @@ extension AetherEngine {
                 pinned.select(nil, in: group)
                 EngineLog.emit(
                     "[AetherEngine] Sodalite#65: legible option \"\(selected.displayName)\" was selected "
-                    + "from outside the engine (iOS automatic captions); deselected again",
+                    + "from outside the engine (iOS automatic captions); deselected again, "
+                    + "publishing the request (lang=\(selected.extendedLanguageTag ?? "none"))",
                     category: .engine)
+                // The selection is the only trace of the user's automatic-captions settings, which have
+                // no read API. Hand it to the host, which can render it in its own subtitle presentation.
+                self.systemCaptionRequest.send(SystemCaptionRequest(language: selected.extendedLanguageTag))
             }
         }
     }
