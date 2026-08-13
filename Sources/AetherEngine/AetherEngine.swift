@@ -1245,6 +1245,23 @@ public final class AetherEngine: ObservableObject {
     /// move the display axis under a picture that has not moved.
     var latchedPresentationOrigin: Double?
 
+    /// #368: this session publishes the ITEM axis, i.e. the display origin is whatever shift a value was
+    /// folded with rather than the latched `sourcePresentationOrigin`. Set for a sequential origin, where
+    /// the source axis is not an axis: every archive chunk restarts near PTS 0 and libavformat's 33-bit
+    /// wrap correction turns each seam into a +2^33 fiction, which the producer's chunk-seam rebase
+    /// absorbs into the shift. With a latched origin that whole delta reached the scrubber (device:
+    /// playhead 250 s -> 63378 s on an hour-long archive). The item axis starts at 0 by construction (the
+    /// producer is pinned to byte 0) and is what `declaredDurationSeconds` measures, so it IS the 0-based
+    /// axis AE#270 requires. Latched with the native session, cleared on teardown.
+    var displayAxisIsItemAxis: Bool = false
+
+    /// Source PTS that maps to display-0 for a value folded with `shift`. Identity to
+    /// `sourcePresentationOrigin` for every source whose timestamps are a real axis; on a sequential
+    /// origin (#368) it is the shift itself, so the published value is the item-axis position.
+    func displayOrigin(forShift shift: Double) -> Double {
+        displayAxisIsItemAxis ? shift : sourcePresentationOrigin
+    }
+
     /// Diagnostics only. Reads HLSVideoEngine's videoShiftPts synchronously, bypassing the async
     /// onPlaylistShiftChanged relay. A persistent gap vs `playlistShiftSeconds` means the clock is folding
     /// with a stale shift (AetherEngine#49 divergence). Poll alongside `frameAhead` when tracing divergence.
@@ -5167,6 +5184,7 @@ public final class AetherEngine: ObservableObject {
         // stopInternal itself) from folding the previous source's PTS origin into the new one's clock.
         sourcePresentationOrigin = 0
         latchedPresentationOrigin = nil
+        displayAxisIsItemAxis = false
         setPresentationAxis(PresentationAxisMap())
         nativeClockSeconds = 0
         clock.sourceTime = 0

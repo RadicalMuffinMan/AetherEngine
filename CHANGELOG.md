@@ -15,7 +15,7 @@ the public-API contract.
 - A sequential-origin VOD session now folds a timeline discontinuity the way live folds a
   program boundary (#368). IPTV timeshift archives are chunked recordings whose every chunk
   restarts near PTS 0; libavformat's 33-bit wrap correction turns that backward seam into a
-  +2^33 leap (device: dts delta 8226410192 ticks — 363524400 + 8226410192 = 2^33 exactly),
+  +2^33 leap (device: dts delta 8226410192 ticks, 363524400 + 8226410192 = 2^33 exactly),
   which reached the keyframe-gated cutter unmodified and walked its monotonic index to the
   plan tail. After that the session was structurally dead: the playlist froze, the
   backpressure park waited on a segment the playlist can never advertise, and the wedge
@@ -24,6 +24,15 @@ the public-API contract.
   ledger and append playlist need no change because they already operate on post-shift
   output time. No `EXT-X-DISCONTINUITY` is added at the seam: the archive is
   content-continuous and the output timeline stays continuous after the rebase.
+- A sequential-origin session publishes the item axis, so the rebase above no longer moves
+  its playhead (#368 follow-up). The rebase keeps the item axis continuous by moving the
+  producer's shift, but `currentTime` was folded as `item + shift - origin` against an origin
+  latched once at session start, so the whole wrap landed on the scrubber: measured 250 s ->
+  63378 s on an archive whose declared duration is one hour, with `bufferedPosition` and
+  `sourceTime` following it. A sequential archive has no source axis to anchor a display
+  origin on (every chunk restarts near PTS 0), while its item axis starts at 0 by
+  construction and is exactly what `declaredDurationSeconds` measures. Every other source
+  keeps AE#270's latched origin and true source PTS.
 
 ## [6.25.1] - 2026-08-13
 
