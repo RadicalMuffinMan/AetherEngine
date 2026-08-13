@@ -55,7 +55,7 @@ final class SegmentCache: @unchecked Sendable {
     /// Plan index -> how many pumps passed it without opening a segment (#358). Survives producer
     /// restarts on purpose: the repeat across a restart is the signal.
     private var foldCounts: [Int: Int] = [:]
-    /// #369: log-classification threshold — a run wider than this is a discontinuity-scale cut
+    /// #369: log-classification threshold: a run wider than this is a discontinuity-scale cut
     /// leap, not a long GOP. (It used to DROP such runs from the counters on the assumption they
     /// were repositions; the field case was a 2^33 wrap folding 312 indices, and dropping it left
     /// every fold counter at 0, which is exactly what disarms the #358 recovery arms.)
@@ -375,7 +375,7 @@ final class SegmentCache: @unchecked Sendable {
 
     /// Record plan indices a cut jumped over. VOD only: a live playlist is built from what was
     /// finalized, so it never offers an index the pump skipped.
-    /// #369: runs wider than `maxFoldRunLength` count too — the #358 arms exist precisely for a
+    /// #369: runs wider than `maxFoldRunLength` count too, the #358 arms exist precisely for a
     /// consumer that requests a folded index, and the widest folds are the ones most certain to
     /// produce such a request. Memory is one Int per folded index, bounded by the plan size.
     func noteFolded(_ indices: Range<Int>) {

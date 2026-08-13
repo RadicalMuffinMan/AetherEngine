@@ -1,6 +1,6 @@
 // #369: discontinuity-scale fold runs must reach the fold counters. The old guard dropped runs
 // wider than maxFoldRunLength on the assumption they were repositions; the field case was a 2^33
-// wrap folding 312 indices in one cut, and dropping it left every counter at 0 — which disarmed
+// wrap folding 312 indices in one cut, and dropping it left every counter at 0, which disarmed
 // both #358 recovery arms (the consumer-side reanchor and the engine's unrecoverable-gap handler)
 // for exactly the folds most certain to trigger them.
 import Foundation

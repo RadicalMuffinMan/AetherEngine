@@ -36,15 +36,26 @@ the public-API contract.
 - A timestamp leap that escapes the timeline rebase no longer turns a VOD session into a
   long-lived zombie (#369). Three containment gaps, one field trace: the look-behind sample
   duration is now capped at the discontinuity threshold instead of handing movenc the wrap
-  itself as a duration (device: 8226410192 ticks, rejected as invalid, packet silently lost —
+  itself as a duration (device: 8226410192 ticks, rejected as invalid, packet silently lost;
   the write rc is now logged on first failure too); discontinuity-scale fold runs now reach
   the fold counters instead of being discarded above 64 indices, so the #358 recovery arms
   actually arm for exactly the folds most certain to trigger them; and the advance-path
   backpressure park skips a release target beyond the sequential playlist's advertisable
-  frontier, which only this pump's own finalize reports can move — parking on it was waiting
+  frontier, which only this pump's own finalize reports can move, so parking on it was waiting
   for oneself. Deliberately unchanged: `OutputTimestampSanitizer` keeps latching, because
   movenc latches monotonicity on its own once a wrapped packet is accepted, and a sanitizer
   reset would only convert garbage timestamps into rejected writes.
+- The duration cap above also covers the duration a container DECLARES, and the skipped park
+  hands its wedge detection on instead of dropping it (#369 follow-up). The cap only guarded
+  the inferred delta, but the branch that runs when no forward delta exists (the EOF tail of
+  exactly the wrapped stream the cap is for) passed the source's own number through untouched,
+  and movenc rejects a sample on the number, not on where it came from. The skipped park is
+  the more consequential one: the #207 disk park deliberately has no wedge breaker because the
+  advance park catches a frozen consumer first, so skipping the advance park left a pump that
+  races to the retention budget and then holds there forever on a consumer that will never
+  move again. It now carries the same #65 detector, whose one-second cadence this park already
+  polls at, and a trip ends the pump onto the existing re-anchor surface, which a sequential
+  origin refuses into `onVODSourceFailed` within seconds.
 
 ## [6.25.1] - 2026-08-13
 

@@ -81,6 +81,24 @@ struct VideoSampleDurationTests {
             fallback: 3600, capTicks: 900_000) == 900_000)
     }
 
+    @Test("A declared duration wider than a discontinuity is capped like an inferred one (#369)")
+    func wrapScaleDeclaredDurationIsCapped() {
+        // EOF tail of the same wrapped stream: no forward delta exists, so the source's own
+        // duration is what reaches movenc, and a container that derived it from the wrapped clock
+        // hands over the same invalid number the inferred path is capped for.
+        #expect(HLSSegmentProducer.resolveVideoSampleDuration(
+            existingDuration: 8_226_410_192, dts: 363_524_400, nextDts: nil,
+            fallback: 3600, capTicks: 900_000) == 3600)
+        // Same when the forward delta is unusable rather than absent.
+        #expect(HLSSegmentProducer.resolveVideoSampleDuration(
+            existingDuration: 8_226_410_192, dts: 363_524_400, nextDts: 363_524_400,
+            fallback: 3600, capTicks: 900_000) == 3600)
+        // A declared duration exactly at the cap is still trusted.
+        #expect(HLSSegmentProducer.resolveVideoSampleDuration(
+            existingDuration: 900_000, dts: 1_000, nextDts: nil,
+            fallback: 3600, capTicks: 900_000) == 900_000)
+    }
+
     @Test("A NOPTS dts or next-dts cannot produce an overflowing delta")
     func nopts() {
         #expect(HLSSegmentProducer.resolveVideoSampleDuration(

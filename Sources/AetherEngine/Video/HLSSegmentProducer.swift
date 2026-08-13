@@ -246,7 +246,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// #369: the advance park releases on a consumer fetch of `target`, but a sequential append
     /// playlist can only advertise up to the frontier this pump's OWN finalize reports have fed
-    /// it — parking on an index beyond that is waiting for oneself (field case: a fold-to-tail
+    /// it, so parking on an index beyond that is waiting for oneself (field case: a fold-to-tail
     /// parked at target=364 while the playlist ended at seg61). A negative target releases
     /// instantly, so it is no deadlock. Pure for the unit test.
     static func sequentialParkWouldSelfDeadlock(target: Int, highestAdvertised: Int) -> Bool {
@@ -746,7 +746,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Fires at live program boundary with updated videoShiftPts and seamOutputSeconds (AVPlayer clock position of the seam).
     /// Distinct from onVideoShiftKnown: the new shift is at the producer edge, AVPlayer renders it buffer+holdback later.
-    /// #368: also fires at a sequential chunk-seam rebase — the source-PTS consumers (A53 caption tap,
+    /// #368: also fires at a sequential chunk-seam rebase too; the source-PTS consumers (A53 caption tap,
     /// subtitle mapping) need the playlist axis moved the same way there.
     var onLiveTimelineRebase: (@Sendable (_ shiftPts: Int64, _ seamOutputSeconds: Double) -> Void)?
 
@@ -1321,17 +1321,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// prefetch is the session retention budget, which `pruneOutsideWindow` cannot enforce because it
     /// never evicts the hard window. Parks the pump while the race-ahead has filled that budget AND the
     /// consumer still has a safe lead, so the footprint tracks the budget instead of the source length.
-    /// Deliberately has no wedge breaker: the park only ever holds with `PrefetchDiskBudget
+    /// Carries no wedge breaker of its own: the park only ever holds with `PrefetchDiskBudget
     /// .minAheadSegments` of produced content ahead of the consumer, and the extras eviction that
-    /// follows the advancing playhead releases it. Returns true on release, false when stop was
-    /// requested.
-    private func awaitPrefetchDiskBudgetRelease(head: Int, context: String) -> Bool {
+    /// follows the advancing playhead releases it. That rests on the advance park having caught a
+    /// consumer that stopped advancing first, so `detectWedge` (#369: the advance park was skipped
+    /// because its release target sat beyond the sequential playlist's frontier) arms the same #65
+    /// detector here. Its cadence matches: this loop polls once a second, like the advance park.
+    /// Returns true on release, false when stop was requested.
+    private func awaitPrefetchDiskBudgetRelease(head: Int, context: String,
+                                                detectWedge: Bool = false) -> Bool {
         guard prefetchDiskBudgetBytes > 0 else { return true }
         // #240: same release as the backpressure park; a parked pump is not using the link.
         sideReaderLinkGate?.videoFetchEnded()
         defer { sideReaderLinkGate?.videoFetchBegan() }
         var parked = 0
         var nextLogAt = Self.prefetchDiskParkLogThresholdSeconds
+        var wedgeDetector = detectWedge && !isLive
+            ? BackpressureWedgeDetector(
+                breakThresholdSeconds: Self.backpressureWedgeBreakThresholdSeconds,
+                fastBreakThresholdSeconds: Self.backpressureWedgeFastBreakThresholdSeconds,
+                initialTarget: cache.targetIndex,
+                initialRenderedPosition: playbackPositionProvider?())
+            : nil
         while !checkShouldStop() {
             if cache.awaitPrefetchDiskHeadroom(head: head,
                                                budgetBytes: prefetchDiskBudgetBytes,
@@ -1356,6 +1367,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     + "(opt-in prefetch full; resumes as playback advances)",
                     category: .session
                 )
+            }
+            if wedgeDetector != nil,
+               wedgeDetector!.observe(currentTarget: cache.targetIndex,
+                                      wantsToPlay: wantsToPlayProvider?() ?? true,
+                                      renderedPosition: playbackPositionProvider?(),
+                                      hasStartedRendering: hasStartedRenderingProvider?() ?? true) {
+                markBackpressureWedgeBroken()
+                EngineLog.emit(
+                    "[HLSSegmentProducer] #369 disk park WEDGE BROKEN (\(context)) head=\(head) "
+                    + "cacheTarget=\(cache.targetIndex) parked=\(parked)s"
+                    + (wedgeDetector!.lastTripFast ? " (fast path: fetch target + rendered clock both frozen)" : "")
+                    + "; the advance park was skipped, so this park was the last hold. "
+                    + "Exiting pump for host re-anchor on AVPlayer position",
+                    category: .session
+                )
+                return false
             }
         }
         return false
@@ -1734,7 +1761,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             let folded = (currentMuxerSegmentIndex + 1)..<newIdx
             cache.noteFolded(folded)
             if folded.count > SegmentCache.maxFoldRunLength {
-                // #369: a leap this wide is not a long GOP — a timeline jump escaped the rebase.
+                // #369: a leap this wide is not a long GOP, a timeline jump escaped the rebase.
                 EngineLog.emit(
                     "[HLSSegmentProducer] #369 cut leap of \(folded.count) plan indices "
                     + "(discontinuity-scale; a timeline jump escaped the rebase)",
@@ -1758,9 +1785,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
             if !awaitLiveWindowHeadroom(head: newIdx) { return nil }
         } else {
             let backpressureTarget = newIdx - bufferAheadSegments
-            if onSequentialSegmentFinalized != nil,
-               Self.sequentialParkWouldSelfDeadlock(target: backpressureTarget,
-                                                    highestAdvertised: seqHighestAdvertisedIndex) {
+            let parkSkipped = onSequentialSegmentFinalized != nil
+                && Self.sequentialParkWouldSelfDeadlock(target: backpressureTarget,
+                                                        highestAdvertised: seqHighestAdvertisedIndex)
+            if parkSkipped {
                 // #369: skip the self-deadlocking park; the disk budget below stays the resource
                 // bound, and normal parking resumes as soon as the frontier catches back up.
                 if !loggedSequentialParkSkip {
@@ -1776,7 +1804,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
             } else if !awaitBackpressureRelease(target: backpressureTarget, head: newIdx, context: "advance") {
                 return nil
             }
-            if !awaitPrefetchDiskBudgetRelease(head: newIdx, context: "advance") { return nil }
+            // #369 follow-up: a skipped advance park hands the only remaining hold to the disk park,
+            // whose "no wedge breaker needed" rests on the advance park having caught a frozen
+            // consumer first. Carry the detector across, or the pump races to the budget and then
+            // parks there forever on a consumer that will never move again.
+            if !awaitPrefetchDiskBudgetRelease(head: newIdx, context: "advance",
+                                               detectWedge: parkSkipped) { return nil }
         }
         if checkShouldStop() { return nil }
 
@@ -2382,8 +2415,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         category: .session
                     )
                 }
-                // Timeline rebase: a live program boundary — or, #368, a sequential-origin archive
-                // chunk seam — resets source dts to a distant value. Per-frame monotonic gate would
+                // Timeline rebase: a live program boundary (or, #368, a sequential-origin archive
+                // chunk seam) resets source dts to a distant value. Per-frame monotonic gate would
                 // bump to lastValid+1, exceed reset pts, and DROP every subsequent packet.
                 // Correct repair: rebase OUTPUT dts to one frame past last output; live additionally
                 // adds #EXT-X-DISCONTINUITY at the seam.
@@ -3372,11 +3405,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// (`Packet duration: -N ... out of range` -> DTS clamp + `pts has no value` -> wrong trun timing,
     /// the #92 transient blocky glitch). Falls back to the source packet's own positive duration, then
     /// `fallback`, only when no usable forward delta exists (EOF tail, NOPTS, or a non-increasing next).
-    /// #369: `capTicks` bounds the inferred delta — a sample longer than a discontinuity is
-    /// definitionally invalid. Across a 33-bit PTS wrap the look-behind delta IS the wrap
-    /// (device: 8226410192 ticks ≈ 91404 s; movenc rejects it as "Application provided duration
+    /// #369: `capTicks` bounds the inferred delta (a sample longer than a discontinuity is
+    /// definitionally invalid). Across a 33-bit PTS wrap the look-behind delta IS the wrap
+    /// (device: 8226410192 ticks, ~91404 s; movenc rejects it as "Application provided duration
     /// ... is invalid" and the packet is lost), so an over-cap delta falls back like a
-    /// non-forward one.
+    /// non-forward one. The cap holds for the source's DECLARED duration too: movenc rejects the
+    /// sample whatever produced its number, and a container that carries a wrap-scale duration
+    /// (a corrupt DefaultDuration, a duration derived from the same wrapped clock) reaches the
+    /// muxer through exactly this branch whenever there is no usable forward delta, which is the
+    /// EOF tail of the very stream the cap exists for.
     static func resolveVideoSampleDuration(
         existingDuration: Int64,
         dts: Int64,
@@ -3388,7 +3425,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             let inferred = next - dts
             if inferred > 0, inferred <= capTicks { return inferred }
         }
-        return existingDuration > 0 ? existingDuration : fallback
+        return existingDuration > 0 && existingDuration <= capTicks ? existingDuration : fallback
     }
 
     /// #369: the sample-duration cap in source-video ticks (`discontinuityThresholdSeconds`, so
