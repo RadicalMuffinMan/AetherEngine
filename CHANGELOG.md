@@ -10,8 +10,25 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.22.0] - 2026-08-13
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.22.0))
+
 ### Added
 
+- `systemCaptionRequest` publishes a caption request the system made on its
+  own (Sodalite#65). iOS 26 turns captions on by itself when playback is
+  muted, when the user skips back, or when the audio language differs from the
+  system language, and none of those three toggles has a read API. What the
+  system does have is an effect: it selects a legible option in the item. The
+  engine keeps deselecting that option, because its renditions exist for PiP,
+  AirPlay and external screens and rendering one in fullscreen draws a caption
+  box over a host's own subtitles, and it now reports the request instead of
+  swallowing it. The payload is the option's language tag rather than a track
+  id, because rendition ordinals are matched by language rank and not
+  positionally.
 - `setTeletextPage(_:)` changes the teletext caption page while a channel
   plays (#364). The page used to reach `EmbeddedSubtitleDecoder` only at
   construction, so it was fixed for the life of a selection and a channel
@@ -24,6 +41,17 @@ the public-API contract.
 - `aetherctl play --teletext-page N` fixes the page at load and
   `--switch-teletext-page <page|auto>[@ms]` changes it on the playing channel,
   which is what makes the runtime path measurable from the CLI at all.
+
+### Fixed
+
+- The native legible rendition stays deselected for the whole session rather
+  than for its first two seconds (Sodalite#65). The pin covered AVKit's
+  ready-time auto-select and nothing after it, so iOS 26's automatic captions,
+  which fire minutes into a session, had nothing holding them back and AVKit
+  rendered the rendition over the frame as an empty caption box. A
+  media-selection observer now holds the deselect for the item's whole life,
+  bounded against a selection fight it cannot win: several re-asserts inside
+  one second stand down and log instead of spinning.
 
 ## [6.21.1] - 2026-08-12
 
