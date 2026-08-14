@@ -470,7 +470,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// #126: fires when a VOD pump dies on a read error having produced nothing (zero packets
     /// written, empty cache). The playlist exists but no segment will ever land, so AVPlayer
     /// would sit in waitingToPlay forever; the engine surfaces a fatal error instead.
+    ///
+    /// Never call this directly; go through `surfaceVODSourceFailure` so the sequential startup
+    /// gate is released with it (#370 follow-up).
     var onVODSourceFailed: (@Sendable (Int32, String) -> Void)?
+
+    /// The one way a VOD session surfaces a terminal source failure (#370 follow-up).
+    ///
+    /// #370 released a held startup-playlist GET at the two surfaces its own trace ran through, but
+    /// a sequential origin reaches three more: `.muxerFailed` revives into `requestRestart`, which a
+    /// sequential origin refuses, and the AE#366 moov-prime exhaustion and AE#169 read-error
+    /// exhaustion end on their own surfaces. Each of those can fire before the first duration is
+    /// published (an E-AC-3 archive whose first segment carries no audio packet is the field shape),
+    /// and the server thread then sat out the remaining ~30 s of a session that had already failed.
+    /// Pairing the release with the surface makes that structural instead of a call site to remember.
+    func surfaceVODSourceFailure(_ code: Int32, _ reason: String) {
+        provider?.abortSequentialStartupWait()
+        onVODSourceFailed?(code, reason)
+    }
     /// Session-long FLAC bridge for codecs illegal in fMP4. Engine-owned (not producer-owned) so
     /// encoder state survives producer restarts; `startSegment()` rebases PTS on each restart.
     var audioBridge: AudioBridge?
@@ -996,8 +1013,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let spacing: KeyframeSpacing
                 let stride: Double
                 if sequentialOriginPinsProducerToZero {
-                    // #370: the spacing scan starts with a seek — a silent no-op on the non-seekable
-                    // sequential pb — and then consumes up to 30 s of the single byte-0-only
+                    // #370: the spacing scan starts with a seek (a silent no-op on the non-seekable
+                    // sequential pb) and then consumes up to 30 s of the single byte-0-only
                     // connection; those packets never reach the pump, so the session starts late and
                     // silently drops the archive's first GOP(s). The #358 holes the scan exists to
                     // soften don't bite this path: the append playlist gives zero-duration holes no
@@ -1531,7 +1548,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // from it, so the session ends with an error the host can act on instead of a picture
             // that never moves again while the engine still reports playing.
             unrecoverableGapHandler: isLiveSession ? nil : { [weak self] _ in
-                self?.onVODSourceFailed?(FFmpegErr.eio, "Source segment could not be produced")
+                self?.surfaceVODSourceFailure(FFmpegErr.eio, "Source segment could not be produced")
             },
             restartActivity: isLiveSession ? nil : { [weak self] in
                 self?.restartInFlight ?? false
@@ -2138,7 +2155,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Live program-boundary rebase. Unlike `handleVideoShiftKnown`, does NOT fire `onPlaylistShiftChanged`:
     /// AVPlayer renders at ~buffer+holdback behind the producer edge, so the host must keep the OLD shift
     /// until playback crosses `seamOutputSeconds`. Internal `playlistShiftSeconds` tracks the edge immediately.
-    /// #368: sequential chunk-seam rebases arrive here too, deliberately — same deferred-shift contract.
+    /// #368: sequential chunk-seam rebases arrive here too, deliberately; same deferred-shift contract.
     func handleLiveTimelineRebase(_ shiftPts: Int64, seamOutputSeconds: Double) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         setPlaylistShiftSeconds(seconds)
@@ -2217,7 +2234,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 + "read from byte 0, so the reposition would mislabel content; surfacing source failure",
                 category: .session
             )
-            onVODSourceFailed?(FFmpegErr.eio, "Source cannot be repositioned")
+            surfaceVODSourceFailure(FFmpegErr.eio, "Source cannot be repositioned")
             return
         }
         restartLock.lock()

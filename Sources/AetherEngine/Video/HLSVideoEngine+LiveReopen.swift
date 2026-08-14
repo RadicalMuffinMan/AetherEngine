@@ -223,10 +223,7 @@ extension HLSVideoEngine {
                     + "revive cannot resume at an offset, surfacing source failure",
                     category: .session
                 )
-                // #370: a startup-playlist GET may still be held on the server thread; the session
-                // is failing, so release it instead of sitting out the rest of its timeout.
-                provider?.abortSequentialStartupWait()
-                onVODSourceFailed?(code, "Source read failed")
+                surfaceVODSourceFailure(code, "Source read failed")
             } else if Self.shouldReviveVODAfterReadError(
                 isLive: isLiveSession,
                 packetsWritten: prod.packetsWrittenCount,
@@ -239,7 +236,7 @@ extension HLSVideoEngine {
                     + "(readError \(code)); surfacing fatal source failure",
                     category: .session
                 )
-                onVODSourceFailed?(code, "Source read failed")
+                surfaceVODSourceFailure(code, "Source read failed")
             }
             return
         }
@@ -276,8 +273,7 @@ extension HLSVideoEngine {
                 + "(0 packets written, 0 segments cached); surfacing fatal source failure",
                 category: .session
             )
-            provider?.abortSequentialStartupWait()   // #370: release a held startup-playlist GET
-            onVODSourceFailed?(FFmpegErr.eio, "Source produced no playable media")
+            surfaceVODSourceFailure(FFmpegErr.eio, "Source produced no playable media")
             return
         }
         guard isLiveSession else { return }
@@ -378,7 +374,7 @@ extension HLSVideoEngine {
             // The session is dead: no producer will be rebuilt and AVPlayer would park
             // in waitingToPlay forever. Surface the same terminal failure as the
             // produced-nothing arm so the host can tear down or retry.
-            onVODSourceFailed?(code, "Source read failed")
+            surfaceVODSourceFailure(code, "Source read failed")
             return
         }
         let frozen = currentPlaybackPositionProvider?() ?? 0
@@ -535,7 +531,7 @@ extension HLSVideoEngine {
             // with nothing in it to act on. The readError arm above has surfaced its own exhaustion
             // since AE#169; this is the same shape and gets the same last word. -22 is what movenc
             // returns for the moov it cannot write, so the code carries the real cause.
-            onVODSourceFailed?(FFmpegErr.einval, "Source audio cannot be muxed")
+            surfaceVODSourceFailure(FFmpegErr.einval, "Source audio cannot be muxed")
             return
         }
         let frozen = currentPlaybackPositionProvider?() ?? 0
@@ -656,7 +652,7 @@ extension HLSVideoEngine {
                 + "gap, so the source cannot be played past it; failing instead of re-anchoring.",
                 category: .session
             )
-            onVODSourceFailed?(FFmpegErr.eio, "Source segment could not be produced")
+            surfaceVODSourceFailure(FFmpegErr.eio, "Source segment could not be produced")
             return
         }
 
