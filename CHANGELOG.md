@@ -71,6 +71,18 @@ the public-API contract.
   also stops the archive's first GOPs from being read past before the pump starts. A pump
   that dies before publishing anything now also releases a held startup GET immediately
   instead of letting it sit out the rest of its timeout.
+- The startup-GET release above is now tied to the failure surface rather than to two call sites,
+  and the gate counts what the playlist can advertise (#370 follow-up). A sequential origin reaches
+  three further terminal surfaces: `.muxerFailed` revives through `requestRestart`, which a
+  sequential origin refuses, and the AE#366 moov-prime and AE#169 read-error arms end on their own
+  exhaustion. Each of those can fire before the first duration is published (an E-AC-3 archive whose
+  first segment carries no audio packet is the field shape), and the held GET then still sat out its
+  full 30 s on a session that had already failed; every VOD failure now surfaces through one method
+  that releases the wait with it. The gate also counted raw appended entries, while the renderer
+  gives a zero-duration entry (a plan index a long GOP skipped) no URI, so it could have answered
+  the held GET with a playlist that renders empty, which is the -12888 the gate exists to prevent.
+  With the cushion down to one entry there is no second entry left to mask that, so the gate now
+  counts advertisable entries.
 
 ## [6.25.1] - 2026-08-13
 
