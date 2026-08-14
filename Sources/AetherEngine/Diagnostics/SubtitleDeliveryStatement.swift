@@ -92,6 +92,13 @@ enum SubtitleDeliveryStatement {
         /// whole window. The position is the point of the line: it says which stretch of the source
         /// is waiting, so a report can be matched against the producer's own log.
         var harvestGapAt: Double? = nil
+        /// #362 round 2: bitmap cues this tick left open because the only packet the store held
+        /// after them lay past the harvest's designed reach, so it is not evidence of a successor.
+        /// The reason this is a line of its own: `harvestGapAt` reports where DELIVERY stopped, and
+        /// a report about a cue that ends too late is about the END, which is derived from the same
+        /// store on a different horizon. A window carrying a wrong end with `gapAt` absent said
+        /// nothing at all until this count existed (the reporter's observation, exactly).
+        var endsWithheld = 0
 
         /// Cues an event carried that the gate did not pass. The subtraction is safe: `admitted`
         /// can exceed the tick's own `cues` when a finalized candidate seeded by an earlier tick is
@@ -164,8 +171,14 @@ enum SubtitleDeliveryStatement {
             "recon=\(tally.reconstructing ? 1 : 0)",
             "outcome=\(tally.outcome.rawValue)",
         ]
-        guard let gapAt = tally.harvestGapAt else { return fields.joined(separator: " ") }
-        return (fields + ["gapAt=\(String(format: "%.2f", gapAt))"]).joined(separator: " ")
+        var trailing: [String] = []
+        if let gapAt = tally.harvestGapAt {
+            trailing.append("gapAt=\(String(format: "%.2f", gapAt))")
+        }
+        if tally.endsWithheld > 0 {
+            trailing.append("endsWithheld=\(tally.endsWithheld)")
+        }
+        return (fields + trailing).joined(separator: " ")
     }
 
     /// Budget for the per-cue `[applySubtitleEvent #N]` line, refilled per seek generation.

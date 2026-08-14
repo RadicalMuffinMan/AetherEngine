@@ -396,7 +396,7 @@ extension AetherEngine {
             var didMutate = false
             // #357: a cue still carrying its open-ended placeholder end cannot claim this landing.
             // Its successor's trim is what closes it, and a jump past it outran that successor; see
-            // closeOpenEndedCues.
+            // alignCueEnds.
             if isReset, Self.closeOpenEndedCues(&cues, startingBefore: window.from) {
                 didMutate = true
             }
@@ -479,14 +479,34 @@ extension AetherEngine {
             }
             tally.reconstructing = pgsStaleArrivalGates[channel]?.reconstructing ?? false
             tally.harvestGapAt = gapHoldAt
-            // #362: every cue still open takes its end from the next packet the store holds on this
+            // #362: every bitmap cue takes its end from the next packet the store holds on this
             // stream. Run over the whole retained array rather than this batch's cues: a set left
             // open by an earlier tick (its successor not harvested yet, the batch cap, the window's
             // forward edge) is closed by the first tick that finds the answer stored, without waiting
             // for the drain window to reach it. Runs before the boundary close can launder it and
             // before the publish below, so the host never sees the placeholder at all.
-            if Self.closeOpenEndedCues(&cues, atNextPacket: {
-                store.firstPTS(streamIndex: streamIndex, after: $0)
+            // Round 2: this is also the only correction an end derived across a hole ever gets. The
+            // drain cursor moves forward only, so the packets that fill the hole land BEHIND it and
+            // are never decoded; their `pgsTrimAt` never runs, and the too-late end stood until the
+            // session ended. Re-deriving from the store each tick needs no decode and no revisit.
+            // Round 2: and it may look exactly as far as the harvest is designed to lead, no
+            // further. The prefetch parks a margin PAST the drain window precisely so the set at
+            // the window's forward edge has its own clear stored (round 1), so inside that horizon
+            // a stored packet is evidence the harvest was here and found this. Beyond it the store
+            // holds whatever earlier runs left behind, and the first thing after a set can be the
+            // far side of a stretch nobody read: a real packet, not this set's successor (report:
+            // 145.187 closed at 223.306, its own clear at 150.192, 18 s past the window's edge).
+            // Refusing there costs a tick or two of an open cue, which the next answer closes,
+            // against an end that is wrong by a minute and that nothing downstream can tell from an
+            // authored one.
+            let derivationHorizon = window.through + Self.subtitleForwardPrefetchLeadMarginSeconds
+            if Self.alignCueEnds(&cues, toNextPacket: {
+                guard let pts = store.firstPTS(streamIndex: streamIndex, after: $0) else { return nil }
+                guard pts <= derivationHorizon else {
+                    tally.endsWithheld += 1
+                    return nil
+                }
+                return pts
             }) {
                 didMutate = true
             }
@@ -1077,7 +1097,7 @@ extension AetherEngine {
     /// separates this from a blanket "drop the pre-seek set": a long ASS sign keeps its own end.
     /// Returns whether any cue was closed.
     ///
-    /// #362: this is the LAST resort, not the first. `closeOpenEndedCues(_:atNextPacket:)` closes an
+    /// #362: this is the LAST resort, not the first. `alignCueEnds(_:toNextPacket:)` closes an
     /// open set at the packet the author put there; only a set with no stored successor at all
     /// reaches this boundary, and its end is then owned by the seek rather than by the author.
     @discardableResult
@@ -1109,14 +1129,32 @@ extension AetherEngine {
     /// PTS: the successor's own `pgsTrimAt` would set exactly this end when the window eventually
     /// reaches it. Where the store has nothing after the set (the harvest frontier, a cut file) the
     /// cue stays open, because there is no authored answer there and the alternatives are all
-    /// laundered ends. Returns whether any cue was closed.
+    /// laundered ends. Returns whether any cue was changed.
+    ///
+    /// #362 round 2: for a bitmap set this holds whether or not the cue still carries the
+    /// placeholder, and gating it on that was the defect. A burst leaves the store holding an island
+    /// an earlier run harvested, so the first packet after a set can be the far side of a stretch
+    /// nobody has read: a real packet, but not this set's successor (report: 75.117 closed at
+    /// 144.978, its own clear at 78.579). Publishing it is still right, because the true successor
+    /// can only be NEARER, so the answer is an upper bound and the alternative is a placeholder that
+    /// renders until something else closes it. Keeping it was not: the clear that lands a second
+    /// later, whose entire job is to trim that set, found a cue no longer eligible. A bitmap set has
+    /// no end of its own, so every stored packet after it is a bound on its end and taking the
+    /// nearest is monotone, it can only ever shorten. That is what makes the bound self-correcting
+    /// rather than merely bounded, which is what the first round claimed and did not deliver.
+    ///
+    /// The rule stays PGS-shaped on purpose. A text event carries its own duration and a packet
+    /// following it says nothing about it, so text cues keep the placeholder gate: only an
+    /// unconfirmed end is anyone else's to set.
     @discardableResult
-    nonisolated static func closeOpenEndedCues(_ cues: inout [SubtitleCue],
-                                               atNextPacket nextPacketPTS: (Double) -> Double?) -> Bool {
+    nonisolated static func alignCueEnds(_ cues: inout [SubtitleCue],
+                                         toNextPacket nextPacketPTS: (Double) -> Double?) -> Bool {
         var changed = false
         for i in 0..<cues.count {
             let cue = cues[i]
-            guard cue.endTime - cue.startTime > subtitleOpenEndedWindowSeconds,
+            var isBitmap = false
+            if case .image = cue.body { isBitmap = true }
+            guard isBitmap || cue.endTime - cue.startTime > subtitleOpenEndedWindowSeconds,
                   let end = nextPacketPTS(cue.startTime),
                   end > cue.startTime, end < cue.endTime else { continue }
             cues[i] = cue.with(endTime: end)
