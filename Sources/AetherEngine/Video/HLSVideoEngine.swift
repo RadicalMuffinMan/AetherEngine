@@ -993,13 +993,26 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // keyframe-gated cutter leaves every one of them without a segment while the playlist
                 // still offers it. Measure the spacing instead of assuming the target fits it.
                 let anchorSeconds = Double(anchorPts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
-                let spacing = measureKeyframeSpacing(
-                    demuxer: dem,
-                    videoStreamIndex: videoIndex,
-                    videoTimeBase: videoTimeBase,
-                    fromSeconds: anchorSeconds
-                )
-                let stride = Self.uniformStrideSeconds(spacing: spacing)
+                let spacing: KeyframeSpacing
+                let stride: Double
+                if sequentialOriginPinsProducerToZero {
+                    // #370: the spacing scan starts with a seek — a silent no-op on the non-seekable
+                    // sequential pb — and then consumes up to 30 s of the single byte-0-only
+                    // connection; those packets never reach the pump, so the session starts late and
+                    // silently drops the archive's first GOP(s). The #358 holes the scan exists to
+                    // soften don't bite this path: the append playlist gives zero-duration holes no
+                    // URI and its EXTINF is real by construction.
+                    spacing = .unknown
+                    stride = Self.targetSegmentDuration
+                } else {
+                    spacing = measureKeyframeSpacing(
+                        demuxer: dem,
+                        videoStreamIndex: videoIndex,
+                        videoTimeBase: videoTimeBase,
+                        fromSeconds: anchorSeconds
+                    )
+                    stride = Self.uniformStrideSeconds(spacing: spacing)
+                }
                 plan = Self.buildUniformSegmentPlan(
                     videoTimeBase: videoTimeBase,
                     sourceDurationSeconds: durationSeconds,
@@ -1028,11 +1041,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     ? "\(keyframes.count) IRAPs in index, need >=2"
                     : "index unusable (\(keyframes.count) IRAPs, coverage=\(String(format: "%.1f", coverageSeconds))s, largestGap=\(String(format: "%.1f", largestGapSeconds))s)"
                 let spacingText: String
-                switch spacing {
-                case .measured(let s): spacingText = "measured IRAP spacing \(String(format: "%.3f", s))s"
-                case .exceedsBudget(let s): spacingText = "IRAP spacing exceeds the \(String(format: "%.0f", s))s scan budget"
-                case .singleKeyframeInSource: spacingText = "source holds one IRAP, no second to space against"
-                case .unknown: spacingText = "IRAP spacing unknown (no keyframe scanned)"
+                if sequentialOriginPinsProducerToZero {
+                    spacingText = "spacing scan skipped (sequential origin: the scan would consume the non-replayable prefix)"
+                } else {
+                    switch spacing {
+                    case .measured(let s): spacingText = "measured IRAP spacing \(String(format: "%.3f", s))s"
+                    case .exceedsBudget(let s): spacingText = "IRAP spacing exceeds the \(String(format: "%.0f", s))s scan budget"
+                    case .singleKeyframeInSource: spacingText = "source holds one IRAP, no second to space against"
+                    case .unknown: spacingText = "IRAP spacing unknown (no keyframe scanned)"
+                    }
                 }
                 EngineLog.emit(
                     "[HLSVideoEngine] segment plan: uniform stride fallback (\(reason), anchorPts=\(anchorPts), "
