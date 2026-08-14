@@ -12,6 +12,29 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.25.3] - 2026-08-14
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.3))
+
+### Fixed
+
+- A bitmap subtitle set no longer keeps an end it took from the far side of a stretch nobody
+  read (#362). A PGS set has no end of its own, so 6.23.1 gives an open one the PTS of the
+  next packet the store holds, which is the end the author put there. After a seek burst the
+  store also holds islands an earlier run harvested, and the first packet after a set can then
+  be a real packet that is not this set's successor (report: a set at 75.117 s closed at
+  144.978 s, its own clear at 78.579 s; a second one closed at the next SET, 78 s out). Two
+  changes. A bitmap cue's end is now re-derived on every drain tick and can only ever shorten,
+  so the clear that lands a second later trims the set even though the drain cursor has moved
+  past it and will never decode it; previously any end short of the open-ended placeholder was
+  final, and that was the whole permanence. And the derivation stops at the drain window plus
+  the forward prefetch's park margin, which is exactly as far as the harvest is designed to
+  lead, instead of reaching to whatever the store happens to hold beyond it.
+- Ends withheld for that reason are counted in the delivery statement (`endsWithheld=N`).
+  `harvestGapAt` reports where DELIVERY stopped and says nothing about an end derived from the
+  same store on a different horizon, so a window carrying a wrong end with no `gapAt` beside it
+  had no diagnostic at all.
+
 ## [6.25.2] - 2026-08-14
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.2))
