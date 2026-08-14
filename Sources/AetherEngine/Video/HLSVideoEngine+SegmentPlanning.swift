@@ -552,13 +552,27 @@ extension HLSVideoEngine {
 
         let framing = probeVideoNALFraming(demuxer: demuxer, videoStreamIndex: videoStreamIndex)
         guard case .lengthPrefixed = framing else {
+            // The record stays Annex B here: movenc reads it to decide whether to convert the samples,
+            // and these samples do need converting. What it must not keep is a prefix SEI, because the
+            // hvcC movenc then builds carries it as a fourth array (`ff_isom_write_hvcc` collects five
+            // NAL types) and Apple TV's HEVC track builder rejects such a record (AE#187). That defense
+            // sits on the record path and cannot see this one, so the SEI goes before the muxer runs.
+            let source = codecpar.pointee.extradata.map {
+                [UInt8](UnsafeBufferPointer(start: $0, count: Int(codecpar.pointee.extradata_size)))
+            } ?? []
+            let canonical = codecID == AV_CODEC_ID_HEVC
+                ? VideoConfigRecord.canonicalizeAnnexBHEVCConfigRecord(source) : nil
             EngineLog.emit(
                 "[HLSVideoEngine] #365 the muxer will reformat this track's samples and the packets "
-                + "are \(framing == nil ? "not conclusively framed" : "Annex B"); forwarding the "
-                + "config record unchanged (the muxer converts the samples itself)",
+                + "are \(framing == nil ? "not conclusively framed" : "Annex B"); the muxer builds the "
+                + "config record itself out of \(source.count) B of Annex B "
+                + "[\(VideoConfigRecord.annexBNALSummary(source))]"
+                + (canonical.map {
+                    ", dropped the non-parameter-set NALs before it does (→ \($0.count) B, AE#187)"
+                } ?? ", nothing to drop"),
                 category: .session
             )
-            return VideoFramingNormalization(extradataOverride: nil, measuredFraming: framing)
+            return VideoFramingNormalization(extradataOverride: canonical, measuredFraming: framing)
         }
 
         let source = [UInt8](UnsafeBufferPointer(
