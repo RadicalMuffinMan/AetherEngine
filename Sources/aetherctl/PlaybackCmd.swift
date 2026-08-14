@@ -240,7 +240,21 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     var cancellables = Set<AnyCancellable>()
     var seenCueEnds: [Int: Double] = [:]
     var cueCount = 0
+    // #362 round 2: CUE and TRIM report arrivals and end changes, and a cue that LEAVES the window
+    // was reported by neither, so a wrong end that was later replaced read exactly like one the
+    // host still carries. `DROP` and the closing `WINDOW` dump are what make a claim about what the
+    // host holds measurable, which is the shape every report of this kind arrives in.
+    var presentCueIDs: Set<Int> = []
+    var lastCues: [SubtitleCue] = []
     engine.$subtitleCues.sink { cues in
+        let ids = Set(cues.map(\.id))
+        for gone in presentCueIDs.subtracting(ids).sorted() {
+            print(String(format: "  DROP #%d", gone))
+        }
+        presentCueIDs = ids
+        // The LAST NON-EMPTY window, not the last one: teardown publishes an empty array, so a
+        // closing dump of `cues` reports nothing carried and hides the whole session.
+        if !cues.isEmpty { lastCues = cues }
         for cue in cues {
             if let prevEnd = seenCueEnds[cue.id] {
                 if prevEnd != cue.endTime {
@@ -612,6 +626,11 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
         print("active subtitle: \(finalActiveSubtitle.map(String.init) ?? "none")")
     }
     print("final t=\(String(format: "%.2f", finalTime))s state=\(String(describing: endState)) cues=\(cueCount)")
+    let closingWindow = await MainActor.run { lastCues }
+    print("WINDOW \(closingWindow.count) cues in the last published window")
+    for cue in closingWindow {
+        print(String(format: "  HELD #%d %.2f-%.2f", cue.id, cue.startTime, cue.endTime))
+    }
     if case .error(let message) = endState {
         print("VERDICT: session ended in error: \(message)")
         return 2

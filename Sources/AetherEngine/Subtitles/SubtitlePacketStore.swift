@@ -377,7 +377,15 @@ final class SubtitlePacketStore: @unchecked Sendable {
         // to its authored end. Refusing to answer leaves the cue carrying the open placeholder, and
         // the next seek launders that into #357's window boundary, which nothing ever corrects.
         // Measured both ways on the fixture: answering, 0 to 2 sets ended late; refusing, 4 to 5,
-        // the worst by 74 s.
+        // the worst by 74 s. Measured again in round 2 against a boundary 15 s behind a landing:
+        // still worse than the island, and by more (+46 s against +37 s on the same cue).
+        //
+        // Round 2: the CALLER bounds how far this may reach, and it has to, because nothing here
+        // can. Whether the ground between the set and this packet was ever read is not a property
+        // of the packets that arrived: a reader restarted BEHIND leaves a descending sequence at the
+        // boundary, and a reader re-anchored FORWARD leaves an ascending one (measured on the
+        // fixture: sequence 19, then 20, with 46 s of unread source between them). Only the drain
+        // knows how far the harvest is designed to have reached by now, so the horizon lives there.
         return entries[index].ptsSeconds
     }
 
