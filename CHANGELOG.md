@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.25.2] - 2026-08-14
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.2))
+
 ### Fixed
 
 - A sequential-origin VOD session now folds a timeline discontinuity the way live folds a
