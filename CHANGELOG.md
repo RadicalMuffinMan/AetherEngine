@@ -12,6 +12,30 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.25.4] - 2026-08-14
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.4))
+
+### Fixed
+
+- A forwarded Annex-B config record no longer carries its prefix SEI into the `hvcC` the mp4
+  muxer builds (#365). When the record and the packets are both Annex B the record has to be
+  forwarded as it is, because movenc reads it to decide whether to convert the samples, and it
+  then builds the `hvcC` itself. `ff_isom_write_hvcc` collects five NAL types, not three (VPS,
+  SPS, PPS, SEI_PREFIX, SEI_SUFFIX), so a prefix SEI in a Matroska CodecPrivate becomes a fourth
+  array in the init sample description. That is the record Apple TV's HEVC track builder rejects
+  (AE#187: `asset.tracks count=0`, no format description), and the AE#187 defense cannot reach
+  this door: it guards on `configurationVersion == 1`, which an Annex-B buffer fails by
+  construction, and the muxer-built record never passes through the engine. The
+  non-parameter-set NALs are now dropped before the muxer runs and the record stays Annex B, so
+  the decision movenc makes about the samples is unchanged.
+
+### Changed
+
+- The `#365` forward branch logs what the config record is made of (`VPS×1 (28 B), SPS×1
+  (112 B), PPS×1 (10 B), SEI_PREFIX×1 (570 B)`) and what it dropped. A record's size alone does
+  not say whether the excess is a large SPS or an SEI, and only the latter reaches the `hvcC`.
+
 ## [6.25.3] - 2026-08-14
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.3))
