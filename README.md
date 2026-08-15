@@ -217,6 +217,13 @@ ExternalSubtitleTrack(url: mkvURL, name: "Spanish", language: "es", sourceStream
 player.$nativeSubtitleTracks                   // [NativeSubtitleTrack]: ordinal, language, displayName
 player.setNativeSubtitleSelected(track: 2)     // engage a rendition (e.g. on PiP entry); nil deselects
 
+// The SYSTEM turned captions on by itself: iOS 26 Settings > Accessibility > Subtitles & Captioning
+// > Automatic Subtitles (show when muted, on skip back, on a language mismatch). Those toggles have
+// no read API, so the selection is the only way to see the ask. The engine deselects the option (a
+// rendition rendered in fullscreen draws a caption box over the host's own subtitles) and forwards
+// the request; a host that wants the behaviour picks its own matching track. Subscribe per session.
+player.systemCaptionRequest                    // PassthroughSubject<SystemCaptionRequest, Never>
+
 // Second simultaneous subtitle track (bilingual / language learning)
 player.selectSecondarySubtitleTrack(index: streamID)
 player.selectSecondarySidecarSubtitle(url: srt2URL)
@@ -350,6 +357,9 @@ player.clock.$liveEdgeTime
 await player.seekToLiveEdge()
 await player.seek(to: player.liveEdgeTime - 300)   // 5 minutes back
 
+// The retune contract: the engine parked the session and only a fresh URL revives it.
+player.liveSourceReset            // PassthroughSubject<Void, Never>; subscribe per session
+
 // Ingest a live HLS upstream directly, no media server in the data path:
 try await player.load(
     source: .custom(HLSLiveIngestReader(playlistURL: upstreamM3U8), formatHint: "mpegts"),
@@ -358,6 +368,8 @@ try await player.load(
 ```
 
 `liveJoinProfile: .fastZap` (AetherEngine#195/#208) cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to the source GOP length and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; opt in for zapping UX, keep `.standard` for lean-back viewing.
+
+`liveSourceReset` is live's counterpart to a terminal `state = .error`, and a host that plays live has to subscribe to it. It fires where the session cannot be revived from inside the engine and only a new URL can: a source that restarted from byte 0 (a Jellyfin transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), or an in-engine reopen transport whose budget is spent (#199). Each of those halts production first, so a dead provider stops advertising blocking reloads behind the host's back. Answer it by negotiating a fresh URL and calling `load` again, and guard that answer (one retune in flight, a minimum spacing, a bounded count per session) or a permanently dead upstream turns into a retune loop. Left unsubscribed it costs a channel that stops while the engine still reports a session, which from the outside is indistinguishable from a slow one.
 
 Direct ingest covers MPEG-TS with demuxed-audio and packed-audio renditions, in-line AES-128 clear-key decryption, and SSAI ad-pod direct play (versioned init segments, audio re-anchoring, no-cut watchdog). Unsupported encryption / fMP4 playlists surface a typed `HLSIngestError` so the host can fall back. Details in [docs/formats.md › Live ingest](docs/formats.md#live-ingest-aes-128-ssai).
 
