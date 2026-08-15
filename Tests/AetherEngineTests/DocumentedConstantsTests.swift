@@ -139,6 +139,48 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("mono Float32 48 kHz", docs)
     }
 
+    // MARK: - Subtitle windows
+
+    /// docs/formats.md explains the subtitle pipeline in terms of these four windows, and the
+    /// relationships between them carry the explanation: the prefetch margin exists BECAUSE it sits
+    /// beyond the drain lead, and the OCR prefetch beyond the OCR window, for the same reason. A
+    /// number that moves without its sentence turns a correct explanation into a plausible one.
+    func testSubtitleWindowsAreWhatTheDocsSay() throws {
+        let docs = try documentation()
+        XCTAssertEqual(AetherEngine.subtitleDrainLeadSeconds, 60, "documented as the 60 s lead window")
+        XCTAssertEqual(AetherEngine.subtitleForwardPrefetchLeadMarginSeconds, 15, "documented as a 15 s margin")
+        XCTAssertEqual(AetherEngine.subtitleOCRLeadSeconds, 240, "documented as the OCR worker's 240 s window")
+        XCTAssertEqual(AetherEngine.subtitleOCRPrefetchLeadSeconds, 270, "documented as raised to 270 s while OCR is armed")
+
+        XCTAssertGreaterThan(AetherEngine.subtitleForwardPrefetchLeadMarginSeconds, 0,
+                             "the margin IS the fix for #362: at parity the set at the edge has its clear stored nowhere")
+        XCTAssertGreaterThan(AetherEngine.subtitleOCRPrefetchLeadSeconds, AetherEngine.subtitleOCRLeadSeconds,
+                             "the prefetch has to clear the OCR window, or the store does not hold what the worker reads")
+        assertDocumented("60 s lead window", docs)
+        assertDocumented("15 s margin", docs)
+        assertDocumented("clears the OCR worker's own 240 s window by 30 s", docs)
+    }
+
+    // MARK: - Audio bridge shape
+
+    /// docs/formats.md states the caps and the rates a host picks `audioBridgeMode` on, and the
+    /// 7.1-to-5.1 fold is a known limitation an adopter reads before choosing `.lossless`.
+    func testAudioBridgeCapsAndRatesAreWhatTheDocsSay() throws {
+        let docs = try documentation()
+        XCTAssertEqual(AudioBridge.maxEncodedChannels(for: .surroundCompat), 6,
+                       "documented as capping 7.1 sources to 5.1")
+        XCTAssertEqual(AudioBridge.maxEncodedChannels(for: .lossless), 8,
+                       "documented as FLAC up to 7.1")
+        XCTAssertEqual(AudioBridge.encoderBitRate(for: .surroundCompat, channels: 2), 256_000,
+                       "documented as 256 kbps stereo")
+        XCTAssertEqual(AudioBridge.encoderBitRate(for: .surroundCompat, channels: 6), 768_000,
+                       "documented as 768 kbps 5.1")
+        XCTAssertEqual(AudioBridge.encoderBitRate(for: .lossless, channels: 8), 0,
+                       "FLAC is VBR; a rate here would cap a lossless path")
+        assertDocumented("128 kbps per channel (256 kbps stereo, 768 kbps 5.1)", docs)
+        assertDocumented("caps 7.1 sources to 5.1", docs)
+    }
+
     // MARK: - External subtitle ids
 
     /// A host tells its own tracks from the engine's by this base, and docs/api.md prints the number.

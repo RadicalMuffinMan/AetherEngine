@@ -30,7 +30,10 @@ extension AetherEngine {
     /// subtitle stream and harvests its packets into the session's SubtitlePacketStore; a
     /// playhead-paced drainer decodes the selected stream into the overlay. No side demuxer,
     /// no second connection, selection is instant and rides seeks/restarts with the producer.
-    /// Supports text codecs (SubRip / ASS / SSA / WebVTT / mov_text) and bitmap codecs (PGS / DVB / DVD / XSUB).
+    /// Supports text codecs (SubRip / ASS / SSA / WebVTT / mov_text) and bitmap codecs (PGS / DVB /
+    /// DVD). XSUB is classified as bitmap by the decoder too, but the shipped FFmpeg build compiles
+    /// no xsub decoder, so such a track selects and then decodes to nothing; it is deliberately not
+    /// claimed anywhere in the documentation.
     public func selectSubtitleTrack(index: Int) {
         hostExplicitSubtitleAction = true
         selectSubtitleTrack(index: index, startAt: sourceTime)
