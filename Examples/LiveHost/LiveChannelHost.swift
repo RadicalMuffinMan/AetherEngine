@@ -59,6 +59,7 @@ final class LiveChannelHost {
     private(set) var showsLoadingCover = true
 
     private func present(error: String) { /* your error UI */ }
+    private func record(failure: String, domain: String?, code: Int?) { /* your analytics */ }
     private func channelIsDead(_ reason: String) { /* your "channel unavailable" UI */ }
 
     // MARK: - Wiring
@@ -83,13 +84,22 @@ final class LiveChannelHost {
             .store(in: &cancellables)
 
         // A session that dies after the load returned arrives here and nowhere
-        // else. The message is the engine's own sentence and names the cause
-        // rather than the symptom, so log it verbatim.
+        // else. Show the message, but classify on `errorInfo`: half of these
+        // sentences are the engine's own and half are AVFoundation's
+        // `localizedDescription` forwarded verbatim, which is in the device's
+        // language, so a bucket keyed on the text loses every non-English
+        // device. The info is assigned before the state, so it is already this
+        // failure's own by the time this sink runs.
         engine.$state
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
+            .sink { [weak self, weak engine] state in
                 guard case .error(let message) = state else { return }
                 self?.present(error: message)
+                if let info = engine?.errorInfo {
+                    self?.record(failure: info.kind.rawValue,
+                                 domain: info.underlyingDomain,
+                                 code: info.underlyingCode)
+                }
             }
             .store(in: &cancellables)
 

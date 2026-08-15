@@ -56,10 +56,23 @@ public final class AetherEngine: ObservableObject {
 
     @Published public internal(set) var state: PlaybackState = .idle {
         didSet {
+            // #376: the classification belongs to the failure the state carries, so it lives and dies
+            // with it. Set before `.error` is published (see `publishError`), dropped by any move off it.
+            if case .error = state {} else { errorInfo = nil }
             recomputePlaybackPhase()
             resolveLoadingStashedSeek(from: oldValue)
         }
     }
+
+    /// Machine-readable companion to the message inside `state`'s `.error` (#376): a stable
+    /// `PlaybackErrorKind` plus the underlying `NSError` domain and code where a Foundation /
+    /// AVFoundation failure is involved. nil whenever `state` is not `.error`.
+    ///
+    /// It exists because the message cannot classify: on the native paths it is
+    /// `AVPlayerItem.error.localizedDescription` forwarded verbatim, so it changes with the device's
+    /// language, and the domain and code are gone by the time a host reads it. Assigned BEFORE `state`,
+    /// so a `$state` sink can read `errorInfo` synchronously and see this failure's own.
+    @Published public internal(set) var errorInfo: PlaybackErrorInfo? = nil
 
     /// Mid-playback rebuffer flag. `state` stays `.playing` across a rebuffer to avoid icon flicker;
     /// gate on this when you need to distinguish a stall from real playback (AetherEngine#35).
@@ -1802,7 +1815,7 @@ public final class AetherEngine: ObservableObject {
     @MainActor
     func fallBackToMediaPlaylist(_ rejection: DisplayRejection) {
         guard let host = nativeHost, let session = nativeVideoSession else {
-            state = .error(rejection.message)
+            publishError(PlaybackErrorInfo(kind: .masterPlaylistRejected, message: rejection.message, underlyingDomain: rejection.domain, underlyingCode: rejection.code))
             return
         }
         guard MasterFallbackDecision.shouldFallBackToMediaPlaylist(
@@ -1810,7 +1823,7 @@ public final class AetherEngine: ObservableObject {
             servingMasterPlaylist: session.servingMasterPlaylist,
             alreadyFellBack: masterFallbackUsed),
               let mediaURL = session.mediaPlaylistURL else {
-            state = .error(rejection.message)
+            publishError(PlaybackErrorInfo(kind: .masterPlaylistRejected, message: rejection.message, underlyingDomain: rejection.domain, underlyingCode: rejection.code))
             return
         }
         masterFallbackUsed = true
@@ -2802,7 +2815,7 @@ public final class AetherEngine: ObservableObject {
                 throw CancellationError()
             } catch {
                 // Without this catch, a throwing loadRemoteHLS would strand state at .loading forever.
-                state = .error("Failed to load: \(error.localizedDescription)")
+                publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
             }
             // No probe ran on this bypass; there is nothing to report.
@@ -2901,7 +2914,7 @@ public final class AetherEngine: ObservableObject {
 
         // Custom sources have no URL to reopen from: a failed probe is fatal.
         if case .custom = source, !probeOpened {
-            state = .error("Failed to load: custom source probe failed")
+            publishError(.customSourceProbeFailed, "Failed to load: custom source probe failed")
             throw DemuxerError.openFailed(code: -1)
         }
 
@@ -2940,7 +2953,7 @@ public final class AetherEngine: ObservableObject {
         // A custom source carries the same misroute with no playlist URL to ingest from, so it keeps the
         // AE#140 typed rejection: the host built that reader and only the host can re-point it.
         if let readerError = probeFailure as? AVIOReaderError, case .hlsPlaylistOnRawLivePath = readerError {
-            state = .error("HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.")
+            publishError(.hlsPlaylistOnRawLivePath, "HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.")
             throw AetherEngineError.hlsPlaylistOnRawLivePath
         }
 
@@ -2972,7 +2985,7 @@ public final class AetherEngine: ObservableObject {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                state = .error("Failed to load: \(error.localizedDescription)")
+                publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
             }
             return nil
@@ -2981,7 +2994,7 @@ public final class AetherEngine: ObservableObject {
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
         // Proceeding would dispatch on codec NONE and grind another ~30 s before erroring.
         if options.isLive, !probeOpened {
-            state = .error("Live source unavailable")
+            publishError(.liveSourceUnavailable, "Live source unavailable")
             throw DemuxerError.openFailed(code: -5)
         }
 
@@ -3111,7 +3124,7 @@ public final class AetherEngine: ObservableObject {
                 // Superseded: successor owns state.
                 throw CancellationError()
             } catch {
-                state = .error("Failed to load: \(error.localizedDescription)")
+                publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
                 throw error
             }
             startAtmosConfirmation()
@@ -3381,7 +3394,7 @@ public final class AetherEngine: ObservableObject {
                 + "no compatible base layer and would render green/purple, failing fast (#176)",
                 category: .engine
             )
-            state = .error("Dolby Vision Profile \(profileLabel) requires a hardware playback path on this device")
+            publishError(.dolbyVisionRequiresHardware, "Dolby Vision Profile \(profileLabel) requires a hardware playback path on this device")
             throw AetherEngineError.dolbyVisionUnplayableOnSoftwarePath(profile: profileLabel)
         }
 
@@ -3397,7 +3410,7 @@ public final class AetherEngine: ObservableObject {
                 + "(codec=\(detectedCodecID.rawValue)); side-audio merge is native-only, failing fast",
                 category: .engine
             )
-            state = .error("Demuxed-audio live source not supported on this codec path")
+            publishError(.demuxedAudioLiveUnsupported, "Demuxed-audio live source not supported on this codec path")
             throw HLSIngestError.demuxedAudioNotSupported
         }
 
@@ -3562,7 +3575,7 @@ public final class AetherEngine: ObservableObject {
                 _ = try await load(source: .url(hlsURL), startPosition: startPosition, options: rerouted)
                 return nil
             }
-            state = .error("Failed to load: \(error.localizedDescription)")
+            publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
             throw error
         }
         // Honor a saved subtitle-language preference on the first frame (#73). Runs only on the successful

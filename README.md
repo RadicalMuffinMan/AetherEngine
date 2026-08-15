@@ -125,6 +125,12 @@ player.$state          // .idle, .loading, .playing, .paused, .seeking, .ended, 
                        // replay is another load(). A VOD merely parked at its final frame is the
                        // other case and play() rewinds it. How every other failure arrives, and
                        // why a CancellationError out of load() is not one, is in docs/api.md.
+player.$errorInfo      // PlaybackErrorInfo?, the machine-readable half of .error: a stable
+                       // PlaybackErrorKind plus the underlying NSError domain and code. Classify on
+                       // this. The message cannot: on the native paths it is AVPlayerItem.error
+                       // .localizedDescription forwarded verbatim, so it is in the device's
+                       // language, and a substring rule over it buckets every non-English device as
+                       // unknown. Set before .error is published, cleared when the state leaves it.
 player.$duration
 player.$videoFormat    // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
 player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs, and

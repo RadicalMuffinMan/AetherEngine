@@ -86,7 +86,7 @@ extension AetherEngine {
         }
     }
 
-    /// Wire `$duration`, `$isReady`, `$failureMessage`, `$didReachEnd` into the cancellable set.
+    /// Wire `$duration`, `$isReady`, `$failure`, `$didReachEnd` into the cancellable set.
     /// `isReady` always feeds the public `isSessionReady` mirror and replays a deferred pre-ready host
     /// seek (#127); pass `settlePausedAtReadiness: false` for paths that skip the readiness -> .paused
     /// waypoint (autostarting loadRemoteHLS, where the terminal play() runs and readiness is a waypoint).
@@ -179,7 +179,7 @@ extension AetherEngine {
         duration: Published<Double>.Publisher,
         isReady: Published<Bool>.Publisher,
         settlePausedAtReadiness: Bool = true,
-        failureMessage: Published<String?>.Publisher,
+        failure: Published<PlaybackErrorInfo?>.Publisher,
         didReachEnd: Published<Bool>.Publisher,
         videoReadyForDisplay: Published<Bool>.Publisher? = nil,
         storeIn cancellables: inout Set<AnyCancellable>
@@ -228,9 +228,9 @@ extension AetherEngine {
                 }
             }
             .store(in: &cancellables)
-        failureMessage
+        failure
             .compactMap { $0 }
-            .sink { [weak self] msg in self?.state = .error(msg) }
+            .sink { [weak self] info in self?.publishError(info) }
             .store(in: &cancellables)
         didReachEnd
             .filter { $0 }
@@ -366,7 +366,7 @@ extension AetherEngine {
             duration: host.$duration,
             isReady: host.$isReady,
             settlePausedAtReadiness: !Self.loadPerformsAutostart(options),
-            failureMessage: host.$failureMessage,
+            failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
             storeIn: &nativeCancellables
@@ -779,7 +779,9 @@ extension AetherEngine {
                     )
                     return
                 }
-                self.state = .error("\(reason) (code \(code))")
+                self.publishError(PlaybackErrorInfo(kind: .vodSourceFailed,
+                                                    message: "\(reason) (code \(code))",
+                                                    underlyingCode: Int(code)))
             }
         }
         // prepareNativeSubtitles + non-bitmap text tracks: builds the native subtitle table; must be set before start().
@@ -1093,7 +1095,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
-            failureMessage: host.$failureMessage,
+            failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
             storeIn: &nativeCancellables
@@ -1486,7 +1488,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
-            failureMessage: host.$failureMessage,
+            failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
             storeIn: &softwareCancellables
@@ -1557,7 +1559,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
-            failureMessage: host.$failureMessage,
+            failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             storeIn: &audioCancellables
         )
@@ -1630,7 +1632,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
-            failureMessage: host.$failureMessage,
+            failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             storeIn: &audioNativeCancellables
         )
@@ -1759,7 +1761,7 @@ extension AetherEngine {
             } catch {
                 EngineLog.emit("[AetherEngine] reload: custom reader reopen failed: \(error)", category: .engine)
                 activeAudioTrackIndex = previousAudioIndex
-                state = .error("Reload failed: \(error.localizedDescription)")
+                publishError(.reloadFailed, "Reload failed: \(error.localizedDescription)", underlying: error)
                 return
             }
             if loadGeneration != gen {
@@ -1784,7 +1786,7 @@ extension AetherEngine {
             } catch {
                 EngineLog.emit("[AetherEngine] reload: disc URL reopen failed: \(error)", category: .engine)
                 activeAudioTrackIndex = previousAudioIndex
-                state = .error("Reload failed: \(error.localizedDescription)")
+                publishError(.reloadFailed, "Reload failed: \(error.localizedDescription)", underlying: error)
                 return
             }
             if loadGeneration != gen {
@@ -1919,7 +1921,7 @@ extension AetherEngine {
                 category: .engine
             )
             activeAudioTrackIndex = previousAudioIndex
-            state = .error("Audio track switch failed: \(error.localizedDescription)")
+            publishError(.audioTrackSwitchFailed, "Audio track switch failed: \(error.localizedDescription)", underlying: error)
             return
         }
 
@@ -2029,7 +2031,7 @@ extension AetherEngine {
                         category: .engine
                     )
                     self.stopInternal()
-                    self.state = .error("Live reload failed: player never became ready")
+                    self.publishError(.liveReloadNeverReady, "Live reload failed: player never became ready")
                     return
                 }
                 if Date().timeIntervalSince(started) >= overallBudget { return }

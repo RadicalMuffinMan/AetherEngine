@@ -21,7 +21,9 @@ final class NativeAVPlayerHost {
     @Published private(set) var renderedTime: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var rate: Float = 0
-    @Published private(set) var failureMessage: String?
+    /// #376: the failure a host classifies on, message included. Published instead of a bare string so
+    /// the AVFoundation domain and code survive the hop into `state`.
+    @Published private(set) var failure: PlaybackErrorInfo?
     /// #50: monotonic token; bumped on each deferred .failed so a superseding failure or item swap cancels the in-flight confirmation.
     private var failureConfirmToken: Int = 0
     /// #50: latched on first .playing; discriminates startup failures (never played) from mid-playback transients. .failed and timeControlStatus KVOs are unsynchronized, so instantaneous status is unreliable. Reset with the item on a reused host.
@@ -345,7 +347,7 @@ final class NativeAVPlayerHost {
         }
         playerItem = item
         accessLogCount = 0
-        failureMessage = nil
+        failure = nil
         pendingDisplayRejection = nil
         lastSuppressedStartupFailure = nil
         isReady = false
@@ -734,10 +736,12 @@ final class NativeAVPlayerHost {
                     "[NativeAVPlayerHost] #\(sessionID) startup .failed is a master rejection "
                     + "(code=\(code)); signalling engine for media fallback instead of surfacing",
                     category: .engine)
-                pendingDisplayRejection = DisplayRejection(code: code, message: desc)
+                pendingDisplayRejection = DisplayRejection(code: code,
+                                                           message: desc,
+                                                           domain: (item.error as NSError?)?.domain)
                 return
             }
-            failureMessage = desc
+            failure = PlaybackErrorInfo(kind: .nativeItemFailed, message: desc, underlying: item.error)
             return
         }
 
@@ -765,7 +769,7 @@ final class NativeAVPlayerHost {
                     + "clock=\(String(format: "%.2f", self.renderedTime)))",
                     category: .engine
                 )
-                self.failureMessage = desc
+                self.failure = PlaybackErrorInfo(kind: .nativeItemFailed, message: desc, underlying: item.error)
             } else {
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(self.sessionID) deferred failure cleared: player recovered "
@@ -1192,8 +1196,8 @@ final class NativeAVPlayerHost {
         }
         notificationObservers.removeAll()
         accessLogCount = 0
-        // Clear terminal flags: keepNativeHost reload reuses the host and @Published replays on subscribe; stale failureMessage/didReachEnd corrupt the new session (issue #15).
-        failureMessage = nil
+        // Clear terminal flags: keepNativeHost reload reuses the host and @Published replays on subscribe; stale failure/didReachEnd corrupt the new session (issue #15).
+        failure = nil
         didReachEnd = false
         // #315: same reason. The layer itself still reads true for a few tens of ms past this point
         // (AVFoundation clears it after the swap), so the published value leads the layer here on
@@ -1451,7 +1455,7 @@ final class NativeAVPlayerHost {
                       self.playerItem === item else { return }
                 switch deadline.tick(isReady: self.isReady,
                                      carriageRerouted: self.remoteHLSVideoCarriageRejected,
-                                     hasFailed: self.failureMessage != nil) {
+                                     hasFailed: self.failure != nil) {
                 case .keepWaiting:
                     continue
                 case .disarm:
@@ -1463,7 +1467,7 @@ final class NativeAVPlayerHost {
                         + "failure in \(Int(budgetSeconds.rounded()))s; surfacing a terminal state (#334)",
                         category: .engine
                     )
-                    self.failureMessage = message
+                    self.failure = PlaybackErrorInfo(kind: .noPlayableTrackWithinBudget, message: message)
                     return
                 }
             }

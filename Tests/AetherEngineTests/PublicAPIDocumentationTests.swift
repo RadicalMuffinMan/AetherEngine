@@ -31,6 +31,7 @@ final class PublicAPIDocumentationTests: XCTestCase {
     /// covered by the member rule below; this list is about the value types a host holds.
     private static let hostFacingTypeFiles = [
         "PlayerState.swift",
+        "PlaybackErrorInfo.swift",
         "PlaybackClock.swift",
         "SeekEvent.swift",
         "StartupProgress.swift",
