@@ -43,7 +43,9 @@ A working shape for the live contracts below, compiled against the engine: [`Exa
 
 **`CancellationError` is not a playback failure.** It is what a superseded load throws at its first checkpoint, so every channel zap, every next-episode call and every `stop()` during a load produces one. A host that retries, falls back to a second engine, or shows an error on "load threw" reacts to its own navigation unless it lets `CancellationError` through untouched.
 
-The message inside `.error` is the engine's own sentence and is worth logging verbatim: several of them name the cause rather than the symptom (`"AVFoundation built no track for it within 45s and the source's carriage could not be identified"`), and a host timeout that fires first replaces that sentence with its own.
+The message inside `.error` is worth logging verbatim, and it comes from two different places. Some are the engine's own sentence and name the cause rather than the symptom (`"AVFoundation built no track for it within 45s and the source's carriage could not be identified"`, `"Live source unavailable"`, the Dolby Vision hardware refusal); a host timeout that fires first replaces that sentence with its own. The rest are forwarded from the failure underneath, and on the native paths that is `AVPlayerItem.error.localizedDescription` verbatim, which AVFoundation localizes into the device language and whose `NSError` domain and code reach the host only as whatever the localized text happens to embed.
+
+So the string is a payload, not a key. A host that classifies failures (an analytics bucket, a fallback to a second engine) has to key on the surfaces that are enums: `$videoRoute`, `$playbackPhase`, and the furthest `$startupProgress` checkpoint. Substring rules over `.error` bucket every non-English device into "other".
 
 ### `.ended` is terminal
 
@@ -65,6 +67,8 @@ Live's counterpart to a terminal `.error`, and a host that plays live has to sub
 Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed (an IPTV channel), load the same one again. Guard the answer with one retune in flight, a minimum spacing and a bounded count per session, then surface the exhausted case the way a terminal `.error` would be surfaced, because a ladder that ends on a silent `return` leaves the same dead channel behind a counter.
 
 The same-URL answer is the cheap one rather than a no-op: the #168 carriage verdict (a master advertising HEVC while delivering MPEG-TS) is remembered per exact absolute URL for six hours, 32 entries, so the retune routes straight onto the live ingest instead of re-paying the doomed native mount and its watchdog grace. A URL carrying a rotated per-session token misses that memory and re-pays the one-time discovery per retune, which is worth knowing where a first-frame budget is measured against the retune as well.
+
+Where the token rotates, the key the memory cannot have is one the host does have: the channel. `$videoRoute` publishes the reroute as it happens (`.remoteBypass` becomes `.loopback`), so a host can record that verdict against its own channel id and open the channel's next session on the ingest directly, either with `nativeRemoteHLS: false` (an `m3u8` on the raw live path is routed onto the ingest reader from 6.24.0, at the cost of one failed open) or by handing `HLSLiveIngestReader` to `.custom(_:formatHint: "mpegts")` itself, which costs nothing at all. Either skips the native mount and up to 4 s of carriage-watchdog grace per retune, whatever the URL looks like that time.
 
 Left unsubscribed it costs a channel that stops while the engine still reports a session, which from the outside is indistinguishable from a slow one. The guard, written out: [`Examples/LiveHost/LiveChannelHost.swift`](../Examples/LiveHost/LiveChannelHost.swift).
 
