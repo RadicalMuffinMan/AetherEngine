@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.26.0] - 2026-08-15
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.26.0))
+
+### Added
+
+- `$errorInfo`, the machine-readable half of a `.error` state (#376). A `PlaybackErrorInfo`
+  carrying a stable `PlaybackErrorKind` token, the underlying `NSError` domain and code where a
+  Foundation / AVFoundation failure is involved, and the same message the state carries. The text
+  alone could not classify a failure: on the native paths it is
+  `AVPlayerItem.error.localizedDescription` forwarded verbatim, so it arrives in the device's
+  language and the domain and code behind it are gone, which put every non-English device into a
+  host's unknown bucket. `PlaybackErrorKind` is a string-backed struct rather than an enum, so a
+  kind added in a later minor release cannot break a host's switch, and its raw values are API.
+
+### Changed
+
+- Every failure now publishes through one funnel, so a `.error` state can no longer reach a host
+  without its classification. `errorInfo` is assigned before `state`, so a `$state` sink reads
+  this failure's own, and it is cleared by the state's move away from `.error`, so the two cannot
+  drift. A test fails the build if a new `state = .error(...)` appears outside the funnel.
+- `docs/api.md` had claimed the message inside `.error` is the engine's own sentence. True for the
+  half that names a cause, false for the half most failing sessions produce, and a downstream host
+  was building an analytics classifier on the strength of it.
+- The live-host sample and the README's API tour classify on `errorInfo` and keep the message for
+  the log.
+
 ## [6.25.4] - 2026-08-14
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.25.4))
