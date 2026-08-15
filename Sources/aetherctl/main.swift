@@ -106,7 +106,7 @@ func printUsage() {
                         (SSAI ad-pod replay through the live direct-play path)
       aetherctl seektest [--seeks N] [--gap-ms N] [--settle N] [--throttle-kbps N] <url>
                          (#35/#37/#38: rapid-seek burst, wedge report, seek-event ledger)
-      aetherctl pktdump [--at S] [--count N] [--profile playback|restartReopen] <url>
+      aetherctl pktdump [--at S] [--count N] [--profile playback|restartReopen|stillExtraction] <url>
                         (raw demuxer packet timing, before dts repair and muxing)
       aetherctl bgaudio [--fg N] [--bg N] <url>
                         (SW-path background audio headless on macOS; DEBUG builds only)
