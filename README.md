@@ -61,8 +61,8 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Picture in Picture | Native path: hosts build `AVPictureInPictureController` around `currentAVPlayer`, or around the session's own `nativePlayerLayer` when they render through `bind(view:)` rather than AVKit; while `pictureInPictureActive` a native->native load hands the AVPlayerItem over in place so the window survives next-episode transitions. Software path: published `softwarePiPSource` carries the `AVSampleBufferDisplayLayer` plus transport answers on the enqueued frames' PTS axis for sample-buffer PiP. While PiP is active the software path also composites active subtitle cues (text and PGS/DVB bitmaps) into the decoded frames, so the window shows subtitles the host overlay cannot reach. On the native path, a selected bitmap track's compositions are OCR-recognized into its WebVTT rendition, so PGS subtitles render in the PiP window there as well. iOS renders sample-buffer PiP; tvOS AVKit does not evaluate sample-buffer content sources (Apple FB9751461, verified through tvOS 26) |
 | Subtitles | Text (SRT / ASS / SSA / VTT / mov_text) inline, bitmap (PGS / DVB / DVD) as `CGImage`, in-band CEA-608 closed captions (field-1, from an `eia_608`/`c608` demuxable track or extracted from A53 `cc_data` embedded in the video bitstream: H.264/HEVC SEI on the native path, decoded-frame side data such as MPEG-2 on the software path, with the caption track surfacing lazily on first real caption data), DVB teletext decoded to text cues with broadcaster colour preserved and a selectable caption page (libzvbi, `LoadOptions.teletextPage` at load, `setTeletextPage(_:)` while the channel plays), external files as first-class tracks (registered, listed, selected like embedded streams), a live channel's own HLS `SUBTITLES` renditions surfaced as tracks and fetched only once one is selected, opt-in raw ASS markup + fonts; embedded-text cues harvested from the producer's own read (instant enable, no side-channel bandwidth); opt-in native WebVTT renditions (one per text track incl. load-declared external files, language-tagged) so subtitles survive PiP / AirPlay / external display (`LoadOptions.prepareNativeSubtitles`); bitmap tracks (PGS / DVB / DVD, embedded and external .sup) join as OCR-fed renditions: on-device Vision text recognition runs while the track is selected and fills a language-tagged text rendition, so bitmap subtitles survive PiP / AirPlay / external display on the native path too (lossy by design; fullscreen keeps the pixel-accurate overlay) |
 | Frames | Off-playback `FrameExtractor`: `thumbnail` (scrub preview) + `snapshot` (frame-accurate) |
-| Audio tap | Opt-in `installAudioTap()`: decoded playback audio as mono Float32 48 kHz PCM with source-PTS timestamps, off the render path (live transcription, ShazamKit); delivers on the loopback, remote-HLS (VOD + live), and software paths |
-| Metadata | `MediaMetadata` (title / artist / album / albumArtist + cover) parsed on load |
+| Audio tap | Opt-in `installAudioTap()`: decoded playback audio as mono Float32 48 kHz PCM with source-PTS timestamps, off the render path (live transcription, ShazamKit); delivers on the loopback, remote-HLS (VOD + live), and software paths. The stream is bound to its session, so a session-preserving reload (audio / subtitle / disc-title switch, `reloadAtCurrentPosition`) finishes it and the host re-installs on stream end |
+| Metadata | `MediaMetadata` (title / artist / album + cover) parsed on load; a container's album artist folds into `artist` as a fallback |
 | Seek | VOD seeks into watched content are restart-free cache hits (byte-budgeted retention, 2 GiB cap); short forward scrubs ride the cached window; only never-produced targets restart the producer |
 | Streaming | One long-lived forward-streaming connection, reconnect-on-drop; CDN-stutter resilient; optional caller-bounded open-time probe budget (`LoadOptions.probesize` / `maxAnalyzeDuration`) to cut first-frame latency on sparse remote remuxes; configurable forward-buffer window (`LoadOptions.forwardBufferSegments`), from the 40 s default up to an opt-in whole-source pre-buffer that is bounded in bytes by the session's disk budget rather than in segments |
 | Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
@@ -119,8 +119,12 @@ await player.seek(to: 120)
 player.stop()
 
 // State (Combine @Published)
-player.$state          // .idle, .loading, .playing, .paused, .seeking, .ended, .error
-                       // .ended = played to completion (any backend); .idle = pre-load / stopped
+player.$state          // .idle, .loading, .playing, .paused, .seeking, .ended, .error(String)
+                       // .ended = played to completion (any backend); .idle = pre-load / stopped.
+                       // .ended is TERMINAL: seek is rejected and play() does not revive it, so a
+                       // replay is another load(). A VOD merely parked at its final frame is the
+                       // other case and play() rewinds it. How every other failure arrives, and
+                       // why a CancellationError out of load() is not one, is in docs/api.md.
 player.$duration
 player.$videoFormat    // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
 player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs, and
@@ -277,7 +281,7 @@ player.setSoftwareVideoFrameTimeObserver { frame in
 player.softwareDisplaySize                        // CGSize?, @Published
 ```
 
-Subtitle cues land in raw source PTS; render the overlay against `player.sourceTime` (see [docs/formats.md › Subtitles](docs/formats.md#subtitles)). A host compositing its own overlay onto the native path (libass and friends) needs the item axis too, since that is what the compositor pairs its samples against: `presentationAxisMap` converts arbitrary positions, `setNativeVideoFrameTimeObserver` reports the frames themselves. On the software path neither is needed: `softwarePresentationTimebase` hands out the clock the frames are presented against and `setSoftwareVideoFrameTimeObserver` reports them, both on the same axis as the cues, and `softwareDisplaySize` gives the rectangle to lay the overlay out in (the native path measures its own on `AVPlayerLayer.videoRect`). Both return nothing rather than a guess when no axis is established, because a defaulted shift is indistinguishable from a measured one at the call site. The 1 Hz diagnostics snapshot lives on `player.diagnostics.liveTelemetry`, off-the-engine for the same render-stability reason. Frame extraction, authored-ASS styling, and the full published surface are documented in [docs/formats.md](docs/formats.md).
+Subtitle cues land in raw source PTS; render the overlay against `player.sourceTime` (see [docs/formats.md › Subtitles](docs/formats.md#subtitles)). A host compositing its own overlay onto the native path (libass and friends) needs the item axis too, since that is what the compositor pairs its samples against: `presentationAxisMap` converts arbitrary positions, `setNativeVideoFrameTimeObserver` reports the frames themselves. On the software path neither is needed: `softwarePresentationTimebase` hands out the clock the frames are presented against and `setSoftwareVideoFrameTimeObserver` reports them, both on the same axis as the cues, and `softwareDisplaySize` gives the rectangle to lay the overlay out in (the native path measures its own on `AVPlayerLayer.videoRect`). Both return nothing rather than a guess when no axis is established, because a defaulted shift is indistinguishable from a measured one at the call site. The 1 Hz diagnostics snapshot lives on `player.diagnostics.liveTelemetry`, off-the-engine for the same render-stability reason. Frame extraction and authored-ASS styling are documented in [docs/formats.md](docs/formats.md); the full published surface, including the contracts that require the host to act rather than to read, is [docs/api.md](docs/api.md).
 
 Install via Swift Package Manager:
 
@@ -287,7 +291,7 @@ Install via Swift Package Manager:
 
 Two complementary samples ship in `Examples/`:
 
-- [`MinimalPlayer/`](Examples/MinimalPlayer/MinimalPlayerApp.swift): a 90-line SwiftUI drop-in. Copy the file into a new tvOS / iOS / macOS app, point at a URL, run.
+- [`MinimalPlayer/`](Examples/MinimalPlayer/MinimalPlayerApp.swift): a single-file SwiftUI drop-in, transport bar included. Copy it into a new tvOS / iOS / macOS app, point at a URL, run.
 - [`DemoPlayerMac/`](Examples/DemoPlayerMac/README.md): a standalone macOS app for testers. Drop a file on the window, it plays. A notarized universal `.dmg` is attached to every [GitHub Release](https://github.com/superuser404notfound/AetherEngine/releases/latest).
 
 ### Custom input source
@@ -465,6 +469,7 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 
 Browse all of this as a searchable site at **[aetherengine.superuser404.de](https://aetherengine.superuser404.de)**, or read the source Markdown here:
 
+- **[docs/api.md](docs/api.md)**: every public surface a host consumes, and the contracts that require it to act (how a load ends, `.ended`, the live retune, the audio tap, what must be set before `load`). A test fails the build when a host-facing public symbol is named nowhere in the docs.
 - **[docs/architecture.md](docs/architecture.md)**: the three playback pipelines, the source-file map, dependencies, the SwiftUI `Menu` pattern.
 - **[docs/formats.md](docs/formats.md)**: codec / container coverage, HDR routing, audio bridging, subtitles, frame extraction, disc playback, live ingest, and known limitations.
 - **[docs/cli.md](docs/cli.md)**: the `aetherctl` repro CLI (twenty-one subcommands).

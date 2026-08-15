@@ -102,6 +102,16 @@ func printUsage() {
       aetherctl hlsfixture <input.ts> [--port N] [--segment-seconds N]
                            [--master] [--discontinuity-at N] [--slow-refresh]
                            [--drop-segment N] [--encrypted] [--fmp4] [--self-test]
+      aetherctl hlslive --segments a.ts,b.ts,c.ts [--seconds N] [--segment-seconds N] [--disc i,j]
+                        (SSAI ad-pod replay through the live direct-play path)
+      aetherctl seektest [--seeks N] [--gap-ms N] [--settle N] [--throttle-kbps N] <url>
+                         (#35/#37/#38: rapid-seek burst, wedge report, seek-event ledger)
+      aetherctl pktdump [--at S] [--count N] [--profile playback|restartReopen] <url>
+                        (raw demuxer packet timing, before dts repair and muxing)
+      aetherctl bgaudio [--fg N] [--bg N] <url>
+                        (SW-path background audio headless on macOS; DEBUG builds only)
+      aetherctl smbtest [--reads N] <smb-url>
+                        (SMB byte source: throughput pass + random-seek consistency; macOS)
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
