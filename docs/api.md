@@ -6,6 +6,8 @@ Two things it exists for. The first is coverage: a symbol that is public is part
 
 The second is the class of thing an API tour organized by property type loses: the surfaces that require the host to **act**. Those come first, because they are the ones that cost a shipped app a bug report rather than a compile error.
 
+A working shape for the live contracts below, compiled against the engine: [`Examples/LiveHost/LiveChannelHost.swift`](../Examples/LiveHost/LiveChannelHost.swift).
+
 - [The contracts a host has to answer](#the-contracts-a-host-has-to-answer)
 - [Constructing and binding](#constructing-and-binding)
 - [Loading](#loading)
@@ -64,7 +66,7 @@ Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed
 
 The same-URL answer is the cheap one rather than a no-op: the #168 carriage verdict (a master advertising HEVC while delivering MPEG-TS) is remembered per exact absolute URL for six hours, 32 entries, so the retune routes straight onto the live ingest instead of re-paying the doomed native mount and its watchdog grace. A URL carrying a rotated per-session token misses that memory and re-pays the one-time discovery per retune, which is worth knowing where a first-frame budget is measured against the retune as well.
 
-Left unsubscribed it costs a channel that stops while the engine still reports a session, which from the outside is indistinguishable from a slow one.
+Left unsubscribed it costs a channel that stops while the engine still reports a session, which from the outside is indistinguishable from a slow one. The guard, written out: [`Examples/LiveHost/LiveChannelHost.swift`](../Examples/LiveHost/LiveChannelHost.swift).
 
 ### The system asks for captions
 
@@ -89,6 +91,21 @@ Read `audioTapHasDeliverySource` synchronously after installing: false means the
 | `LoadOptions.prepareNativeSubtitles`, `externalSubtitles` | the native renditions are declared in the init segment |
 | `LoadOptions.panelIsInHDRMode`, `matchContentEnabled` | the display-criteria handshake runs synchronously inside `load` |
 | `pictureInPictureActive` | governs the background teardown decision at the moment it happens |
+
+### Isolation, and what runs off the main actor
+
+`AetherEngine` is `@MainActor`. Every method and property in this reference is main-actor isolated unless it says otherwise, so a host drives it from the main actor and gets its published values there too.
+
+Four exceptions, and each is an exception for a reason:
+
+- **`AetherEngine.probe(...)` and `probeDetectingAtmos(...)` are `nonisolated` and synchronous**, and they open the source: a HEAD plus an initial range on a network URL, a real decode pass for the Atmos variant. Call them from a detached task or a background queue. On the main actor they block it for as long as the origin takes, which on a slow one is seconds.
+- **`presentationAxisMap` is `nonisolated`**, precisely so a compositor pairing samples off the main actor can convert without hopping.
+- **The two frame-time observers are `@Sendable` and are called on the pipeline's own threads**: the producer pump for `NativeVideoFrameTimeObserver` (in decode order), the renderer for `SoftwareVideoFrameTimeObserver` (in presentation order). They must not block and must not assume the main actor.
+- **`EngineLog.handler` fires from whatever thread emitted the line** (demuxer, producer, local server, audio bridge). Serialize onto your own queue before writing anywhere.
+
+`player.clock` is a separate `@MainActor ObservableObject` on purpose: its ~10 Hz ticks would otherwise fire `objectWillChange` on the engine and re-render every view observing it, which on tvOS rebuilds open `Menu` dropdowns mid-interaction. Time-driven UI observes `clock`, everything else observes the engine. `diagnostics` is split out for the same reason at 1 Hz.
+
+`FrameExtractor` is an `actor`, so its `thumbnail` / `snapshot` / `prewarm` / `shutdown` are `await`ed from anywhere. The audio tap's `AsyncStream` is likewise consumed from any task; only `installAudioTap()` itself is main-actor.
 
 ## Constructing and binding
 

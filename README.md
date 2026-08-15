@@ -289,9 +289,10 @@ Install via Swift Package Manager:
 .package(url: "https://github.com/superuser404notfound/AetherEngine", from: "6.25.4")
 ```
 
-Two complementary samples ship in `Examples/`:
+Three samples ship in `Examples/`:
 
 - [`MinimalPlayer/`](Examples/MinimalPlayer/MinimalPlayerApp.swift): a single-file SwiftUI drop-in, transport bar included. Copy it into a new tvOS / iOS / macOS app, point at a URL, run.
+- [`LiveHost/`](Examples/LiveHost/LiveChannelHost.swift): the live-TV half, the four contracts a channel needs that no compiler asks about (the `liveSourceReset` retune and its guard, `CancellationError` out of a superseded `load`, the audio tap that ends with its session).
 - [`DemoPlayerMac/`](Examples/DemoPlayerMac/README.md): a standalone macOS app for testers. Drop a file on the window, it plays. A notarized universal `.dmg` is attached to every [GitHub Release](https://github.com/superuser404notfound/AetherEngine/releases/latest).
 
 ### Custom input source

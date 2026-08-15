@@ -184,6 +184,53 @@ final class PublicAPIDocumentationTests: XCTestCase {
             """)
     }
 
+    // MARK: - The examples
+
+    /// The samples in `Examples/` are documentation that happens to be Swift, and nothing compiles
+    /// them: they are drop-in files for a host's own project, not package targets. So they rot the
+    /// way prose rots, except a reader trusts them more. This catches the cheap half of that, a
+    /// call to a member that no longer exists; the expensive half (does it still compile) is a
+    /// local `swift build` against a throwaway package, worth doing when an example changes.
+    func testExamplesOnlyCallEngineMembersThatExist() throws {
+        let root = Self.repoRoot.appendingPathComponent("Examples")
+        guard let walker = FileManager.default.enumerator(atPath: root.path) else {
+            throw XCTSkip("running outside a source checkout; no Examples/ to check")
+        }
+        let examples = walker.compactMap { $0 as? String }.filter { $0.hasSuffix(".swift") }.sorted()
+        XCTAssertFalse(examples.isEmpty, "Examples/ has no Swift files; did the directory move?")
+
+        var publicNames = Set<String>()
+        for relative in sourceFiles(matching: { _ in true }) {
+            guard let text = read("Sources/AetherEngine/\(relative)") else { continue }
+            for decl in declarations(in: text) { publicNames.insert(decl.name) }
+        }
+
+        // `engine.member`, `player.member` and their `$published` form.
+        let callPattern = try NSRegularExpression(
+            pattern: #"\b(?:engine|player)\.\$?([A-Za-z_][A-Za-z0-9_]*)"#)
+        var dead: [String] = []
+        var referenced = 0
+
+        for relative in examples {
+            guard let text = read("Examples/\(relative)") else { continue }
+            let ns = text as NSString
+            for m in callPattern.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                let name = ns.substring(with: m.range(at: 1))
+                referenced += 1
+                if !publicNames.contains(name) { dead.append("\(name)  (Examples/\(relative))") }
+            }
+        }
+
+        XCTAssertGreaterThan(referenced, 0, "no engine calls found in Examples/; the regex or the samples changed")
+        XCTAssertTrue(Set(dead).isEmpty, """
+            \(Set(dead).count) example call(s) name a member that is no longer public API:
+
+            \(Set(dead).sorted().joined(separator: "\n"))
+
+            A sample that does not compile is worse than no sample, because a reader trusts it.
+            """)
+    }
+
     // MARK: - LoadOptions
 
     func testEveryLoadOptionIsNamedInTheDocumentation() throws {
