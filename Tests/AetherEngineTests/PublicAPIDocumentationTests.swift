@@ -186,11 +186,14 @@ final class PublicAPIDocumentationTests: XCTestCase {
 
     // MARK: - The examples
 
-    /// The samples in `Examples/` are documentation that happens to be Swift, and nothing compiles
-    /// them: they are drop-in files for a host's own project, not package targets. So they rot the
-    /// way prose rots, except a reader trusts them more. This catches the cheap half of that, a
-    /// call to a member that no longer exists; the expensive half (does it still compile) is a
-    /// local `swift build` against a throwaway package, worth doing when an example changes.
+    /// The samples in `Examples/` are documentation that happens to be Swift. Since they became the
+    /// `ExampleSources` target, `swift build` compiles them, which is the stronger guard and the one
+    /// that catches a member that changed shape rather than name.
+    ///
+    /// This stays because it answers a different question cheaply, and reads as a list rather than
+    /// as a compiler error: which engine surfaces do the samples actually exercise, and is any of
+    /// them gone. It also still covers `DemoPlayerMac`, which is its own package and is not built by
+    /// the root `swift build`.
     func testExamplesOnlyCallEngineMembersThatExist() throws {
         let root = Self.repoRoot.appendingPathComponent("Examples")
         guard let walker = FileManager.default.enumerator(atPath: root.path) else {

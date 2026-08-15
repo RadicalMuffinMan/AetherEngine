@@ -52,7 +52,9 @@ For all of these, read [docs/api.md](../docs/api.md), the full public surface wi
 3. **`CancellationError` out of `load()` is not a failure.** It is what a superseded load throws, so every zap produces one.
 4. **The audio tap ends with its session**, including on a session-preserving reload, so a consumer re-installs on stream end.
 
-Copy the shape, not the numbers. The file compiles against the engine as it stands, but it is a skeleton rather than an app: the UI surfaces are stubs for yours.
+Copy the shape, not the numbers. It is a skeleton rather than an app: the UI surfaces are stubs for yours.
+
+Both loose samples are compiled by the package's `ExampleSources` target, so `swift build` and CI fail when one stops matching the API. They are never a product, so nothing reaches a consumer's build.
 
 ## DemoPlayerMac
 
