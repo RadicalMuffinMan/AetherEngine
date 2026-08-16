@@ -12,6 +12,28 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.27.0] - 2026-08-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.27.0))
+
+### Added
+
+- **The legacy Microsoft video tail decodes: MS-MPEG4 v1 / v2 / v3 (DivX 3.x) and WMV1 / WMV2 /
+  WMV3 (WMV9).** Routing already sent them to the software path, which is where they belong, and
+  they then failed the load with `unsupportedCodec` because the FFmpeg build compiled no decoder
+  for them: a pre-2005 AVI rip carrying MS-MPEG4 v3 stopped at `unsupportedCodec(id: 16)`, a WMV9
+  remux at `unsupportedCodec(id: 71)`. Both now open and play. The `avi` demuxer was already in the
+  build, so the AVI case needed nothing else; WMV3 covers WMV9 inside Matroska and MPEG-TS, where
+  the container's own demuxer supplies the stream. A native `.wmv` / `.asf` file still fails at
+  open: it also needs the `asf` demuxer and a WMA decoder, and half that set is worse than none,
+  since with the demuxer alone the file would play video with silent audio rather than fail
+  honestly. Costs 32 KB on an arm64 device slice. Reported by cmcpherson274 (FFmpegBuild#3).
+
+### Dependencies
+
+- FFmpegBuild 2.4.3 (the six legacy Microsoft video decoders; decoder count 40 to 46, only
+  `Libavcodec` changed).
+
 ## [6.26.0] - 2026-08-15
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.26.0))
