@@ -44,6 +44,12 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// A VOD source died without producing (or after the revive cap), reported by the reader
     /// (#126/#169). `underlyingCode` is the reader's code.
     public static let vodSourceFailed = PlaybackErrorKind(rawValue: "vodSourceFailed")
+    /// The origin is metering us: it answered 429/503/509 and kept doing so across the session's
+    /// bounded retries (#377). Distinct from `vodSourceFailed` because the source is not gone and
+    /// the recovery is different in kind: the same request will succeed later, and a host that
+    /// reacts to a dead source by handing off to a second engine will simply have that engine
+    /// refused by the same origin. Wait, or tell the user, but do not re-ask immediately.
+    public static let sourceRateLimited = PlaybackErrorKind(rawValue: "sourceRateLimited")
     /// The software decode pipeline failed.
     public static let softwarePipelineFailed = PlaybackErrorKind(rawValue: "softwarePipelineFailed")
     /// An audio-only session failed.

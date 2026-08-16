@@ -74,6 +74,7 @@ func printUsage() {
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--sequential-origin] [--declared-duration S]
+             [--max-concurrent-requests N]
                      [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback] <url>
                      (full load+play session smoke test; --subs activates the first
                       matching embedded subtitle track and logs overlay cues;
@@ -499,6 +500,10 @@ if first == "play" {
     // unranged GET and no ranged probes; pair with --declared-duration on VOD because the tail
     // duration estimate is skipped along with the other ranged reads.
     let sequentialOrigin = takeFlag("--sequential-origin", from: &rest)
+    // #377: LoadOptions.maxConcurrentSourceRequests. Caps how many requests the reader may have
+    // open against the origin at once across every path it fetches on. `1` also switches off the
+    // speculative parallel paths. This is the knob for reproducing a connection-metered CDN.
+    let maxConcurrentRequests = takeIntFlag("--max-concurrent-requests", from: &rest)
     let declaredDuration = takeDoubleFlag("--declared-duration", from: &rest)
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
@@ -573,7 +578,8 @@ if first == "play" {
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
-                 sequentialOrigin: sequentialOrigin, declaredDuration: declaredDuration,
+                 sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests,
+                 declaredDuration: declaredDuration,
                  httpHeaders: playHeaders))
 }
 
