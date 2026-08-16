@@ -10,7 +10,30 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A rate-limited streak that outlives the lingering-slot grace drops the pinned redirect target
+  for one re-resolve through the source (#380).** 509 has two field shapes. The one the keep-pin
+  rule was built for (#307 follow-up): a connection-capped panel refusing while the slot of the
+  connection being replaced lingers — it frees in seconds and the pin is fine. The one it broke:
+  a resume after minutes of pause, where the reader held no connection (#310) and the pinned edge
+  target's session expired server-side, so it answers 509 forever while a fresh redirect through
+  the source connects on the first try (field trace: 20 generations of 509 across ~85 s at one
+  offset, then a source-resolved reader delivered first data in 452 ms). The pin now survives
+  `rateLimitRepinStreak` (3) paced attempts and is then dropped for exactly one re-resolve; the
+  fresh target's 200/206 re-pins, and a permanently metering origin pays the same bounded
+  give-up as before, with the re-resolve spent inside the same seven attempts.
+- **Window-served reads no longer reset the reconnect streaks (#380).** Draining read-ahead is
+  not network progress: the reset ran in the same read iteration as the faulted-refill decision,
+  so a refused replacement was charged streak=1 for as long as the runway lasted, and neither
+  the re-resolve rung nor the bounded give-up was reachable until the window was empty — and one
+  served byte after an exhaustion restarted the whole ladder. The streaks now reset only when
+  the current generation has delivered data.
+- **The faulted-refill pacing survives the reconnect it authorises (#380).**
+  `startPersistentConnection` reset the next-attempt timestamp the ladder had just set, so
+  "next attempt in Ns" fired as fast as the consumer could read, and the give-up latch was
+  erased by the next reconnect from any path. The timestamp is now released by first data or an
+  intentional reposition — the two events that genuinely end a faulted lineage.
 
 ## [6.26.0] - 2026-08-15
 
