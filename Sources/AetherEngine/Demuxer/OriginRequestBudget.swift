@@ -57,6 +57,10 @@ final class OriginRequestBudget: @unchecked Sendable {
         var limit: Int?
         var refusals: Int
         var secondsSinceLastRefusal: Double?
+        /// How many callers are parked waiting for a slot right now. Reported so a test can wait on
+        /// the state it means to set up rather than on a sleep long enough to "probably" reach it,
+        /// which is a margin against a derived time bound and fails on a slower machine.
+        var waiting: Int
     }
 
     private struct OriginState {
@@ -276,7 +280,7 @@ final class OriginRequestBudget: @unchecked Sendable {
         }
         return Snapshot(inflight: state.inflight, peakInflight: state.peakInflight,
                         limit: state.limit, refusals: state.refusals,
-                        secondsSinceLastRefusal: since)
+                        secondsSinceLastRefusal: since, waiting: state.waiters.count)
     }
 
     func resetForTesting() {

@@ -53,6 +53,19 @@ struct OriginRequestBudgetTests {
         budget.release(a); budget.release(b)
     }
 
+    /// Wait for a condition the budget itself reports, rather than for a duration. A sleep long
+    /// enough to "probably" have parked the waiter is a margin against a derived time bound, and
+    /// the first thing a slower CI machine takes away.
+    private func waitUntil(_ deadlineSeconds: Double = 10,
+                           _ condition: () -> Bool) async -> Bool {
+        let deadline = Date(timeIntervalSinceNow: deadlineSeconds)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return condition()
+    }
+
     @Test("a capped origin makes the second request wait for the first to finish")
     func cappedSerialises() async {
         let budget = freshBudget()
@@ -63,17 +76,18 @@ struct OriginRequestBudgetTests {
 
         let secondGranted = UnsafeFlag()
         DispatchQueue.global().async {
-            let second = budget.acquire(for: url, label: "detour", timeout: 5)
+            let second = budget.acquire(for: url, label: "detour", timeout: 20)
             secondGranted.set(second?.granted == true)
             budget.release(second)
         }
-        // Give the waiter time to actually park on the semaphore before the slot frees.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        let parked = await waitUntil { budget.snapshot(for: url)?.waiting == 1 }
+        #expect(parked, "the second acquire must park rather than proceed")
         #expect(secondGranted.value == nil, "the second request must not proceed while the slot is held")
 
         budget.release(first)
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        #expect(secondGranted.value == true, "releasing the slot must hand it to the waiter")
+        let handed = await waitUntil { secondGranted.value == true }
+        #expect(handed, "releasing the slot must hand it to the waiter")
+        _ = await waitUntil { budget.snapshot(for: url)?.inflight == 0 }
         #expect(budget.snapshot(for: url)?.inflight == 0)
     }
 
@@ -105,20 +119,21 @@ struct OriginRequestBudgetTests {
 
         let order = UnsafeOrder()
         DispatchQueue.global().async {
-            let t = budget.acquire(for: url, label: "detour", timeout: 5)
+            let t = budget.acquire(for: url, label: "detour", timeout: 20)
             order.append("detour")
             budget.release(t)
         }
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        let parked = await waitUntil { budget.snapshot(for: url)?.waiting == 1 }
+        #expect(parked, "the detour must be in the queue before the pump gives the slot back")
 
         // The pump releasing and immediately re-taking must not beat the parked detour: that is
         // exactly the starvation a range boundary every 32 MB would produce.
         budget.release(held)
-        let reacquired = budget.acquire(for: url, label: "pump", timeout: 5)
+        let reacquired = budget.acquire(for: url, label: "pump", timeout: 20)
         order.append("pump")
         budget.release(reacquired)
 
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        _ = await waitUntil { order.first != nil }
         #expect(order.first == "detour",
                 "a pump reconnecting at a range boundary must not starve a waiting detour")
     }
