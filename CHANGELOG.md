@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.27.1] - 2026-08-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.27.1))
+
 ### Added
 
 - **The first live manifest now reports the interval it was held for.** A loopback live session's whole
