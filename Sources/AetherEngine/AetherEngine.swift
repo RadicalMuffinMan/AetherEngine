@@ -3124,7 +3124,7 @@ public final class AetherEngine: ObservableObject {
                 // Superseded: successor owns state.
                 throw CancellationError()
             } catch {
-                publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
+                publishLoadFailure(error)
                 throw error
             }
             startAtmosConfirmation()
@@ -3575,7 +3575,7 @@ public final class AetherEngine: ObservableObject {
                 _ = try await load(source: .url(hlsURL), startPosition: startPosition, options: rerouted)
                 return nil
             }
-            publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
+            publishLoadFailure(error)
             throw error
         }
         // Honor a saved subtitle-language preference on the first frame (#73). Runs only on the successful
