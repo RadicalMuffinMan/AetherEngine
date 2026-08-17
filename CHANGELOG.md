@@ -34,6 +34,22 @@ the public-API contract.
   "next attempt in Ns" fired as fast as the consumer could read, and the give-up latch was
   erased by the next reconnect from any path. The timestamp is now released by first data or an
   intentional reposition — the two events that genuinely end a faulted lineage.
+- **The other two served-from-memory branches stopped resetting the ladders too (#380
+  follow-up).** The read loop serves without touching the network in three places, and only the
+  window serve was fixed. The retained head/tail spans (#281) run FIRST, before every network
+  path, and their own log line says "no reconnect for it" — yet the parse's return to the head
+  cleared both streaks, and unlike the detour that branch is not taken out of service on a
+  metered origin, so it is the one that reaches the field shape #380 described as "one served
+  byte reset the whole ladder and it started over". The detour cache's resident-block hit (#69)
+  did the same; it now distinguishes a block it fetched from a block it already had, which also
+  replaces the `>2 ms` heuristic the slow-read line used to count detour fetches with the
+  ground truth.
+- **The pinned redirect target is release-visible (#380 follow-up).** Which target is pinned,
+  and when the reader drops it, is half of every field trace about a redirecting origin (#307,
+  #377, #380) — and with the bounded keep-pin grace, dropping it is now a decision the ladder
+  makes rather than a reaction to an expiry status. Both lines were behind `#if DEBUG`, so a
+  rung that only fires in the field was readable only by reporters building the engine
+  themselves. Both are rare by construction: a pin that does not change logs nothing.
 
 ## [6.28.0] - 2026-08-17
 
