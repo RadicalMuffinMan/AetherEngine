@@ -68,6 +68,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the source URL. See AetherEngine#12.
     private let resolvedURLLock = NSLock()
     private var _resolvedURL: URL?
+    /// The pin the ladder most recently dropped, kept only to describe what answers next (#377).
+    /// A source that re-mints the SAME target the ladder just dropped has not handed out a fresh
+    /// lease, and off the responding host alone that case is indistinguishable from a fresh target
+    /// refusing, which is the reading that puts metering back on the table. Two different causes,
+    /// two different fixes, one log line to tell them apart.
+    private var _droppedResolvedURL: URL?
 
     private func requestURL() -> URL {
         resolvedURLLock.lock()
@@ -103,12 +109,63 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         resolvedURLLock.lock()
         defer { resolvedURLLock.unlock() }
         if _resolvedURL != nil {
+            _droppedResolvedURL = _resolvedURL
             _resolvedURL = nil
             // The other half, and the one #380 turned into a decision: dropping the pin is now a
             // policy the ladder makes (the bounded keep-pin grace), not just a reaction to an
             // expiry status. A rung the field cannot see is a rung the next trace cannot confirm.
             EngineLog.emit("[AVIOReader] Dropped resolved URL cache (\(reason))", category: .demux)
         }
+    }
+
+    /// #377/#380: this attempt is going through the source because the ladder dropped a pin, i.e.
+    /// it is the re-resolve the drop was for. On the REQUEST side, because a target that never
+    /// answers at all leaves no response line to read it off, and a drop whose next attempt cannot
+    /// be seen going anywhere is a rung the field has to take on trust. Rare by construction: it
+    /// stops as soon as a 2xx pins again.
+    private func reResolveNote() -> String {
+        resolvedURLLock.lock()
+        defer { resolvedURLLock.unlock() }
+        guard _resolvedURL == nil, _droppedResolvedURL != nil else { return "" }
+        return " re-resolving through the source"
+    }
+
+    /// #377/#380: which target answered, in the terms the ladder decides in.
+    ///
+    /// A pin is only ever recorded from a 2xx, deliberately (pinning a target that just refused
+    /// would key the whole session on it), so a re-resolve that lands on a refusing target is
+    /// recorded nowhere. Read from outside, the absence of a `Cached resolved URL host=` line after
+    /// a drop is then indistinguishable between three shapes that need three different fixes: the
+    /// source refused the re-resolve itself, the source handed back the target just dropped, or a
+    /// genuinely fresh target refused. Only the last one means the origin is metering us. This is
+    /// the line that says which.
+    private func respondingTargetDescription(_ responded: URL?) -> String {
+        resolvedURLLock.lock()
+        let pinned = _resolvedURL
+        let dropped = _droppedResolvedURL
+        resolvedURLLock.unlock()
+        return Self.describeRespondingTarget(
+            responded: responded, source: url, pinned: pinned, dropped: dropped)
+    }
+
+    /// Compared on the ORIGIN KEY, never on the whole URL: a source that re-mints a link for the
+    /// same edge host with a fresh signature has handed back the same target, and reading that as a
+    /// fresh one is exactly the mistake that puts metering back on the table.
+    static func describeRespondingTarget(
+        responded: URL?, source: URL, pinned: URL?, dropped: URL?
+    ) -> String {
+        guard let responded, let host = responded.host,
+              let key = OriginRequestBudget.originKey(for: responded) else { return "" }
+        if key == OriginRequestBudget.originKey(for: source) {
+            return " from the source itself (\(host)), not a redirect target"
+        }
+        if let pinned, key == OriginRequestBudget.originKey(for: pinned) {
+            return " from the pinned target \(host)"
+        }
+        if let dropped, key == OriginRequestBudget.originKey(for: dropped) {
+            return " from \(host), the target this session dropped and the source minted again"
+        }
+        return " from \(host), a target the source resolved freshly"
     }
 
     private static func isResolvedExpiryStatus(_ status: Int) -> Bool {
@@ -148,8 +205,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// lowers the concurrency this origin is offered from here on and stamps the refusal so the
     /// engine's revive arm can tell "metered" from "gone" (the FFmpeg-side code is -1 and carries
     /// neither). Called from wherever a status is first read, once per refusal.
-    private func noteOriginRefusal(status: Int) {
-        let refusing = requestURL()
+    ///
+    /// `respondedBy` is the host that ANSWERED, which is not always the one we asked: once the
+    /// ladder has dropped the pin the request goes to the source, and a 302 can still put the
+    /// refusal on an edge target. Keying off `requestURL()` there names the source in the books for
+    /// an answer it never gave. The chain folding (#388) lands both keys in one bucket either way,
+    /// so this is about which host the books name, not about which budget moves.
+    private func noteOriginRefusal(status: Int, respondedBy: URL? = nil) {
+        let refusing = respondedBy ?? requestURL()
         OriginRequestBudget.shared.noteRefusal(for: refusing, status: status)
         // The refusal usually comes back from the post-redirect CDN, while the engine's revive arm
         // only knows the URL the host loaded. Where those differ (a proxy that 302s to a signed CDN
@@ -1962,7 +2025,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if let http = response as? HTTPURLResponse {
                 let status = http.statusCode
                 if Self.isRateLimitStatus(status) {
-                    noteOriginRefusal(status: status)
+                    noteOriginRefusal(status: status, respondedBy: http.url)
                     return .rateLimited(Self.parseRetryAfter(http))
                 }
                 if status != 200 && status != 206 {
@@ -2360,7 +2423,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // when it is one reader walking forward. One line per range is a line every few seconds.
         EngineLog.emit(
             "[AVIOReader] \(label) conn start gen=\(generation) offset=\(offset)"
-            + (resolvedBound.map { " len=\($0 / 1024 / 1024)MB" } ?? " open-ended"),
+            + (resolvedBound.map { " len=\($0 / 1024 / 1024)MB" } ?? " open-ended")
+            + reResolveNote(),
             category: .demux)
     }
 
@@ -2546,9 +2610,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
     }
 
+    /// `respondedBy` is where this response came from, redirects followed, and it is passed for
+    /// EVERY status: the pin still moves on a 2xx only, but a refusal has to be able to name the
+    /// host that refused (#377).
     fileprivate func persistentReceivedResponse(
         _ http: HTTPURLResponse,
-        resolvedURL: URL?,
+        respondedBy: URL?,
         generation: Int
     ) -> Bool {
         let status = http.statusCode
@@ -2556,7 +2623,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         var retryAfter: TimeInterval = 0
         if Self.isRateLimitStatus(status) {
             retryAfter = Self.parseRetryAfter(http)
-            noteOriginRefusal(status: status)
+            noteOriginRefusal(status: status, respondedBy: respondedBy)
         }
         var headerMs: Double? = nil
         winCond.lock()
@@ -2624,7 +2691,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
 
         if isOK {
-            if let resolvedURL { recordResolvedURL(resolvedURL) }
+            recordResolvedURL(respondedBy)
             return true
         }
         // The 200-ignored-Range rejection logged above; every other rejected
@@ -2633,6 +2700,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if status != 200 {
             EngineLog.emit(
                 "[AVIOReader] \(label) gen=\(generation) rejected response status=\(status) at offset \(requestedOffset)"
+                    + respondingTargetDescription(respondedBy)
                     + (retryAfter > 0 ? " retryAfter=\(Int(retryAfter))s" : ""),
                 category: .demux
             )
@@ -2714,7 +2782,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 self.streamExpectedBytes = expected
                 self.streamLock.unlock()
             },
-            onRefused: { [weak self] status in
+            onRefused: { [weak self] status, respondedBy in
                 guard let self else { return }
                 self.streamLock.lock()
                 self.streamRefusedStatus = status
@@ -2724,7 +2792,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // is the session's only request (no ranged open, no probe, by construction), so its
                 // 429 was seen by nobody: the budget kept offering that origin its full concurrency
                 // and the revive arm had no stamp saying the source was metered rather than gone.
-                if Self.isRateLimitStatus(status) { self.noteOriginRefusal(status: status) }
+                if Self.isRateLimitStatus(status) {
+                    self.noteOriginRefusal(status: status, respondedBy: respondedBy)
+                }
                 EngineLog.emit(
                     "[AVIOReader] \(self.label) streaming GET refused status=\(status); hanging up at the header",
                     category: .demux)
@@ -3085,7 +3155,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                if Self.isRateLimitStatus(status) { noteOriginRefusal(status: status) }
+                if Self.isRateLimitStatus(status) {
+                    noteOriginRefusal(status: status, respondedBy: (response as? HTTPURLResponse)?.url)
+                }
                 EngineLog.emit("[AVIOReader] HEAD failed (HTTP \(status))", category: .demux, level: .verbose)
                 return -1
             }
@@ -3472,11 +3544,12 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
             completionHandler(.cancel)
             return
         }
-        let resolved = (http.statusCode == 200 || http.statusCode == 206)
-            ? dataTask.currentRequest?.url
-            : nil
+        // #377: unconditional, and the 2xx gate for pinning moved into the reader with the comment
+        // that explains it. A refused response has a host too, and after a pin drop that host is
+        // the whole question (source, the dropped target minted again, or a fresh one).
+        let respondedBy = dataTask.currentRequest?.url ?? http.url
         let allow = reader.persistentReceivedResponse(
-            http, resolvedURL: resolved, generation: generation
+            http, respondedBy: respondedBy, generation: generation
         )
         completionHandler(allow ? .allow : .cancel)
     }
@@ -3622,8 +3695,10 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     /// Response hook (advisory Content-Length capture on the sequential-origin path).
     let onResponse: (@Sendable (URLResponse) -> Void)?
     /// The origin answered with a status instead of media (anything but 200/206). Called at the
-    /// response header, before the hang-up, so the reader can fail the open typed.
-    let onRefused: (@Sendable (Int) -> Void)?
+    /// response header, before the hang-up, so the reader can fail the open typed. Carries the URL
+    /// that answered, redirects followed: on a source that 302s to an edge target, the refusing
+    /// host is not the one the request named (#377).
+    let onRefused: (@Sendable (Int, URL?) -> Void)?
     /// Re-applied across cross-host redirects like every other delegate in this file;
     /// IPTV origins routinely 302 twice (portal -> panel -> archive host) and the final
     /// host must still see the caller's User-Agent / auth headers.
@@ -3632,7 +3707,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     init(
         extraHeaders: [String: String] = [:],
         onResponse: (@Sendable (URLResponse) -> Void)? = nil,
-        onRefused: (@Sendable (Int) -> Void)? = nil,
+        onRefused: (@Sendable (Int, URL?) -> Void)? = nil,
         onData: @escaping @Sendable (Data) -> Void,
         onComplete: @escaping @Sendable () -> Void
     ) {
@@ -3666,7 +3741,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         // would probe it as container bytes and report "Invalid data found when processing
         // input" for what was a refusal (#378).
         if let http = response as? HTTPURLResponse, http.statusCode != 200, http.statusCode != 206 {
-            onRefused?(http.statusCode)
+            onRefused?(http.statusCode, dataTask.currentRequest?.url ?? http.url)
             completionHandler(.cancel)
             return
         }
