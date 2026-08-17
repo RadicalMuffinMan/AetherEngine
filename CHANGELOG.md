@@ -12,6 +12,54 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.30.1] - 2026-08-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.30.1))
+
+### Fixed
+
+- **A redirect pin that has gone idle is dropped by its FIRST refusal, not by the keep-pin grace
+  (#392).** The grace answers one shape, the lingering slot of #307: a connection-capped panel
+  answers 509 while the slot of the connection the reader has just replaced is still occupied
+  server-side, and that shape requires a byte of ours to have been in flight moments ago. A pin
+  that has carried nothing for a minute cannot be producing it, since the pump ends its connection
+  at the window high water and an idle reader holds nothing at the origin (#310), so what refuses
+  there is the expired lease of #380 and the grace only delays finding out: three paced attempts
+  against an address that will refuse every one of them, 12.5 s of media time in the field retest,
+  free only because 16 MB of read-ahead absorbed it. Past the idle gap the first rate-limited
+  refusal now drops the pin, and the re-resolve is not paced behind a backoff charged to the
+  address it is no longer using (a server-sent `Retry-After` still applies, since the source is the
+  same origin). A pin that is still alive pays nothing: only what happens after a refusal changes,
+  never how a healthy request is issued. The detour cache's rate-limit arm gets the same rungs; it
+  fetches through the same pinned target and carried none, so a dead lease discovered there could
+  only be given up on (a failed read), never re-resolved, and it is the arm a backward read after a
+  long pause lands on. Reported by tschuegy in the 6.30.0 retest of #380, whose trace also settled
+  what dies across an idle: the re-resolved target is the SAME edge host, so it is the
+  authorization behind the address, not the address.
+
+### Changed
+
+- **A refused response names the host that refused it (#377).** A pin is only ever recorded from a
+  2xx, so a re-resolve that lands on a refusing target was written down nowhere, and three shapes
+  that need three different fixes collapsed into one silence: the source refused the re-resolve
+  itself, the source handed back the target just dropped, or a genuinely fresh target refused. Only
+  the last means the origin is metering us. The rejection line now says which, compared on the
+  origin key rather than the whole URL, because a re-minted link carries a fresh signature for the
+  same edge host. A connection opened while a dropped pin is outstanding says it is re-resolving
+  through the source, for the target that never answers at all. The refusal is charged and stamped
+  against the host that answered rather than the one asked; chain folding (#388) lands both in one
+  bucket, so no budget moves differently.
+- **`refusals=` on a slow read says it is cumulative.** Every other number on that line belongs to
+  the one read, so a bare count read as this read's: three windows reporting 7, 14 and 28 look like
+  a meter tightening its grip, where the same numbers as increments of 7, 7 and 14 are three whole
+  reconnect ladders each hitting their give-up cap. Same trace, opposite diagnosis.
+- **Connection reuse is reported from a sample, not from a first connection.** `isReusedConnection`
+  was taken from the first metrics callback for an origin, where a connection is nearly always new,
+  so every http/1.1 origin reported "connection new" whether the session went on to reuse that
+  socket a hundred times or none, and a reader taking it at face value concludes a fresh handshake
+  per range. It is tallied across an origin's reader connections and reported once there is a
+  sample behind it.
+
 ## [6.30.0] - 2026-08-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.30.0))
