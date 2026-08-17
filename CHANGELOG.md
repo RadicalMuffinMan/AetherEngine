@@ -22,6 +22,20 @@ the public-API contract.
 
 ### Fixed
 
+- **E-AC-3 from MPEG-TS stream-copies again, so Atmos (JOC) survives the loopback (#382).** The
+  mpegts demuxer stamps `codec_tag` with the PMT stream type (`0x87`) or the registration
+  descriptor (`EAC3`), and that tag reached the fMP4 muxer, which refuses a tag it does not know
+  for the codec: `Could not find tag for codec eac3 in stream #1`, `-22`. The audio cascade read
+  that as "this source cannot stream-copy" and bridged, re-encoding every Atmos object away and
+  reporting DD+ 5.1 on the receiver. libavformat's own guard would have caught the foreign tag one
+  layer earlier, but only at `FF_COMPLIANCE_NORMAL`; the muxer runs at `-2` so it can write the
+  Dolby Vision atoms. The muxer now drops a source-container audio tag the mp4 muxer rejects (the
+  rule `ffmpeg -c copy` uses), so the canonical `ec-3` sample entry is written and the emitted
+  `dec3` box is byte-identical to the source's, JOC complexity index included. AC-3 and AAC from
+  MPEG-TS fall under the same rule but were measured to escape the defect already (an `AC-3`
+  registration descriptor resolves to `ac-3` case-insensitively, and the ADTS path clears the tag
+  when it synthesises the AudioSpecificConfig), so nothing changes for them. Video was never
+  affected: every route sets its tag explicitly.
 - The forward-only streaming reader hangs up at the response header on anything but a 200/206 and
   fails the open typed with the status, so an origin's error page never reaches the demuxer (#378).
   After a 401/403/404/410 on the open-time data connection the HEAD / `bytes=0-1` size probes are

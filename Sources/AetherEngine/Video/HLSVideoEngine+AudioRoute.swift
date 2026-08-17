@@ -133,8 +133,10 @@ extension HLSVideoEngine {
                         "[HLSVideoEngine] WARNING: Atmos downgrade, EAC3+JOC stream-copy probe rejected by mp4 muxer (ret=\(probeRet)). "
                         + "Falling back to FLAC bridge: bed channels stay lossless, but object metadata is lost. "
                         + "Source: \(sourceAudioStream?.pointee.codecpar.pointee.profile.description ?? "?") profile, "
-                        + "channels=\(sourceAudioStream?.pointee.codecpar.pointee.ch_layout.nb_channels ?? -1). "
-                        + "If you see this in production, capture the source MKV, dec3 extradata reconstruction can recover Atmos.",
+                        + "channels=\(sourceAudioStream?.pointee.codecpar.pointee.ch_layout.nb_channels ?? -1), "
+                        + "codec_tag=\(MP4SegmentMuxer.fourCCDescription(sourceAudioStream?.pointee.codecpar.pointee.codec_tag ?? 0)). "
+                        + "The source container's codec_tag is already sanitised for the mp4 muxer (AE#382), so the cause "
+                        + "is elsewhere; the muxer's own error line above this one names it.",
                         category: .session
                     )
                 } else {
