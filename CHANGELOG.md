@@ -16,7 +16,9 @@ the public-API contract.
   status instead of media (a 401/403 refusal, a 404, a 5xx), and `underlyingCode` is that status.
   A refused source used to arrive as `sourceOpenFailed` carrying FFmpeg's "Invalid data found when
   processing input", indistinguishable from a corrupt file, because the forward-only streaming
-  reader accepted the origin's error page as container bytes.
+  reader accepted the origin's error page as container bytes. A 429/503/509 to the same request
+  publishes the existing `sourceRateLimited` with the status in `underlyingCode`, so the split the
+  #377 contract asks a host to branch on holds at the open too.
 
 ### Fixed
 
@@ -30,6 +32,10 @@ the public-API contract.
   range form: a 200 that ignored it, a 416 that rejected it. A 401/403/404/429/5xx on that request
   says nothing about suffix ranges and no longer disables the prefetch for the origin for the rest of
   the process (#378).
+- A rate-limit status read by the streaming pump is charged against the origin request budget
+  (#377/#378). The two other places that read a status already were; a raw live source opens no
+  persistent connection at all, so its 429 was seen by nobody and the budget kept offering that
+  origin its full concurrency.
 - **The software path's clock parks at end of media instead of free-running past it (#374).**
   `.ended` stopped the demux loops and published the state, but left the master synchronizer at
   rate 1. So a finished session kept publishing a position that grew without bound (20.13 s on a
