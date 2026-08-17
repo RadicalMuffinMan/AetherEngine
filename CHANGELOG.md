@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.28.0] - 2026-08-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.28.0))
+
 ### Fixed
 
 - **A rate-limited source is no longer declared dead.** The reader classifies a 429 / 503 / 509 as
