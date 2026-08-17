@@ -415,29 +415,75 @@ final class OriginRequestBudget: @unchecked Sendable {
 ///
 /// One line per origin, not per request: it is a property of the server, and a line per 32 MB range
 /// would say the same thing a few hundred times a session.
+///
+/// Connection reuse used to ride along on that same line, and it could not be read. Emitted at the
+/// FIRST metrics callback for an origin, "connection new" is what a first connection nearly always
+/// is, so every http/1.1 origin reported it and the line invited the reading "a fresh handshake per
+/// range". Whether reads share a connection is a property of a session, not of its first request,
+/// so it is now tallied across the connections to that origin and reported once, when there is a
+/// sample worth reading. The line says "reader connections" rather than "requests" because only the
+/// persistent read path reports metrics: detour blocks, probes and the tail prefetch run on
+/// completion-handler tasks with no delegate, so they are outside this tally and the wording must
+/// not imply otherwise.
 enum ReaderTransportLog {
+    /// How many connections an origin has to show before the reuse tally is worth a line. Low on
+    /// purpose: these are streaming (re)connects rather than ranges, so a whole session produces a
+    /// handful of them, and a threshold that reads well in theory would never print in the traces
+    /// this line exists for.
+    static let reuseSampleSize = 4
+
+    private struct Tally {
+        let proto: String
+        var connections: Int
+        var reused: Int
+        var reportedReuse: Bool
+    }
+
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var logged: Set<String> = []
+    nonisolated(unsafe) private static var tallies: [String: Tally] = [:]
 
     static func note(_ metrics: URLSessionTaskMetrics, for url: URL) {
         guard let key = OriginRequestBudget.originKey(for: url),
               let transaction = metrics.transactionMetrics.last,
               let proto = transaction.networkProtocolName else { return }
+        note(protocolName: proto, reusedConnection: transaction.isReusedConnection, originKey: key)
+    }
+
+    /// Split out from the metrics callback so the tally is reachable from a test:
+    /// `URLSessionTaskMetrics` has no public initializer, so nothing about this could be pinned
+    /// through the other entry point.
+    static func note(protocolName proto: String, reusedConnection reused: Bool, originKey key: String) {
         lock.lock()
-        let isNew = logged.insert(key).inserted
+        let existing = tallies[key]
+        var tally = existing ?? Tally(proto: proto, connections: 0, reused: 0, reportedReuse: false)
+        tally.connections += 1
+        if reused { tally.reused += 1 }
+        let announceTransport = existing == nil
+        let announceReuse = !tally.reportedReuse && tally.connections >= reuseSampleSize
+        if announceReuse { tally.reportedReuse = true }
+        tallies[key] = tally
         lock.unlock()
-        guard isNew else { return }
-        // `reusedConnection` separates "one connection, many requests" from "a connection per
-        // request", which is the other half of what a connection-capped origin is counting.
-        EngineLog.emit(
-            "[AVIOReader] origin transport: \(proto) at \(key) "
-            + "(connection \(transaction.isReusedConnection ? "reused" : "new"), "
-            + "\(proto.hasPrefix("h2") || proto.hasPrefix("h3") ? "multiplexed, so a per-session connection cap bounds nothing" : "one request per connection"))",
-            category: .demux)
+
+        if announceTransport {
+            let multiplexed = proto.hasPrefix("h2") || proto.hasPrefix("h3")
+            EngineLog.emit(
+                "[AVIOReader] origin transport: \(proto) at \(key) "
+                + (multiplexed
+                   ? "(multiplexed, so a per-session connection cap bounds nothing)"
+                   : "(one request per connection, so a per-session connection cap bounds requests)"),
+                category: .demux)
+        }
+        if announceReuse {
+            EngineLog.emit(
+                "[AVIOReader] origin connections: \(tally.reused) of \(tally.connections) reader "
+                + "connections reused at \(key)"
+                + (tally.reused == 0 ? ", every one paid a fresh handshake" : ""),
+                category: .demux)
+        }
     }
 
     static func resetForTesting() {
         lock.lock(); defer { lock.unlock() }
-        logged.removeAll()
+        tallies.removeAll()
     }
 }
