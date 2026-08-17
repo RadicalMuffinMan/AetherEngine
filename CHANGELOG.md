@@ -12,6 +12,16 @@ the public-API contract.
 
 ### Fixed
 
+- **The software path's clock parks at end of media instead of free-running past it (#374).**
+  `.ended` stopped the demux loops and published the state, but left the master synchronizer at
+  rate 1. So a finished session kept publishing a position that grew without bound (20.13 s on a
+  12.0 s source after 20 s, where a native session on the same file parks on 11.97 s and stays
+  there), and the 1 Hz `[SWDiag]` line kept reporting an `aLead` falling at exactly 1.00 per
+  second, which is the shape of a session drifting rather than of one that finished. Two readers,
+  a downstream host and this repo, spent a round treating that as a suspected deinterlacer clock
+  defect. The clock now parks on the last sample, deferred by the audio still queued ahead of the
+  playhead so the tail plays out instead of being cut, and the diagnostic line names the
+  exhaustion (`eof=y`) then falls silent on the tick that shows the clock parked on it.
 - **A rate-limited streak that outlives the lingering-slot grace drops the pinned redirect target
   for one re-resolve through the source (#380).** 509 has two field shapes. The one the keep-pin
   rule was built for (#307 follow-up): a connection-capped panel refusing while the slot of the

@@ -70,7 +70,7 @@ func printUsage() {
       aetherctl serve [--no-dv] [--start-position S] <url>
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
-      aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--seconds N] [--live] [--fast-zap] [--dvr-window N] [--subs <codec-or-lang>]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
                  [--sequential-origin] [--declared-duration S]
@@ -474,6 +474,12 @@ if first == "play" {
     // live on. Pair with --live; without it the m3u8 goes to the raw live path, which rejects it.
     let nativeHLS = takeFlag("--native-hls", from: &rest)
     let liveIngest = takeFlag("--live-ingest", from: &rest)
+    // AE#374: the join profile a host ships, against an origin of its own rather than the built-in
+    // fixture `live` carries. fastZap plus an external HLS origin is the shape a downstream player
+    // actually runs, and it could not be driven from here at all: the TARGETDURATION floor comes from
+    // the UPSTREAM's observed cadence, so what a fastZap start costs depends on an origin the raw-TS
+    // fixture does not have.
+    let playFastZap = takeFlag("--fast-zap", from: &rest)
     let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
     let subsPick = takeStringFlag("--subs", from: &rest)
     let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
@@ -574,7 +580,7 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: playFastZap, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: playStartPosition, mallocCensus: mallocCensus, forceSoftware: playForceSW,
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
