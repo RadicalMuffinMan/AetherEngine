@@ -129,7 +129,10 @@ struct Issue93SlowReadDiagnosticsTests {
             inflight: 2, peak: 4, limit: 2, refusals: 3)
         let line = try! #require(diag.line(elapsedMs: 9_000, offset: 512, generationSpan: (3, 4),
                                            origin: origin))
-        #expect(line.contains("origin=2inflight/4peak limit=2 refusals=3"))
+        // `total` is load-bearing: every other number on this line is this read's, so a bare
+        // refusal count reads as this read's too, and the #377 reporter read three cumulative
+        // values as a tightening meter rather than as three ladders each hitting their cap.
+        #expect(line.contains("origin=2inflight/4peak limit=2 refusals=3total"))
 
         // Uncapped and never refused is the ordinary case and must read as such, not as a zero.
         let quiet = SlowReadDiagnostics.OriginBudgetLine(inflight: 1, peak: 1, limit: nil, refusals: 0)

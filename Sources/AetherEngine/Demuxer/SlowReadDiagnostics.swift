@@ -99,6 +99,12 @@ struct SlowReadDiagnostics {
     /// and it was unanswerable from outside the engine: the four URLSession pools each report their
     /// own cap and none reports the sum. `peak` is the highest concurrency this origin has been
     /// given all session, which is the number a metered origin was reacting to.
+    ///
+    /// `refusals` is session-cumulative for the origin, and now says so in the field. Every other
+    /// number on a slow-read line belongs to that one read, so a bare `refusals=28` reads as this
+    /// read's: the #377 reporter read three windows of 7, 14 and 28 as a meter tightening rather
+    /// than as increments of 7, 7 and 14, which is three whole ladders hitting their give-up cap.
+    /// Same numbers, opposite diagnosis. The suffix costs five characters.
     struct OriginBudgetLine {
         let inflight: Int
         let peak: Int
@@ -108,7 +114,7 @@ struct SlowReadDiagnostics {
         var text: String {
             "origin=\(inflight)inflight/\(peak)peak"
                 + " limit=\(limit.map(String.init) ?? "none")"
-                + (refusals > 0 ? " refusals=\(refusals)" : "")
+                + (refusals > 0 ? " refusals=\(refusals)total" : "")
         }
     }
 
