@@ -87,9 +87,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { resolvedURLLock.unlock() }
         if resolved != url && resolved != _resolvedURL {
             _resolvedURL = resolved
-            #if DEBUG
+            // Release-visible, and rare by construction: only a pin that actually CHANGES logs, so
+            // a healthy session emits this once. Which target is pinned is half of every field
+            // trace about a redirecting origin (#307, #377, #380), and behind `#if DEBUG` it was
+            // readable only by the reporters who happened to build the engine themselves.
             EngineLog.emit("[AVIOReader] Cached resolved URL host=\(resolved.host ?? "?")", category: .demux)
-            #endif
         }
     }
 
@@ -98,9 +100,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { resolvedURLLock.unlock() }
         if _resolvedURL != nil {
             _resolvedURL = nil
-            #if DEBUG
+            // The other half, and the one #380 turned into a decision: dropping the pin is now a
+            // policy the ladder makes (the bounded keep-pin grace), not just a reaction to an
+            // expiry status. A rung the field cannot see is a rung the next trace cannot confirm.
             EngineLog.emit("[AVIOReader] Dropped resolved URL cache (\(reason))", category: .demux)
-            #endif
         }
     }
 
@@ -395,6 +398,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         defer { winCond.unlock() }
         return unproductiveReconnects
+    }
+
+    /// The rate-limit ladder's charge. A test asserting what does and does not count as progress
+    /// against a metered origin (#380) reads this rather than inferring it from request counts,
+    /// which only separate the cases once the ladder has already run to one of its ends.
+    var rateLimitStreakForTesting: Int {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return rateLimitStreak
     }
 
     /// Whether a transfer is still installed. A test that needs a range to have COMPLETED, rather
@@ -1324,8 +1336,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 if let spanLine { EngineLog.emit(spanLine, category: .demux) }
                 totalRead += n
                 diag.recordDetourServe(ms: 0, fetched: false)
-                unproductiveReconnects = 0
-                rateLimitStreak = 0
+                // No ladder reset. These spans are bytes fetched earlier and kept, and the line
+                // above says so itself: "no reconnect for it". Clearing the streaks here is the
+                // #380 window-serve mistake in the branch that runs FIRST, before every network
+                // path, and unlike the detour it is not taken out of service on a metered origin,
+                // so the parse's return to the head could hold a refusing origin at streak=0.
                 emitNetworkPhase(.flowing)
                 continue
             }
@@ -1414,14 +1429,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     switch serveFromDetour(into: buf.advanced(by: totalRead),
                                            maxLen: requestSize - totalRead,
                                            at: curPosition, allowFetch: true) {
-                    case .served(let n):
-                        // A resident-block hit is a pure memcpy (sub-ms); anything slower crossed the network.
-                        let detourMs = msSince(detourStart)
-                        diag.recordDetourServe(ms: detourMs, fetched: detourMs > 2)
+                    case .served(let n, let fetched):
+                        diag.recordDetourServe(ms: msSince(detourStart), fetched: fetched)
                         winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
                         totalRead += n
-                        unproductiveReconnects = 0
-                        rateLimitStreak = 0
+                        // Only a serve that crossed the network is progress against the origin. The
+                        // resident-block hit is the detour twin of the window serve #380 fixed: it
+                        // hands back read-ahead already paid for, so resetting the ladders on it lets
+                        // a parser ping-ponging through a cached region hold a refusing origin at
+                        // streak=0 for as long as the blocks last.
+                        if fetched {
+                            unproductiveReconnects = 0
+                            rateLimitStreak = 0
+                        }
                         emitNetworkPhase(.flowing)   // detour cache served: not stalled (#85)
                         detourTrackSequential(at: curPosition, length: n)
                         continue
@@ -1540,12 +1560,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     switch serveFromDetour(into: buf.advanced(by: totalRead),
                                            maxLen: requestSize - totalRead,
                                            at: curPosition, allowFetch: false) {
-                    case .served(let n):
+                    case .served(let n, _):
                         diag.recordDetourServe(ms: 0, fetched: false)   // resident-only path
                         winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
                         totalRead += n
-                        unproductiveReconnects = 0
-                        rateLimitStreak = 0
+                        // No ladder reset: `allowFetch: false` cannot have crossed the network, so
+                        // this serve says nothing about an origin that is refusing (#380).
                         emitNetworkPhase(.flowing)   // detour cache served: not stalled (#85)
                         detourTrackSequential(at: curPosition, length: n)
                         continue
@@ -1808,7 +1828,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     // MARK: - Detour Block Cache (AetherEngine#69)
 
-    private enum DetourServe { case served(Int); case rateLimited(TimeInterval); case miss }
+    /// `fetched` says whether the served bytes crossed the network. The callers charge the
+    /// reconnect ladders on it: a resident-block hit is a memcpy out of read-ahead already paid
+    /// for, so it is no more "progress" against a refusing origin than a window serve is (#380).
+    private enum DetourServe { case served(Int, fetched: Bool); case rateLimited(TimeInterval); case miss }
     private enum DetourFetch { case ok(Data); case rateLimited(TimeInterval); case failed }
 
     /// Serve `[offset, offset+maxLen)` (clamped to one 4 MB block) from the detour cache,
@@ -1821,7 +1844,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         // Resident-block hit: pure copy, no network.
         if let n = detourCache.serveCached(into: dst, maxLen: maxLen, at: offset) {
-            return .served(n)
+            return .served(n, fetched: false)
         }
         guard allowFetch else { return .miss }
 
@@ -1855,7 +1878,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 dst.update(from: base.advanced(by: inBlock).assumingMemoryBound(to: UInt8.self), count: n)
             }
         }
-        return .served(n)
+        return .served(n, fetched: true)
     }
 
     /// Single Range fetch for a detour block over the pooled chunkSession. Surfaces rate limiting with
