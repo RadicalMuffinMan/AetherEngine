@@ -22,6 +22,12 @@ import Foundation
 /// it had actually reached. There is no automatic increase: an origin that has metered us once is
 /// treated as metering for the rest of the process, which costs some parallelism and no correctness.
 ///
+/// A redirect chain is ONE origin here (#388). A metered source is routinely a portal that 302s to
+/// the host serving the bytes, and the host loading it can only name the portal: keeping a separate
+/// bucket per hop meant the declared ceiling stopped at the proxy, the pump's slot was booked
+/// against an origin it had stopped fetching from, and a detour block opened as a second request
+/// against a host whose books showed nothing in flight. `noteRedirect` folds them.
+///
 /// Deadlock is excluded structurally rather than managed. A reader that already holds a ticket must
 /// never block on a second one, so at `limit == 1` the speculative parallel paths (detour blocks,
 /// the tail prefetch, the staggered probe fan) are switched off instead of queued, and each of them
@@ -43,6 +49,9 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// `deinit`-based guard on purpose: the pump's slot is held across a connection, so its
     /// lifetime is the connection's, not a scope's.
     struct Ticket {
+        /// The origin key the request was made against, NOT the chain it belongs to: a redirect
+        /// folds this origin into a chain after the slot was taken, so the bucket is resolved when
+        /// the ticket is returned rather than when it was handed out (#388).
         let key: String
         let label: String
         /// True when the budget was capped and this ticket waited for room. Diagnostic only.
@@ -78,6 +87,92 @@ final class OriginRequestBudget: @unchecked Sendable {
 
     private let lock = NSLock()
     private var origins: [String: OriginState] = [:]
+    /// #388: member origin key -> the key its chain is kept under. A redirect target is not a
+    /// second origin as far as a request budget is concerned: every request keyed on either end is
+    /// answered by the same server, so both ends share one set of books.
+    private var chainHead: [String: String] = [:]
+
+    /// Resolve an origin key to the key its chain is kept under. Called under `lock`.
+    private func headLocked(_ key: String) -> String {
+        var current = key
+        // Bounded rather than trusting the map to be acyclic: `noteRedirect` never builds a cycle,
+        // and a walk that cannot terminate is not worth the certainty it would need.
+        for _ in 0..<8 {
+            guard let next = chainHead[current], next != current else { return current }
+            current = next
+        }
+        return current
+    }
+
+    // MARK: - Redirect chains
+
+    /// A request against `source` is being answered by `target`, i.e. the reader has just been
+    /// redirected. Fold the two origins into one budget.
+    ///
+    /// The ceiling is the reason this exists. A host that declares
+    /// `LoadOptions.maxConcurrentSourceRequests` knows what its PROVIDER allows and can only name
+    /// the URL it loads; on the shape this comes from (an Xtream portal that 302s to the media host
+    /// that actually counts the connections) that ceiling stopped at the proxy hop, and the host
+    /// cannot route around it - resolving the redirect itself before `load` would spend the one
+    /// connection the panel allows.
+    ///
+    /// Counting is the other half. The pump takes its slot against the URL it asks for, so after a
+    /// 302 it streams from a host whose books show nothing in flight, and the next reader to look
+    /// there sees a free slot that is not free. Folding the chain fixes both without re-keying a
+    /// ticket mid-connection: the slot the pump holds is already the chain's.
+    ///
+    /// Deliberate consequence: a refusal now lowers the whole chain, including the portal. #377
+    /// kept them apart on the reasoning that the proxy did not refuse us, which is true and no
+    /// longer the point - a request to the proxy for this source IS a request to the host that
+    /// refused, because the proxy only ever answers it with a redirect there.
+    ///
+    /// A target that already belongs to a chain keeps it: two portals handing out links on one edge
+    /// host would otherwise let a ceiling declared for one of them spread to the other.
+    func noteRedirect(from source: URL, to target: URL) {
+        guard let sourceKey = Self.originKey(for: source),
+              let targetKey = Self.originKey(for: target) else { return }
+        lock.lock()
+        let head = headLocked(sourceKey)
+        let targetHead = headLocked(targetKey)
+        guard head != targetHead else { lock.unlock(); return }
+        // Already somebody's redirect target: leave it on the chain it joined first.
+        guard targetHead == targetKey else { lock.unlock(); return }
+
+        var merged = origins[head] ?? OriginState()
+        let joining = origins[targetHead]
+        if let joining {
+            merged.inflight += joining.inflight
+            merged.peakInflight = max(max(merged.peakInflight, joining.peakInflight), merged.inflight)
+            merged.refusals += joining.refusals
+            merged.limit = Self.tighter(merged.limit, joining.limit)
+            merged.hostLimit = Self.tighter(merged.hostLimit, joining.hostLimit)
+            if let hostLimit = merged.hostLimit {
+                merged.limit = Self.tighter(merged.limit, hostLimit)
+            }
+            if let theirs = joining.lastRefusalAt {
+                merged.lastRefusalAt = merged.lastRefusalAt.map { max($0, theirs) } ?? theirs
+            }
+            // Their waiters are parked on semaphores this bucket now owns; dropping them would hang
+            // every one of them for its full acquire budget.
+            merged.waiters.append(contentsOf: joining.waiters)
+        }
+        origins[targetHead] = nil
+        chainHead[targetHead] = head
+        origins[head] = merged
+        let limit = merged.limit
+        lock.unlock()
+
+        EngineLog.emit(
+            "[OriginBudget] \(targetKey) is served through \(head); one request budget for both"
+            + (limit.map { " (limit \($0))" } ?? ""),
+            category: .demux)
+    }
+
+    private static func tighter(_ a: Int?, _ b: Int?) -> Int? {
+        guard let a else { return b }
+        guard let b else { return a }
+        return min(a, b)
+    }
 
     // MARK: - Acquire / release
 
@@ -90,17 +185,18 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// else's rate limiter trades a slow session for a dead one. The un-granted case is counted
     /// and logged, because a budget that is being routinely overrun is worth seeing.
     func acquire(for url: URL, label: String, timeout: TimeInterval) -> Ticket? {
-        guard let key = Self.originKey(for: url) else { return nil }
+        guard let raw = Self.originKey(for: url) else { return nil }
 
         let started = DispatchTime.now()
         lock.lock()
+        let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
         if state.limit == nil || state.inflight < (state.limit ?? Int.max) {
             state.inflight += 1
             state.peakInflight = max(state.peakInflight, state.inflight)
             origins[key] = state
             lock.unlock()
-            return Ticket(key: key, label: label, waitedMs: 0, granted: true)
+            return Ticket(key: raw, label: label, waitedMs: 0, granted: true)
         }
         let semaphore = DispatchSemaphore(value: 0)
         state.waiters.append(semaphore)
@@ -112,13 +208,16 @@ final class OriginRequestBudget: @unchecked Sendable {
 
         if signalled {
             // `release` counted us in before signalling, so the slot is already ours.
-            return Ticket(key: key, label: label, waitedMs: waitedMs, granted: true)
+            return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
         }
 
         // Timed out. Drop out of the queue and proceed uncounted-for: a slot handed to us between
         // the timeout and the lock would otherwise be leaked by a waiter that is no longer waiting.
         lock.lock()
-        var timedOut = origins[key] ?? OriginState()
+        // Resolved again: a redirect seen while this caller was parked folds its origin into a
+        // chain, and the bucket it queued on is then kept under the chain's key.
+        let keyNow = headLocked(raw)
+        var timedOut = origins[keyNow] ?? OriginState()
         if let i = timedOut.waiters.firstIndex(where: { $0 === semaphore }) {
             timedOut.waiters.remove(at: i)
             timedOut.inflight += 1   // proceeding anyway; stay honest about what is on the link
@@ -129,14 +228,14 @@ final class OriginRequestBudget: @unchecked Sendable {
         // matching `release` only ever subtracts one.
         timedOut.peakInflight = max(timedOut.peakInflight, timedOut.inflight)
         let limitDesc = timedOut.limit.map(String.init) ?? "none"
-        origins[key] = timedOut
+        origins[keyNow] = timedOut
         lock.unlock()
 
         EngineLog.emit(
             "[OriginBudget] \(label) proceeded without a slot after \(Int(waitedMs))ms "
             + "(limit \(limitDesc))",
             category: .demux, level: .verbose)
-        return Ticket(key: key, label: label, waitedMs: waitedMs, granted: false)
+        return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: false)
     }
 
     /// Take a slot only if one is free right now, never waiting. For SPECULATIVE requests: the tail
@@ -144,8 +243,9 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// given up the only thing it was for and still costs the origin a request. nil means "do not
     /// make this request at all", which is a complete answer for a fetch nobody is waiting on.
     func tryAcquire(for url: URL, label: String) -> Ticket? {
-        guard let key = Self.originKey(for: url) else { return nil }
+        guard let raw = Self.originKey(for: url) else { return nil }
         lock.lock(); defer { lock.unlock() }
+        let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
         guard state.inflight < (state.limit ?? Int.max) else {
             origins[key] = state
@@ -154,13 +254,16 @@ final class OriginRequestBudget: @unchecked Sendable {
         state.inflight += 1
         state.peakInflight = max(state.peakInflight, state.inflight)
         origins[key] = state
-        return Ticket(key: key, label: label, waitedMs: 0, granted: true)
+        return Ticket(key: raw, label: label, waitedMs: 0, granted: true)
     }
 
     func release(_ ticket: Ticket?) {
         guard let ticket else { return }
         lock.lock()
-        guard var state = origins[ticket.key] else { lock.unlock(); return }
+        // Resolved at RELEASE time, not at acquire time: the redirect that folds this request's
+        // origin into a chain arrives after the slot was taken, which is the whole shape of #388.
+        let key = headLocked(ticket.key)
+        guard var state = origins[key] else { lock.unlock(); return }
         state.inflight = max(0, state.inflight - 1)
         // Hand the slot straight to the front of the queue rather than dropping the count and
         // letting whoever locks first take it: without that, a pump reconnecting at a range
@@ -168,12 +271,12 @@ final class OriginRequestBudget: @unchecked Sendable {
         if !state.waiters.isEmpty, state.inflight < (state.limit ?? Int.max) {
             let next = state.waiters.removeFirst()
             state.inflight += 1
-            origins[ticket.key] = state
+            origins[key] = state
             lock.unlock()
             next.signal()
             return
         }
-        origins[ticket.key] = state
+        origins[key] = state
         lock.unlock()
     }
 
@@ -186,10 +289,15 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// said something about four, not about one. Repeated refusals halve again, so an origin that
     /// really allows one connection reaches 1 within a few refusals. A host limit always wins.
     /// Returns the limit now in force, if any.
+    ///
+    /// #388: on a chain the answer is charged to the chain. The host that refused and the host we
+    /// asked are one origin as far as requests are concerned, so halving only the far end would
+    /// leave the near end free to open exactly the request that was just refused.
     @discardableResult
     func noteRefusal(for url: URL, status: Int) -> Int? {
-        guard let key = Self.originKey(for: url) else { return nil }
+        guard let raw = Self.originKey(for: url) else { return nil }
         lock.lock()
+        let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
         state.refusals += 1
         state.lastRefusalAt = DispatchTime.now()
@@ -224,8 +332,9 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// forever: the classification would be built, published, and silently never reached. So the
     /// source URL carries the timestamp too, and only the timestamp.
     func noteRefusalWitnessed(for url: URL) {
-        guard let key = Self.originKey(for: url) else { return }
+        guard let raw = Self.originKey(for: url) else { return }
         lock.lock(); defer { lock.unlock() }
+        let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
         state.lastRefusalAt = DispatchTime.now()
         origins[key] = state
@@ -235,9 +344,9 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// to tell "the source is gone" from "the source is metering us", which the FFmpeg-side error
     /// code (-1) cannot carry.
     func refusedRecently(_ url: URL, within window: TimeInterval) -> Bool {
-        guard let key = Self.originKey(for: url) else { return false }
+        guard let raw = Self.originKey(for: url) else { return false }
         lock.lock(); defer { lock.unlock() }
-        guard let last = origins[key]?.lastRefusalAt else { return false }
+        guard let last = origins[headLocked(raw)]?.lastRefusalAt else { return false }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - last.uptimeNanoseconds) / 1_000_000_000
         return elapsed <= window
     }
@@ -246,19 +355,22 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// directions: a host that knows its provider allows one connection should not have to wait
     /// for the engine to be refused a few times to find that out.
     func setHostLimit(_ limit: Int?, for url: URL) {
-        guard let key = Self.originKey(for: url) else { return }
+        guard let raw = Self.originKey(for: url) else { return }
         lock.lock(); defer { lock.unlock() }
+        let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
         state.hostLimit = limit.map { max(1, $0) }
         if let hostLimit = state.hostLimit { state.limit = hostLimit }
         origins[key] = state
     }
 
-    /// The effective ceiling for this origin, or nil while it is uncapped.
+    /// The effective ceiling for this origin, or nil while it is uncapped. On a redirect chain that
+    /// is the chain's ceiling, which is the point of #388: the host names the URL it loads, the
+    /// bytes come from somewhere else, and both answers have to be the same one.
     func limit(for url: URL) -> Int? {
-        guard let key = Self.originKey(for: url) else { return nil }
+        guard let raw = Self.originKey(for: url) else { return nil }
         lock.lock(); defer { lock.unlock() }
-        return origins[key]?.limit
+        return origins[headLocked(raw)]?.limit
     }
 
     /// True when this origin is down to one request at a time. The reader asks this to switch OFF
@@ -272,9 +384,9 @@ final class OriginRequestBudget: @unchecked Sendable {
     }
 
     func snapshot(for url: URL) -> Snapshot? {
-        guard let key = Self.originKey(for: url) else { return nil }
+        guard let raw = Self.originKey(for: url) else { return nil }
         lock.lock(); defer { lock.unlock() }
-        guard let state = origins[key] else { return nil }
+        guard let state = origins[headLocked(raw)] else { return nil }
         let since = state.lastRefusalAt.map {
             Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
         }
@@ -289,6 +401,7 @@ final class OriginRequestBudget: @unchecked Sendable {
             for waiter in state.waiters { waiter.signal() }
         }
         origins.removeAll()
+        chainHead.removeAll()
     }
 }
 

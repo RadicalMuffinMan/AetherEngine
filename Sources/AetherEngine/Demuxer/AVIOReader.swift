@@ -83,6 +83,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     private func recordResolvedURL(_ resolved: URL?) {
         guard let resolved else { return }
+        // #388: the pinned target is where every later request is keyed, so it has to share the
+        // source's request budget. Idempotent, and stated here as well as at the redirect itself
+        // because a pin is also how a resolve that no delegate of ours followed becomes visible.
+        OriginRequestBudget.shared.noteRedirect(from: url, to: resolved)
         resolvedURLLock.lock()
         defer { resolvedURLLock.unlock() }
         if resolved != url && resolved != _resolvedURL {
@@ -3390,7 +3394,14 @@ private func redirectPreservingHeaders(
     newRequest request: URLRequest,
     extraHeaders: [String: String]
 ) -> URLRequest {
-    RedirectHeaderPolicy.redirectRequest(
+    // #388: this is the moment the request the reader budgeted for stops being answered by the
+    // origin it was budgeted against. Every fetch the reader makes passes through here, so it is
+    // the one place that sees the whole chain, including the hops no response ever pins (a target
+    // that answers the very first request with a 509 is never recorded as resolved).
+    if let from = task.originalRequest?.url, let to = request.url {
+        OriginRequestBudget.shared.noteRedirect(from: from, to: to)
+    }
+    return RedirectHeaderPolicy.redirectRequest(
         request,
         originalURL: task.originalRequest?.url,
         originalRange: task.originalRequest?.value(forHTTPHeaderField: "Range"),
