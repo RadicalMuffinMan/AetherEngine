@@ -10,7 +10,22 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The bare-AVPlayer audio host now publishes a rebuffer, so `playbackPhase` reads `.rebuffering` on the
+  audio-only path.** `AudioAVPlayerHost` fed the engine no buffering axis at all: a starved progressive
+  stream (an internet-radio origin whose connection died) sat in `waitingToPlayAtSpecifiedRate` while
+  `playbackPhase` stayed `.playing` with a frozen clock, and the phase fold could not tell a host anything
+  the clock did not already say. The host now folds AVPlayer's own signals, `timeControlStatus ==
+  .waitingToPlayAtSpecifiedRate` and `AVPlayerItemPlaybackStalled`, into an `isRebuffering` flag the engine
+  wires into `isBuffering` under its existing `.playing` gate. A wait counts only once the item has
+  played (the pre-roll of a fresh track is startup, not a rebuffer), never while the player is paused,
+  and a stall notification that lands ahead of the status change is latched until the next `.playing`
+  rather than lost. Transport reconciliation stays off on this path (the transient background `.paused`
+  that once mis-latched Now-Playing is untouched); only the buffering axis moves. The item's error log
+  entries and stall notifications are logged under `sw.playback` so a field failure on this path leaves
+  a trace. Diagnosed on tvOS 26.6 (Apple TV 4K) with an MP3/ICY station where the reload watchdog in the
+  host app was the only recovery. Covered by `AudioAVPlayerHostRebufferingTests`.
 
 ## [6.30.0] - 2026-08-17
 
