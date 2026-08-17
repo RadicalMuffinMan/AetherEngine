@@ -200,4 +200,49 @@ struct Issue378SourceRefusedTests {
         #expect(opened.kind == .sourceOpenFailed)
         #expect(opened.underlyingCode != 403)
     }
+
+    // MARK: - Where the refusal meets #377
+
+    /// A rate limit is a refusal too, and the reader now types it like any other. But the recovery a
+    /// host owes it is the opposite one (wait, do not hand off to a second player), and #377 built
+    /// `sourceRateLimited` to say exactly that, so the open must not flatten it into `sourceRefused`.
+    @MainActor
+    @Test("a metered open publishes sourceRateLimited, not sourceRefused, and keeps the status")
+    func rateLimitedOpenPublishesTheMeteredKind() throws {
+        let engine = try AetherEngine()
+
+        for status in [429, 503, 509] {
+            engine.publishLoadFailure(AVIOReaderError.httpStatus(status))
+            let metered = try #require(engine.errorInfo)
+            #expect(metered.kind == .sourceRateLimited, "\(status) published \(metered.kind.rawValue)")
+            #expect(metered.underlyingCode == status)
+        }
+
+        for status in [401, 403, 404, 410, 500, 502] {
+            engine.publishLoadFailure(AVIOReaderError.httpStatus(status))
+            let refused = try #require(engine.errorInfo)
+            #expect(refused.kind == .sourceRefused, "\(status) published \(refused.kind.rawValue)")
+            #expect(refused.underlyingCode == status)
+        }
+    }
+
+    /// The streaming pump reads a status like the persistent connection and the probe do, and those
+    /// two charge a metering origin against the shared budget. On a sequential origin the pump's GET
+    /// is the session's only request, so this is the only place that 429 is ever seen.
+    @Test("a rate limit read by the streaming pump is charged against the origin budget")
+    func meteredStreamingPumpChargesTheBudget() throws {
+        let server = try #require(ScriptedOriginServer { _ in
+            .init(status: 429, declaredLength: 0)
+        })
+        defer { server.stop() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/archive.ts")!
+
+        let reader = AVIOReader(url: url, sequentialOnly: true)
+        defer { reader.markClosed(); reader.close() }
+        #expect(throws: AVIOReaderError.httpStatus(429)) { try reader.open() }
+
+        let snapshot = try #require(OriginRequestBudget.shared.snapshot(for: url),
+                                    "the metered origin was never charged")
+        #expect(snapshot.refusals >= 1)
+    }
 }

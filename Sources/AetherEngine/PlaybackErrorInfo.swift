@@ -20,7 +20,8 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// The origin answered the source request with an HTTP status instead of media: a 401/403 refusal,
     /// a 404, a 5xx. `underlyingCode` is that status; `underlyingDomain` is nil, the sentence is the
     /// engine's. Before this kind existed both this and a corrupt file arrived as `sourceOpenFailed`
-    /// carrying FFmpeg's "Invalid data found when processing input".
+    /// carrying FFmpeg's "Invalid data found when processing input". A 429/503/509 arrives as
+    /// `sourceRateLimited` instead: same shape, different recovery.
     public static let sourceRefused = PlaybackErrorKind(rawValue: "sourceRefused")
     /// A custom `IOReader`'s initial probe failed. The host built that reader, so only the host can
     /// re-point it.
@@ -50,7 +51,8 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// (#126/#169). `underlyingCode` is the reader's code.
     public static let vodSourceFailed = PlaybackErrorKind(rawValue: "vodSourceFailed")
     /// The origin is metering us: it answered 429/503/509 and kept doing so across the session's
-    /// bounded retries (#377). Distinct from `vodSourceFailed` because the source is not gone and
+    /// bounded retries (#377), or answered one to the open itself, where `underlyingCode` is that
+    /// status (#378). Distinct from `vodSourceFailed` because the source is not gone and
     /// the recovery is different in kind: the same request will succeed later, and a host that
     /// reacts to a dead source by handing off to a second engine will simply have that engine
     /// refused by the same origin. Wait, or tell the user, but do not re-ask immediately.
@@ -134,12 +136,17 @@ extension AetherEngine {
         publishError(PlaybackErrorInfo(kind: kind, message: message, underlying: underlying))
     }
 
-    /// A failed open: `sourceRefused` with the status when the reader typed the origin's answer
-    /// (`AVIOReaderError.httpStatus`), otherwise `sourceOpenFailed` with whatever was underneath.
+    /// A failed open the reader typed with the origin's answer (`AVIOReaderError.httpStatus`): the
+    /// status becomes the kind, and stays in `underlyingCode` either way. A 429/503/509 is
+    /// `sourceRateLimited`, not `sourceRefused` (#377): the source is not gone, the same request is
+    /// expected to work later, and a host that reacts to a refusal by handing off to a second player
+    /// would have that player metered by the same origin. Anything the reader did not type keeps the
+    /// historical `sourceOpenFailed` with whatever was underneath.
     @MainActor
     func publishLoadFailure(_ error: Error) {
         if let readerError = error as? AVIOReaderError, case .httpStatus(let status) = readerError {
-            publishError(PlaybackErrorInfo(kind: .sourceRefused,
+            let kind: PlaybackErrorKind = AVIOReader.isRateLimitStatus(status) ? .sourceRateLimited : .sourceRefused
+            publishError(PlaybackErrorInfo(kind: kind,
                                            message: "Failed to load: \(error.localizedDescription)",
                                            underlyingCode: status))
             return

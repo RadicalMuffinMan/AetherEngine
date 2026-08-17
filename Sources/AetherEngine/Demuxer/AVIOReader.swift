@@ -2715,6 +2715,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 self.streamLock.lock()
                 self.streamRefusedStatus = status
                 self.streamLock.unlock()
+                // #377: a metering origin is charged wherever a status is first read, and this was
+                // the one path that read one without charging it. On a sequential origin this GET
+                // is the session's only request (no ranged open, no probe, by construction), so its
+                // 429 was seen by nobody: the budget kept offering that origin its full concurrency
+                // and the revive arm had no stamp saying the source was metered rather than gone.
+                if Self.isRateLimitStatus(status) { self.noteOriginRefusal(status: status) }
                 EngineLog.emit(
                     "[AVIOReader] \(self.label) streaming GET refused status=\(status); hanging up at the header",
                     category: .demux)
