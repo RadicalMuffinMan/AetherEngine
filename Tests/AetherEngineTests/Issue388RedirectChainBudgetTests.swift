@@ -95,10 +95,17 @@ struct Issue388RedirectChainBudgetTests {
         budget.noteRedirect(from: portal, to: mediaHost)
 
         let granted = UnsafeBox()
+        let started = UnsafeBox()
         DispatchQueue.global().async {
+            started.set(true)
             let ticket = budget.acquire(for: self.mediaHostResigned, label: "detour", timeout: 20)
             granted.set(ticket?.granted == true)
         }
+        // Wait for the THREAD before waiting for the park, or the observation window is spent on
+        // libdispatch and a block that never got a thread reports a budget defect nobody measured
+        // (the same trap `cappedSerialises` pays for, and this test hit it on CI first try).
+        #expect(await waitUntil(30) { started.value == true },
+                "the waiter never got a thread; nothing about the budget was measured")
 
         let parked = await waitUntil { budget.snapshot(for: mediaHost)?.waiting == 1 }
         #expect(parked, "the second request went out alongside the pump: \(String(describing: budget.snapshot(for: mediaHost)))")
