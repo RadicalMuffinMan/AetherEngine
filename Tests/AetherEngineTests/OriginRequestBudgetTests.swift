@@ -75,11 +75,19 @@ struct OriginRequestBudgetTests {
         #expect(first?.granted == true)
 
         let secondGranted = UnsafeFlag()
+        let secondStarted = UnsafeFlag()
         DispatchQueue.global().async {
+            secondStarted.set(true)
             let second = budget.acquire(for: url, label: "detour", timeout: 20)
             secondGranted.set(second?.granted == true)
             budget.release(second)
         }
+        // Waiting for the park without first waiting for the THREAD spends the observation window
+        // on libdispatch. A green run and a run where the block never got a thread then look
+        // identical, and the second one reports a budget defect that was never measured. Seen on
+        // CI: `parked` false with `secondGranted` still nil, i.e. the acquire had not happened.
+        #expect(await waitUntil(30) { secondStarted.value == true },
+                "the waiter never got a thread; nothing about the budget was measured")
         let parked = await waitUntil { budget.snapshot(for: url)?.waiting == 1 }
         #expect(parked, "the second acquire must park rather than proceed")
         #expect(secondGranted.value == nil, "the second request must not proceed while the slot is held")
