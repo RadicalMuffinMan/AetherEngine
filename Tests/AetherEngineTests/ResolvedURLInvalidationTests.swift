@@ -23,6 +23,51 @@ struct ResolvedURLInvalidationTests {
         }
     }
 
+    /// Synchronous on purpose (`Thread.sleep` is off limits in an async test body): paces the
+    /// consumer so served reads interleave with the reconnect ladder, and reads until the
+    /// reader fails the read. Returns the bytes served and the terminal return value.
+    private static func pacedReadToFailure(_ reader: AVIOReader, sliceCap: Int,
+                                           bytesPerSecond: Int) -> (got: Int, result: Int32) {
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        var got = 0
+        while true {
+            let n = reader.read(into: buf, size: Int32(sliceCap))
+            if n <= 0 { return (got, n) }
+            got += Int(n)
+            Thread.sleep(forTimeInterval: Double(n) / Double(bytesPerSecond))
+        }
+    }
+
+    /// Models an origin whose redirect targets are per-session leases: the source mints a
+    /// numbered lease per resolve, and the first request that hits the metered boundary
+    /// latches every lease minted so far as DEAD (the sessions that existed when the fault
+    /// began). Only a lease minted by a later re-resolve is alive — the stale-edge-session
+    /// shape a long pause produces.
+    private final class LeaseLatch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var minted = 0
+        private var staleCeiling: Int?
+        func mint() -> Int {
+            lock.lock(); defer { lock.unlock() }
+            minted += 1
+            return minted
+        }
+        func isStale(path: String) -> Bool {
+            let lease = Int(path.components(separatedBy: "lease=").last ?? "") ?? 0
+            lock.lock(); defer { lock.unlock() }
+            if staleCeiling == nil { staleCeiling = minted }
+            return lease <= staleCeiling!
+        }
+        /// Source resolves spent AFTER the fault began — the price of healing, which the
+        /// bounded rung must keep at exactly one.
+        var mintsAfterFault: Int {
+            lock.lock(); defer { lock.unlock() }
+            guard let staleCeiling else { return 0 }
+            return minted - staleCeiling
+        }
+    }
+
     @Test("a hard 500 from the pinned URL falls back to the source URL for a fresh redirect",
           .timeLimit(.minutes(2)))
     func hard500FallsBackToSourceURL() async throws {
@@ -183,7 +228,10 @@ struct ResolvedURLInvalidationTests {
 
     /// An origin that answers 509 forever must get the PACED rate-limit ladder and its
     /// bounded give-up — not the hard-5xx treatment (pin dropped every attempt, retries
-    /// through the portal at zero backoff until the unproductive cap).
+    /// through the portal at zero backoff until the unproductive cap). Past the keep-pin
+    /// grace it spends the bounded re-resolve rung — one class of retries through the
+    /// source, not one per attempt — and gives up on the ladder when the fresh target
+    /// refuses identically.
     @Test("a permanent 509 pays the rate-limit ladder and gives up cleanly",
           .timeLimit(.minutes(2)))
     func permanent509TakesTheRateLimitLadder() async throws {
@@ -228,9 +276,125 @@ struct ResolvedURLInvalidationTests {
         #expect(boundaryAttempts >= 2, "the ladder must retry a metered origin")
         #expect(boundaryAttempts <= 7,
                 "509 must give up at the bounded rate-limit cap, not grind: \(boundaryAttempts) attempts")
+        // The keep-pin grace holds for the first attempts, then the rung spends the
+        // re-resolve: some retries reach the source, but bounded by the ladder — never
+        // the hard-5xx shape of one portal round trip per attempt at zero backoff.
         let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
-        #expect(sourceHitsAtBoundary.isEmpty,
-                "a metered origin must keep the pin throughout: \(source.requestLog)")
+        #expect(!sourceHitsAtBoundary.isEmpty,
+                "a 509 outliving the grace must re-resolve through the source: \(source.requestLog)")
+        #expect(sourceHitsAtBoundary.count <= 4,
+                "re-resolves must stay bounded by the ladder: \(source.requestLog)")
+    }
+
+    /// The other 509 shape, and the reason the keep-pin grace is bounded: a pinned edge
+    /// target whose session died during a long pause answers 509 FOREVER, while a fresh
+    /// redirect through the source connects on the first try (field trace: 20 generations
+    /// of 509 against the pin across ~85 s at one offset, then a source-resolved reader
+    /// delivered first data in 452 ms). Past `rateLimitRepinStreak` attempts the pin must
+    /// be dropped for exactly ONE re-resolve, and the fresh target's 206 re-pins.
+    @Test("a 509 outliving the keep-pin grace re-resolves once through the source",
+          .timeLimit(.minutes(2)))
+    func stalePinned509HealsThroughTheSource() async throws {
+        AetherEngine.reconnectBackoffScaleForTesting = 0.02
+        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
+
+        let firstRange: Int64 = 256 * 1024
+        let leases = LeaseLatch()
+        // CDN: a lease minted before the boundary fault is a dead session and refuses that
+        // offset forever; a lease minted by a later resolve serves.
+        let cdnMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, offset, path in
+                guard offset == firstRange else { return .serve206 }
+                return leases.isStale(path: path) ? .status(509) : .serve206
+            }
+        )
+        let cdn = try #require(cdnMaybe)
+        defer { cdn.stop() }
+        let cdnPort = cdn.port
+        let sourceMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, _, _ in
+                .redirect(to: "http://127.0.0.1:\(cdnPort)/cdn/movie.bin?lease=\(leases.mint())")
+            }
+        )
+        let source = try #require(sourceMaybe)
+        defer { source.stop() }
+
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
+                                boundedInitialFetch: firstRange)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        let sliceCap = 128 * 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        let target = Int(firstRange) + 256 * 1024
+        var got = 0
+        while got < target {
+            let n = reader.read(into: buf, size: Int32(min(sliceCap, target - got)))
+            if n <= 0 { break }
+            got += Int(n)
+        }
+        #expect(got == target, "read stopped at \(got) of \(target); the stale pin was terminal")
+
+        // 1 free replacement of the planned range end + the grace attempts, all against the
+        // dead lease; the rung's attempt is the one that goes through the source.
+        let boundaryAttempts = cdn.requestLog.filter { $0.start == firstRange }.count
+        #expect(boundaryAttempts == AVIOReader.rateLimitRepinStreak + 1,
+                "expected the grace against the pin plus one healed attempt, got \(boundaryAttempts)")
+        #expect(leases.mintsAfterFault == 1,
+                "healing must cost exactly one source resolve, spent \(leases.mintsAfterFault): \(source.requestLog)")
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        #expect(sourceHitsAtBoundary.count == 1,
+                "the re-resolve carries the boundary range once: \(source.requestLog)")
+    }
+
+    /// A consumer still being served from the window must not soften the ladder: window
+    /// bytes are not network progress, so the streak keeps charging across served reads
+    /// and both the re-resolve rung and the bounded give-up stay reachable. Before this
+    /// held, a paced consumer reset the streak on every read and a refused origin was
+    /// retried at streak=1 for as long as the runway lasted (the post-pause field trace:
+    /// 20 generations across ~85 s, none of them counted).
+    @Test("a draining window does not reset the rate-limit ladder", .timeLimit(.minutes(2)))
+    func drainingWindowKeepsTheLadderCharged() async throws {
+        AetherEngine.reconnectBackoffScaleForTesting = 0.02
+        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
+
+        let firstRange: Int64 = 2 * 1024 * 1024
+        let cdnMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, offset, _ in
+                offset == firstRange ? .status(509) : .serve206
+            }
+        )
+        let cdn = try #require(cdnMaybe)
+        defer { cdn.stop() }
+        let cdnPort = cdn.port
+        let sourceMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, _, _ in .redirect(to: "http://127.0.0.1:\(cdnPort)/cdn/movie.bin") }
+        )
+        let source = try #require(sourceMaybe)
+        defer { source.stop() }
+
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
+                                boundedInitialFetch: firstRange)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        // Paced at ~2 MB/s so the 2 MB of read-ahead is worth a second of served reads
+        // while the ladder runs — the window-serve/streak interleaving under test.
+        let (got, result) = Self.pacedReadToFailure(reader, sliceCap: 128 * 1024,
+                                                    bytesPerSecond: 2 * 1024 * 1024)
+
+        #expect(got == Int(firstRange),
+                "everything before the metered boundary must still be served (got \(got))")
+        #expect(result == -1, "a permanently refused source must fail the read, not hang")
+        let boundaryAttempts = cdn.requestLog.filter { $0.start == firstRange }.count
+        #expect(boundaryAttempts >= 3, "the ladder must retry a metered origin")
+        #expect(boundaryAttempts <= 7,
+                "served reads reset the streak: \(boundaryAttempts) attempts at the boundary")
     }
 
     @Test("hard-server-error classification excludes rate limiting")

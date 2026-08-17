@@ -473,7 +473,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     ///
     /// Never call this directly; go through `surfaceVODSourceFailure` so the sequential startup
     /// gate is released with it (#370 follow-up).
-    var onVODSourceFailed: (@Sendable (Int32, String) -> Void)?
+    /// #377: the third parameter classifies the failure. A source that is being metered is not a
+    /// source that is gone, and the reader's `-1` cannot say which, so the kind is decided here
+    /// and published rather than inferred from the code downstream.
+    var onVODSourceFailed: (@Sendable (Int32, String, PlaybackErrorKind) -> Void)?
 
     /// The one way a VOD session surfaces a terminal source failure (#370 follow-up).
     ///
@@ -484,9 +487,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// published (an E-AC-3 archive whose first segment carries no audio packet is the field shape),
     /// and the server thread then sat out the remaining ~30 s of a session that had already failed.
     /// Pairing the release with the surface makes that structural instead of a call site to remember.
-    func surfaceVODSourceFailure(_ code: Int32, _ reason: String) {
+    func surfaceVODSourceFailure(_ code: Int32, _ reason: String,
+                                 kind: PlaybackErrorKind = .vodSourceFailed) {
         provider?.abortSequentialStartupWait()
-        onVODSourceFailed?(code, reason)
+        onVODSourceFailed?(code, reason, kind)
     }
     /// Session-long FLAC bridge for codecs illegal in fMP4. Engine-owned (not producer-owned) so
     /// encoder state survives producer restarts; `startSegment()` rebases PTS on each restart.
@@ -527,6 +531,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// producer's front reached neither (rrgomes: seg719 miss x11 into -12889), so the exit gets
     /// its own event-driven arm. Same gate shape as #99.
     var readErrorReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
+    /// #377: a separate, larger budget for read errors caused by an origin METERING us rather than
+    /// failing. Separate because the two must not spend each other: two attempts is right for a
+    /// source that may be gone, and wrong for one that is merely busy, where each attempt is
+    /// spaced by a growing backoff and is expected to succeed eventually. Four attempts across the
+    /// ladder in `rateLimitReviveDelay` span over a minute of waiting before the session is called.
+    var rateLimitReviveGate = MuxerFailureReviveGate(maxAttempts: 4)
 
     /// AE#169 round 2 (under `restartLock`): the demuxer's last read threw, so the next
     /// performRestart replaces it via the #79 fresh-demuxer path instead of seeking a connection

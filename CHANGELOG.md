@@ -30,6 +30,132 @@ the public-API contract.
   range form: a 200 that ignored it, a 416 that rejected it. A 401/403/404/429/5xx on that request
   says nothing about suffix ranges and no longer disables the prefetch for the origin for the rest of
   the process (#378).
+- **The software path's clock parks at end of media instead of free-running past it (#374).**
+  `.ended` stopped the demux loops and published the state, but left the master synchronizer at
+  rate 1. So a finished session kept publishing a position that grew without bound (20.13 s on a
+  12.0 s source after 20 s, where a native session on the same file parks on 11.97 s and stays
+  there), and the 1 Hz `[SWDiag]` line kept reporting an `aLead` falling at exactly 1.00 per
+  second, which is the shape of a session drifting rather than of one that finished. Two readers,
+  a downstream host and this repo, spent a round treating that as a suspected deinterlacer clock
+  defect. The clock now parks on the last sample, deferred by the audio still queued ahead of the
+  playhead so the tail plays out instead of being cut, and the diagnostic line names the
+  exhaustion (`eof=y`) then falls silent on the tick that shows the clock parked on it.
+- **A rate-limited streak that outlives the lingering-slot grace drops the pinned redirect target
+  for one re-resolve through the source (#380).** 509 has two field shapes. The one the keep-pin
+  rule was built for (#307 follow-up): a connection-capped panel refusing while the slot of the
+  connection being replaced lingers — it frees in seconds and the pin is fine. The one it broke:
+  a resume after minutes of pause, where the reader held no connection (#310) and the pinned edge
+  target's session expired server-side, so it answers 509 forever while a fresh redirect through
+  the source connects on the first try (field trace: 20 generations of 509 across ~85 s at one
+  offset, then a source-resolved reader delivered first data in 452 ms). The pin now survives
+  `rateLimitRepinStreak` (3) paced attempts and is then dropped for exactly one re-resolve; the
+  fresh target's 200/206 re-pins, and a permanently metering origin pays the same bounded
+  give-up as before, with the re-resolve spent inside the same seven attempts.
+- **Window-served reads no longer reset the reconnect streaks (#380).** Draining read-ahead is
+  not network progress: the reset ran in the same read iteration as the faulted-refill decision,
+  so a refused replacement was charged streak=1 for as long as the runway lasted, and neither
+  the re-resolve rung nor the bounded give-up was reachable until the window was empty — and one
+  served byte after an exhaustion restarted the whole ladder. The streaks now reset only when
+  the current generation has delivered data.
+- **The faulted-refill pacing survives the reconnect it authorises (#380).**
+  `startPersistentConnection` reset the next-attempt timestamp the ladder had just set, so
+  "next attempt in Ns" fired as fast as the consumer could read, and the give-up latch was
+  erased by the next reconnect from any path. The timestamp is now released by first data or an
+  intentional reposition — the two events that genuinely end a faulted lineage.
+- **The other two served-from-memory branches stopped resetting the ladders too (#380
+  follow-up).** The read loop serves without touching the network in three places, and only the
+  window serve was fixed. The retained head/tail spans (#281) run FIRST, before every network
+  path, and their own log line says "no reconnect for it" — yet the parse's return to the head
+  cleared both streaks, and unlike the detour that branch is not taken out of service on a
+  metered origin, so it is the one that reaches the field shape #380 described as "one served
+  byte reset the whole ladder and it started over". The detour cache's resident-block hit (#69)
+  did the same; it now distinguishes a block it fetched from a block it already had, which also
+  replaces the `>2 ms` heuristic the slow-read line used to count detour fetches with the
+  ground truth.
+- **The pinned redirect target is release-visible (#380 follow-up).** Which target is pinned,
+  and when the reader drops it, is half of every field trace about a redirecting origin (#307,
+  #377, #380) — and with the bounded keep-pin grace, dropping it is now a decision the ladder
+  makes rather than a reaction to an expiry status. Both lines were behind `#if DEBUG`, so a
+  rung that only fires in the field was readable only by reporters building the engine
+  themselves. Both are rare by construction: a pin that does not change logs nothing.
+
+## [6.28.0] - 2026-08-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.28.0))
+
+### Fixed
+
+- **A rate-limited source is no longer declared dead.** The reader classifies a 429 / 503 / 509 as
+  metering rather than failure, and then threw that away on the way up: its give-up arm returns a bare
+  `-1`, so the session's revive arm saw exactly what a genuinely dead source produces. It spent both
+  of its two attempts inside a minute, each one reopening from byte 0 against an origin refusing
+  precisely that, and ended on "source not readable in this session" while the same stream played
+  instantly on a fresh press of play. A metered read error now gets its own larger budget with a
+  growing backoff (3 s, 8 s, 20 s, 45 s) instead of an immediate reopen, and the terminal surface is a
+  new `PlaybackErrorKind.sourceRateLimited`: the source is being metered, not lost, so a host that
+  reacts to a dead source by handing off to a second engine only has that engine refused by the same
+  origin. Raised by Rasmusmart57 (AetherEngine#377).
+
+### Added
+
+- **One request budget per origin, shared by every path the reader fetches on.**
+  `httpMaximumConnectionsPerHost` is a per-`URLSession` cap and `AVIOReader` fetches over four pools
+  (pump ranges, detour blocks, size probes, a per-call streaming session), so against one signed CDN
+  URL a pump range, a detour block and a probe could all be open at once, with a second reader (the
+  subtitle side demuxer) sharing the same static pools. Those caps never composed into anything. The
+  budget counts requests per origin, which is what an origin metering us counts, and unlike a
+  connection cap it is equally true over HTTP/2, where a session multiplexes every request onto one
+  connection. Counting is unconditional and capping is not: with no limit set nothing waits, and a
+  limit arrives either from the host (`LoadOptions.maxConcurrentSourceRequests`) or from the origin
+  itself, halving from the concurrency actually reached on each refusal. At one request at a time the
+  speculative parallel paths (detour blocks, tail prefetch) switch off rather than queue, each falling
+  back to the serial path it already had. Raised by Rasmusmart57 (AetherEngine#377).
+- **The negotiated transport is named once per origin, and a slow read reports the concurrency it ran
+  at.** Whether a per-session connection cap can do anything against a given CDN is unanswerable from
+  outside the engine, since over HTTP/2 it bounds nothing while the origin still counts every request.
+  `URLSessionTaskMetrics.networkProtocolName` was read nowhere; it now logs one line per origin saying
+  which case that origin is. The `slow read:` summary gains `origin=<n>inflight/<peak>peak`, the number
+  a metered origin was reacting to (AetherEngine#377).
+
+## [6.27.1] - 2026-08-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.27.1))
+
+### Added
+
+- **The first live manifest now reports the interval it was held for.** A loopback live session's whole
+  join latency is one withheld `/media.m3u8` response: the first serve waits until the window carries
+  the live-edge holdback (`3 x TARGETDURATION`, AetherEngine#189) of content behind the edge, while
+  everything else the engine does for that session finishes before the gate is even entered. Only a
+  FAILED gate used to log, so a successful hold of eighteen seconds left no trace and a host had to
+  measure it from the outside. Every exit now names what it held, the window it served and the holdback
+  it was measured against, including the exit where no segment was ever cut, which used to return in
+  silence. The bounded `.fastZap` start reported its grace alone, which is the last leg of the wait
+  rather than the wait: a start measured here at 10.284 s reported itself as 2.000 s. `docs/api.md`
+  gains the paragraph that says where a live start's seconds go, and how `startupProgress` separates
+  this wait from the probe and the display handshake. Raised by ksktech-dev (AetherEngine#374).
+
+## [6.27.0] - 2026-08-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.27.0))
+
+### Added
+
+- **The legacy Microsoft video tail decodes: MS-MPEG4 v1 / v2 / v3 (DivX 3.x) and WMV1 / WMV2 /
+  WMV3 (WMV9).** Routing already sent them to the software path, which is where they belong, and
+  they then failed the load with `unsupportedCodec` because the FFmpeg build compiled no decoder
+  for them: a pre-2005 AVI rip carrying MS-MPEG4 v3 stopped at `unsupportedCodec(id: 16)`, a WMV9
+  remux at `unsupportedCodec(id: 71)`. Both now open and play. The `avi` demuxer was already in the
+  build, so the AVI case needed nothing else; WMV3 covers WMV9 inside Matroska and MPEG-TS, where
+  the container's own demuxer supplies the stream. A native `.wmv` / `.asf` file still fails at
+  open: it also needs the `asf` demuxer and a WMA decoder, and half that set is worse than none,
+  since with the demuxer alone the file would play video with silent audio rather than fail
+  honestly. Costs 32 KB on an arm64 device slice. Reported by cmcpherson274 (FFmpegBuild#3).
+
+### Dependencies
+
+- FFmpegBuild 2.4.3 (the six legacy Microsoft video decoders; decoder count 40 to 46, only
+  `Libavcodec` changed).
 
 ## [6.26.0] - 2026-08-15
 

@@ -94,8 +94,27 @@ struct SlowReadDiagnostics {
         connectMs += ms
     }
 
+    /// #377: how the origin's shared request budget stood when this read finished. A slow read is
+    /// exactly when the question "how many requests were we holding against this origin" matters,
+    /// and it was unanswerable from outside the engine: the four URLSession pools each report their
+    /// own cap and none reports the sum. `peak` is the highest concurrency this origin has been
+    /// given all session, which is the number a metered origin was reacting to.
+    struct OriginBudgetLine {
+        let inflight: Int
+        let peak: Int
+        let limit: Int?
+        let refusals: Int
+
+        var text: String {
+            "origin=\(inflight)inflight/\(peak)peak"
+                + " limit=\(limit.map(String.init) ?? "none")"
+                + (refusals > 0 ? " refusals=\(refusals)" : "")
+        }
+    }
+
     /// The summary line for a completed read, or nil while under the threshold.
-    func line(elapsedMs: Double, offset: Int64, generationSpan: (Int, Int)) -> String? {
+    func line(elapsedMs: Double, offset: Int64, generationSpan: (Int, Int),
+              origin: OriginBudgetLine? = nil) -> String? {
         guard elapsedMs >= thresholdMs else { return nil }
         // Time not attributable to any recorded branch: the read was blocked upstream of the loop
         // (fresh-connection first byte, a starved detour fetch not yet timed out, scheduling). This
@@ -111,5 +130,6 @@ struct SlowReadDiagnostics {
             + "staleGenDropped=\(staleGenDroppedBytes)b "
             + "iters=\(iterations) unaccounted=\(Int(unaccounted))ms "
             + "gen=\(generationSpan.0)->\(generationSpan.1)"
+            + (origin.map { " \($0.text)" } ?? "")
     }
 }

@@ -73,6 +73,8 @@ It is assigned before `state`, so a `$state` sink reads this failure's own info 
 
 To replay, call `load(...)` again. The engine keeps `.ended` terminal deliberately: a play press racing a host's end card must not silently restart a finished session (#63/#164). A VOD **parked at its final frame** without having ended (scrubbed there, paused there) is the other case and does resume: `play()` rewinds to the start first.
 
+The clock stops with it, on both backends: `clock.currentTime` and `clock.sourceTime` settle on the last sample and stay there, so a progress bar bound to them holds at the end instead of walking past `duration`. Through 6.28.0 the software path was the exception: its master clock kept its rate past end of media, so a session left standing published a position that grew without bound (20.13 s on a 12.0 s source after 20 s, against 11.97 s from a native session on the same file). A host reading the clock after `.ended` on one of those builds is reading that, not a drifting session (AE#374).
+
 ### Live: the retune request
 
 ```swift
@@ -268,6 +270,28 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `$playlistShiftSeconds` | Seconds the producer subtracted from source PTS. Published values already fold it back; exposed for hosts pairing their own samples against AVPlayer's raw clock. |
 | `HLSLiveIngestReader(playlistURL:)`, `HLSLiveIngestReader(playlistURL:httpHeaders:)` | The ready-made `IOReader` for ingesting an upstream HLS playlist directly, with AES-128 clear-key and SSAI handling. The headers ride the playlist, every segment and every AES key, which is what a tokenized IPTV origin enforces per request. Unsupported shapes surface a typed `HLSIngestError`. |
 
+### Where a live start's seconds go
+
+On the loopback live path (a raw stream, or an HLS source the engine ingests itself) the join cost is
+not probe or decode work, it is one withheld response. The engine serves AVPlayer a playlist of its own,
+and AVPlayer starts a live session at the edge minus a holdback of `3 x TARGETDURATION`, the RFC 8216bis
+floor that the served playlist advertises. So the first `/media.m3u8` is held until the window carries
+that much content behind the edge: serving earlier puts AVPlayer's opening seek inside its own
+stall-danger zone, where it restarts in a loop instead of playing (#189). An origin that hands over a
+backlog satisfies it at I/O speed, and a strict-realtime origin pays it in wall clock. The native bypass
+has no such gate, which is why a host measuring both sees it only on the paths that ingest.
+
+Two things report it, and both are worth reading before a slow live start is treated as a decode
+problem. `startupProgress` stalls at `sessionConstructed` for the whole wait, so the checkpoint at the
+slow moment tells this apart from the demux probe (`streamsProbed`) and the display handshake
+(`routed`). And the first serve logs the interval it held, the window it served, and the holdback it was
+measured against, whether it waited or was satisfied immediately.
+
+`LoadOptions.liveJoinProfile` is the lever. `.fastZap` collapses `TARGETDURATION` to the source keyframe
+cadence and the holdback follows it down, so the win belongs to the source GOP rather than to the flag:
+`TARGETDURATION` can never fall below `ceil(max EXTINF)`, and a long-GOP source therefore keeps most of
+its runway under either profile.
+
 ## Picture, layers and PiP
 
 | Symbol | Notes |
@@ -348,6 +372,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `forwardBufferSegments` | nil (10, about 40 s) | How far the producer may race ahead and how much the cache keeps resident. Clamped to 4...2700; past the historical 150 the real bound is the session's disk budget, so a "buffer without limit" option can pass `Int.max`. Ignored on `nativeRemoteHLS`. |
 | `sequentialOrigin` | false | Declare an origin that fabricates range answers: one long-lived unranged GET, no ranged probes, non-seekable pb. **Seeking is unavailable**; re-request the archive at a shifted start instead. |
 | `declaredDurationSeconds` | nil | Trusted duration, overriding the container's. Required alongside `sequentialOrigin` on VOD, where the tail read is gone. |
+| `maxConcurrentSourceRequests` | nil | Most requests the reader may have open against this origin at once, across every path it fetches on (pump ranges, detour blocks, size probes, tail prefetch, subtitle side reader). nil counts without capping and lowers the ceiling on its own after a 429/503/509. Set it when the provider states a limit; `1` also switches off the speculative parallel paths, which exist only to overlap with the pump. Counts **requests**, not TCP connections, because over HTTP/2 a session multiplexes every request onto one connection while the origin still counts each one (AE#377). |
 | `autoplay` | true | False mounts paused: the load skips the terminal `play()` and settles at `.paused` for a host that resumes later. |
 
 ## Value types
@@ -368,7 +393,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `AudioTapBuffer` | `buffer` (`AVAudioPCMBuffer`), `sourceTime`, `discontinuity`. Non-discontinuity buffers are strictly increasing and non-overlapping, which is what SpeechAnalyzer's input timeline requires. |
 | `LiveTelemetry` | The 1 Hz snapshot: bitrates, observed fps, dropped frames, cache and network bytes, A/V gap, RSS. |
 | `PlaybackErrorInfo` | `kind`, `underlyingDomain`, `underlyingCode`, `message`. Published as `$errorInfo` beside a `.error` state. |
-| `PlaybackErrorKind` | The stable token inside it: `.sourceOpenFailed`, `.sourceRefused` (the origin answered an HTTP status instead of media; `underlyingCode` is the status), `.customSourceProbeFailed`, `.liveSourceUnavailable`, `.hlsPlaylistOnRawLivePath`, `.dolbyVisionRequiresHardware`, `.demuxedAudioLiveUnsupported`, `.nativeItemFailed`, `.noPlayableTrackWithinBudget`, `.masterPlaylistRejected`, `.vodSourceFailed`, `.softwarePipelineFailed`, `.audioSessionFailed`, `.reloadFailed`, `.liveReloadNeverReady`, `.audioTrackSwitchFailed`. A string-backed struct rather than an enum, so a kind added in a minor release cannot break a host's switch; raw values are API and do not change. |
+| `PlaybackErrorKind` | The stable token inside it: `.sourceOpenFailed`, `.sourceRefused` (the origin answered an HTTP status instead of media; `underlyingCode` is the status), `.customSourceProbeFailed`, `.liveSourceUnavailable`, `.hlsPlaylistOnRawLivePath`, `.dolbyVisionRequiresHardware`, `.demuxedAudioLiveUnsupported`, `.nativeItemFailed`, `.noPlayableTrackWithinBudget`, `.masterPlaylistRejected`, `.vodSourceFailed`, `.sourceRateLimited`, `.softwarePipelineFailed`, `.audioSessionFailed`, `.reloadFailed`, `.liveReloadNeverReady`, `.audioTrackSwitchFailed`. `.sourceRateLimited` is the one to branch on separately: the source is being metered, not lost, so the same request is expected to work later and a handoff to a second player will meet the same refusal (AE#377). A string-backed struct rather than an enum, so a kind added in a minor release cannot break a host's switch; raw values are API and do not change. |
 | `DisplayCapabilities`, `StartupProgress`, `SeekEvent`, `PresentationAxisMap`, `NativeVideoFrameTime`, `SoftwareVideoFrameTime`, `SoftwarePiPSource`, `SystemCaptionRequest`, `AetherEngineError`, `HLSIngestError` | Covered in their sections above. |
 | `FontAttachment` | Attached font files for authored ASS rendering: `filename`, `mimeType`, `data`. |
 
