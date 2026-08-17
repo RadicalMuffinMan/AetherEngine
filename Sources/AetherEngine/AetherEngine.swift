@@ -2716,6 +2716,12 @@ public final class AetherEngine: ObservableObject {
         }
         loadedURL = url
         loadedOptions = options
+        // #377: register the host's concurrency ceiling for this origin before anything fetches
+        // from it. Keyed on the origin rather than the load, so the subtitle side reader and any
+        // later reopen of the same source are bound by it too.
+        if !isCustomSource {
+            OriginRequestBudget.shared.setHostLimit(options.maxConcurrentSourceRequests, for: url)
+        }
         // #170: the carryover is consumed by THIS load only (registration site below, or never on
         // the branches that return before it); it must not persist into loadedOptions where a later
         // host-initiated reload would resurrect a stale session snapshot.

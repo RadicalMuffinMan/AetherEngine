@@ -10,7 +10,39 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A rate-limited source is no longer declared dead.** The reader classifies a 429 / 503 / 509 as
+  metering rather than failure, and then threw that away on the way up: its give-up arm returns a bare
+  `-1`, so the session's revive arm saw exactly what a genuinely dead source produces. It spent both
+  of its two attempts inside a minute, each one reopening from byte 0 against an origin refusing
+  precisely that, and ended on "source not readable in this session" while the same stream played
+  instantly on a fresh press of play. A metered read error now gets its own larger budget with a
+  growing backoff (3 s, 8 s, 20 s, 45 s) instead of an immediate reopen, and the terminal surface is a
+  new `PlaybackErrorKind.sourceRateLimited`: the source is being metered, not lost, so a host that
+  reacts to a dead source by handing off to a second engine only has that engine refused by the same
+  origin. Raised by Rasmusmart57 (AetherEngine#377).
+
+### Added
+
+- **One request budget per origin, shared by every path the reader fetches on.**
+  `httpMaximumConnectionsPerHost` is a per-`URLSession` cap and `AVIOReader` fetches over four pools
+  (pump ranges, detour blocks, size probes, a per-call streaming session), so against one signed CDN
+  URL a pump range, a detour block and a probe could all be open at once, with a second reader (the
+  subtitle side demuxer) sharing the same static pools. Those caps never composed into anything. The
+  budget counts requests per origin, which is what an origin metering us counts, and unlike a
+  connection cap it is equally true over HTTP/2, where a session multiplexes every request onto one
+  connection. Counting is unconditional and capping is not: with no limit set nothing waits, and a
+  limit arrives either from the host (`LoadOptions.maxConcurrentSourceRequests`) or from the origin
+  itself, halving from the concurrency actually reached on each refusal. At one request at a time the
+  speculative parallel paths (detour blocks, tail prefetch) switch off rather than queue, each falling
+  back to the serial path it already had. Raised by Rasmusmart57 (AetherEngine#377).
+- **The negotiated transport is named once per origin, and a slow read reports the concurrency it ran
+  at.** Whether a per-session connection cap can do anything against a given CDN is unanswerable from
+  outside the engine, since over HTTP/2 it bounds nothing while the origin still counts every request.
+  `URLSessionTaskMetrics.networkProtocolName` was read nowhere; it now logs one line per origin saying
+  which case that origin is. The `slow read:` summary gains `origin=<n>inflight/<peak>peak`, the number
+  a metered origin was reacting to (AetherEngine#377).
 
 ## [6.27.1] - 2026-08-16
 
