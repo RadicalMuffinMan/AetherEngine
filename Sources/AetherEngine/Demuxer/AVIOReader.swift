@@ -113,7 +113,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// connection-capped IPTV panel answers while its slot is still occupied by the
     /// connection being replaced — the slot frees in seconds, the pinned redirect target
     /// is fine, and re-resolving through the portal spends the one request there is no
-    /// room for (519ae26e, #307 follow-up).
+    /// room for (519ae26e, #307 follow-up). That grace is bounded, not absolute: a 509
+    /// that outlives `rateLimitRepinStreak` paced attempts is a pinned edge target whose
+    /// session expired (a resume after minutes of pause), and there the pin is dropped
+    /// for one re-resolve through the source.
     static func isRateLimitStatus(_ status: Int) -> Bool {
         return status == 429 || status == 503 || status == 509
     }
@@ -361,6 +364,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Distinct axis from unproductiveReconnects: NOT reset by seekReconnect, so parse-driven
     // seeks cannot mask a throttled origin into an infinite reconnect loop (AetherEngine#71).
     private static let rateLimitMaxStreak = 6
+    // Rate-limited attempts that keep the pinned redirect target before one attempt through the
+    // source URL is spent on a fresh redirect. Three paced attempts (~7 s of ladder) ride out the
+    // lingering-slot 509 of a connection-capped panel (#307 follow-up: the slot frees in seconds);
+    // a streak that reaches this rung is the other shape — a pinned edge target whose session
+    // expired during a long pause and refuses forever, where only a re-resolve heals. Internal so
+    // the rung is unit-tested without a live origin.
+    static let rateLimitRepinStreak = 3
 
     /// NSCondition guards all persistent-mode fields and serves as the
     /// edge-triggered condition variable for read waits and backpressure.
@@ -1457,8 +1467,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 position = curPosition + Int64(copyNow)
                 totalRead += copyNow
                 trimWindowLocked()
-                unproductiveReconnects = 0      // real progress
-                rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
+                // "Real progress" is the CURRENT generation having delivered — draining read-ahead
+                // is not. An unguarded reset here ran in the same iteration as the faulted-refill
+                // decision below, so a connection-capped origin refusing every replacement was
+                // charged streak=1 forever while the runway drained (field trace: a post-pause 509
+                // storm held streak=1 across 4 MB of served reads, and the bounded give-up and the
+                // re-resolve rung were both unreachable until the window hit empty).
+                if connFirstDataSeen {
+                    unproductiveReconnects = 0      // real progress
+                    rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
+                }
                 emitNetworkPhase(.flowing)      // recovered: source delivering again (#85)
                 // No flow installed and the consumer has drawn down to low water: request at the
                 // frontier. #220/#310 built this for PLANNED ends (a range delivered in full, a
@@ -1617,11 +1635,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // not a transient: drop it so the retry re-resolves through the source URL
             // for a fresh redirect. No-op when nothing is pinned.
             //
-            // A rate-limit streak is deliberately NOT a reason to drop it: 429/503/509 says the
-            // origin is metering us, not that the target is dead (#71), and re-resolving
+            // A rate-limit streak keeps the pin for `rateLimitRepinStreak` attempts: 429/503/509
+            // says the origin is metering us, not that the target is dead (#71), and re-resolving
             // spends a second request on the very origin that is refusing them. On the
-            // connection-capped panel behind #307 that is the request that cannot be spared.
-            if !isRateLimited, unproductiveReconnects >= 2 {
+            // connection-capped panel behind #307 that is the request that cannot be spared — and
+            // its lingering-slot 509 clears within an attempt or two. But a streak that OUTLIVES
+            // that grace is the other 509 shape: a pinned edge target whose session died during a
+            // long pause answers 509 forever, while a fresh redirect through the source connects
+            // on the first try (field trace: 20 generations of 509 against the pin across ~85 s,
+            // then a source-resolved reader delivered in 452 ms). Past the grace the pin IS the
+            // problem; drop it once and let the 200/206 re-pin the fresh target.
+            if isRateLimited {
+                if rateLimitStreak >= Self.rateLimitRepinStreak {
+                    invalidateResolvedURL(reason: "rate-limited x\(rateLimitStreak) through pinned URL")
+                }
+            } else if unproductiveReconnects >= 2 {
                 invalidateResolvedURL(reason: "unproductive reconnect streak")
             }
             let backoffStart = DispatchTime.now()
@@ -1652,6 +1680,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private func seekReconnect(at offset: Int64) {
         unproductiveReconnects = 0
         bytesAtLastReconnect = cumulativeBytesFetched
+        // A reposition starts a new lineage: the faulted-refill pacing belongs to the frontier
+        // it was charged at, and holding a seek's refill to it would pace a healthy target.
+        winCond.lock()
+        nextFaultedRefillAt = .distantPast
+        winCond.unlock()
         startPersistentConnection(at: offset)
     }
 
@@ -1702,7 +1735,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// - It does not SLEEP. It runs on the demux thread with megabytes still resident, and a backoff
     ///   sleep there would starve the demuxer of the very read-ahead that replacing early exists to
     ///   protect. The wait is a next-attempt timestamp instead, so reads keep being served at full
-    ///   speed between attempts.
+    ///   speed between attempts. The timestamp outlives the reconnect it authorises
+    ///   (`startPersistentConnection` must not clear it) — it is released by first data or a seek.
     /// - It never returns the read as failed. A window that can still serve must not kill a session
     ///   that still holds seconds of playback. At the cap it stops attempting (`.distantFuture`) and
     ///   leaves termination to the empty-window ladder, where it has always lived.
@@ -1727,7 +1761,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             return false
         }
         let streak = isRateLimited ? rateLimitStreak : unproductiveReconnects
-        if !isRateLimited, unproductiveReconnects >= 2 {
+        // Same pin rungs as the empty-window ladder: a hard-error streak drops the pin early, a
+        // rate-limited streak keeps it through the lingering-slot grace and drops it only when
+        // the refusals outlive that shape (the stale-edge-session 509, see the ladder comment).
+        if isRateLimited {
+            if rateLimitStreak >= Self.rateLimitRepinStreak {
+                invalidateResolvedURL(reason: "rate-limited x\(rateLimitStreak) through pinned URL")
+            }
+        } else if unproductiveReconnects >= 2 {
             invalidateResolvedURL(reason: "unproductive reconnect streak")
         }
         lastUnplannedReconnectAt = Date()
@@ -2133,7 +2174,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
         lastDeliveryAt = connStartedAt       // #309: the gap is measured from here until data lands
-        nextFaultedRefillAt = .distantPast
+        // `nextFaultedRefillAt` is deliberately NOT reset here. The faulted-refill ladder sets it
+        // just before authorising this very reconnect, so a reset on connection start erased the
+        // pacing it had just announced — every "next attempt in Ns" fired as fast as the consumer
+        // could read (field trace: a 509-refusing origin was retried on read cadence, streak=1).
+        // The timestamp is cleared by proof of delivery (`appendPersistentData`, first data) and
+        // by an intentional reposition (`seekReconnect`), the two events that genuinely end a
+        // faulted lineage.
         let oldTask = activeTask
         activeTask = nil
         winCond.broadcast()
@@ -2294,6 +2341,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // #281 retest: the price of one round trip against this origin, which is what bounds
             // how long a read may wait for bytes that are already on the wire.
             lastFirstDataMs = firstDataMs ?? 0
+            // Delivery is the proof that ends a faulted lineage: release the refill pacing (and
+            // a give-up latch — an origin that recovered after the faulted ladder capped out may
+            // fault again later and deserves a fresh ladder, not `.distantFuture` forever).
+            nextFaultedRefillAt = .distantPast
         }
         let count = data.count
         // #310: delivery that lands with the backpressure end ALREADY recorded, i.e. after our
