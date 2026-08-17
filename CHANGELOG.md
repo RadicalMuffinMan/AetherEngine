@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.29.0] - 2026-08-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.29.0))
+
 ### Added
 
 - `PlaybackErrorKind.sourceRefused` (#378): the origin answered the source request with an HTTP
@@ -36,6 +42,20 @@ the public-API contract.
   registration descriptor resolves to `ac-3` case-insensitively, and the ADTS path clears the tag
   when it synthesises the AudioSpecificConfig), so nothing changes for them. Video was never
   affected: every route sets its tag explicitly.
+- **A redirect chain is one origin request budget, so a declared ceiling reaches the host that
+  serves (#388).** `LoadOptions.maxConcurrentSourceRequests` was registered for the origin of the
+  URL the host loaded and stopped there, which on the shape it exists for (a portal that 302s to the
+  media host counting the provider's connections) is the wrong host: the pump followed the redirect
+  and streamed from the target while holding a slot booked against the portal, so the first backward
+  read opened a detour block against a target whose books showed nothing in flight, and the panel
+  saw two requests where the host had declared one. An observed redirect is now folded into one
+  chain kept under the source's key: the ceiling covers the chain, the pump's existing ticket is
+  already the chain's, and `requiresSerialRequests` is true at the pinned target from the first
+  byte, so the detour falls back to the reposition path it already has. Deliberate consequence, and
+  the one place this departs from #377: a refusal now lowers the whole chain, portal included,
+  because a request to the portal for this source is only ever answered with a redirect to the host
+  that refused. A target that already belongs to a chain keeps it, so two portals on one edge host
+  cannot spread a ceiling declared for one of them to the other. Reported by tschuegy.
 - The forward-only streaming reader hangs up at the response header on anything but a 200/206 and
   fails the open typed with the status, so an origin's error page never reaches the demuxer (#378).
   After a 401/403/404/410 on the open-time data connection the HEAD / `bytes=0-1` size probes are
@@ -63,7 +83,7 @@ the public-API contract.
 - **A rate-limited streak that outlives the lingering-slot grace drops the pinned redirect target
   for one re-resolve through the source (#380).** 509 has two field shapes. The one the keep-pin
   rule was built for (#307 follow-up): a connection-capped panel refusing while the slot of the
-  connection being replaced lingers — it frees in seconds and the pin is fine. The one it broke:
+  connection being replaced lingers, and it frees in seconds so the pin is fine. The one it broke:
   a resume after minutes of pause, where the reader held no connection (#310) and the pinned edge
   target's session expired server-side, so it answers 509 forever while a fresh redirect through
   the source connects on the first try (field trace: 20 generations of 509 across ~85 s at one
@@ -74,18 +94,18 @@ the public-API contract.
 - **Window-served reads no longer reset the reconnect streaks (#380).** Draining read-ahead is
   not network progress: the reset ran in the same read iteration as the faulted-refill decision,
   so a refused replacement was charged streak=1 for as long as the runway lasted, and neither
-  the re-resolve rung nor the bounded give-up was reachable until the window was empty — and one
+  the re-resolve rung nor the bounded give-up was reachable until the window was empty, and one
   served byte after an exhaustion restarted the whole ladder. The streaks now reset only when
   the current generation has delivered data.
 - **The faulted-refill pacing survives the reconnect it authorises (#380).**
   `startPersistentConnection` reset the next-attempt timestamp the ladder had just set, so
   "next attempt in Ns" fired as fast as the consumer could read, and the give-up latch was
   erased by the next reconnect from any path. The timestamp is now released by first data or an
-  intentional reposition — the two events that genuinely end a faulted lineage.
+  intentional reposition, the two events that genuinely end a faulted lineage.
 - **The other two served-from-memory branches stopped resetting the ladders too (#380
   follow-up).** The read loop serves without touching the network in three places, and only the
   window serve was fixed. The retained head/tail spans (#281) run FIRST, before every network
-  path, and their own log line says "no reconnect for it" — yet the parse's return to the head
+  path, and their own log line says "no reconnect for it", yet the parse's return to the head
   cleared both streaks, and unlike the detour that branch is not taken out of service on a
   metered origin, so it is the one that reaches the field shape #380 described as "one served
   byte reset the whole ladder and it started over". The detour cache's resident-block hit (#69)
@@ -94,7 +114,7 @@ the public-API contract.
   ground truth.
 - **The pinned redirect target is release-visible (#380 follow-up).** Which target is pinned,
   and when the reader drops it, is half of every field trace about a redirecting origin (#307,
-  #377, #380) — and with the bounded keep-pin grace, dropping it is now a decision the ladder
+  #377, #380), and with the bounded keep-pin grace, dropping it is now a decision the ladder
   makes rather than a reaction to an expiry status. Both lines were behind `#if DEBUG`, so a
   rung that only fires in the field was readable only by reporters building the engine
   themselves. Both are rare by construction: a pin that does not change logs nothing.
