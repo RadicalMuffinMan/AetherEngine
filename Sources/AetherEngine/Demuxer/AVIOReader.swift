@@ -74,6 +74,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// refusing, which is the reading that puts metering back on the table. Two different causes,
     /// two different fixes, one log line to tell them apart.
     private var _droppedResolvedURL: URL?
+    /// Every target dropped BEFORE that one, by origin key. One slot describes one window, and the
+    /// reporter's session refused in three: by the second, a re-mint of the target the first window
+    /// dropped is no longer the slot's occupant and would read as a fresh lease, which is the one
+    /// verdict that puts metering back on the table. Bounded by construction rather than by a cap,
+    /// since a drop needs a 2xx-recorded pin to drop and therefore a working target in between.
+    private var _droppedResolvedKeys: Set<String> = []
 
     private func requestURL() -> URL {
         resolvedURLLock.lock()
@@ -135,6 +141,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         resolvedURLLock.lock()
         defer { resolvedURLLock.unlock() }
         if _resolvedURL != nil {
+            if let previous = _droppedResolvedURL,
+               let key = OriginRequestBudget.originKey(for: previous) {
+                _droppedResolvedKeys.insert(key)
+            }
             _droppedResolvedURL = _resolvedURL
             _resolvedURL = nil
             // The other half, and the one #380 turned into a decision: dropping the pin is now a
@@ -169,16 +179,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         resolvedURLLock.lock()
         let pinned = _resolvedURL
         let dropped = _droppedResolvedURL
+        let droppedEarlier = _droppedResolvedKeys
         resolvedURLLock.unlock()
         return Self.describeRespondingTarget(
-            responded: responded, source: url, pinned: pinned, dropped: dropped)
+            responded: responded, source: url, pinned: pinned, dropped: dropped,
+            droppedEarlier: droppedEarlier)
     }
 
     /// Compared on the ORIGIN KEY, never on the whole URL: a source that re-mints a link for the
     /// same edge host with a fresh signature has handed back the same target, and reading that as a
     /// fresh one is exactly the mistake that puts metering back on the table.
     static func describeRespondingTarget(
-        responded: URL?, source: URL, pinned: URL?, dropped: URL?
+        responded: URL?, source: URL, pinned: URL?, dropped: URL?,
+        droppedEarlier: Set<String> = []
     ) -> String {
         guard let responded, let host = responded.host,
               let key = OriginRequestBudget.originKey(for: responded) else { return "" }
@@ -190,6 +203,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         if let dropped, key == OriginRequestBudget.originKey(for: dropped) {
             return " from \(host), the target this session dropped and the source minted again"
+        }
+        if droppedEarlier.contains(key) {
+            return " from \(host), a target an earlier window dropped and the source minted again"
         }
         return " from \(host), a target the source resolved freshly"
     }

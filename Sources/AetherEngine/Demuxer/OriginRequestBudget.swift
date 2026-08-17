@@ -162,9 +162,16 @@ final class OriginRequestBudget: @unchecked Sendable {
         let limit = merged.limit
         lock.unlock()
 
+        // #377 round 4: this fires on a target's FIRST fold and never again, because the chain is
+        // process-wide and only ever grows. Read as "a fresh target was reached just now" it says
+        // something it cannot know, and a grep that took its absence for an absent hop is what put
+        // a whole round on the wrong shape. The scope belongs in the line: the reader of a capture
+        // has no other way to see it.
         EngineLog.emit(
             "[OriginBudget] \(targetKey) is served through \(head); one request budget for both"
-            + (limit.map { " (limit \($0))" } ?? ""),
+            + (limit.map { " (limit \($0))" } ?? "")
+            + ". First fold of this target this process, later hops through it are silent, "
+            + "so an absent line is not an absent hop.",
             category: .demux)
     }
 

@@ -50,6 +50,20 @@ final class Issue377RefusingTargetTests: XCTestCase {
         XCTAssertTrue(verdict.contains("nexus-097.cdn.example.st"), verdict)
     }
 
+    /// The shape one `dropped` slot cannot hold. The reporter's session refused in three separate
+    /// windows, and by the second window the target the FIRST one dropped is no longer the slot's
+    /// occupant, so a re-mint of it fell into the fresh arm: metering put back on the table by the
+    /// very evidence meant to rule it out. Every target this session has dropped stays known.
+    func testATargetAnEarlierWindowDroppedIsNotFresh() {
+        let earlier = URL(string: "https://nexus-042.cdn.example.st/file.mkv?sig=old")!
+        let reMinted = URL(string: "https://nexus-042.cdn.example.st/file.mkv?sig=new")!
+        let verdict = AVIOReader.describeRespondingTarget(
+            responded: reMinted, source: source, pinned: nil, dropped: pinned,
+            droppedEarlier: [OriginRequestBudget.originKey(for: earlier)!])
+        XCTAssertFalse(verdict.contains("resolved freshly"), verdict)
+        XCTAssertTrue(verdict.contains("an earlier window dropped"), verdict)
+    }
+
     /// A port or scheme change is a different origin even on the same host, because that is what the
     /// budget keys on and the two lines have to agree about what one target is.
     func testPortIsPartOfTheIdentity() {
