@@ -1216,6 +1216,31 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.openFailed(reason: "codecpar copy failed")
         }
         ownedCodecParams.append(ownedVideoParams)
+        // movenc writes `pasp` from the output codecpar alone, and a container-declared ratio never
+        // reaches codecpar: Matroska's DisplayWidth quotient and MP4's own `pasp` land on AVStream
+        // (matroskadec.c / mov.c), which is where a DVD remuxed to MKV carries its anamorphic ratio.
+        // Without this the loopback item presented such a source at its coded shape, 720x576 for a
+        // 1024x576 picture, and every consumer downstream of AVPlayer inherited the wrong rectangle.
+        // Resolved through the same policy the two decoders run, so a ratio the software path
+        // disbelieves (#290) is not one the native path stretches to.
+        let declaredSAR = PixelAspectPolicy.declaredPixelAspect(
+            bitstream: codecpar.pointee.sample_aspect_ratio,
+            container: videoStream.pointee.sample_aspect_ratio,
+            width: codecpar.pointee.width,
+            height: codecpar.pointee.height
+        )
+        ownedVideoParams.ptr.pointee.sample_aspect_ratio = declaredSAR ?? AVRational(num: 0, den: 1)
+        if let declaredSAR {
+            EngineLog.emit(
+                "[HLSVideoEngine] SAR \(declaredSAR.num):\(declaredSAR.den) on "
+                + "\(codecpar.pointee.width)x\(codecpar.pointee.height) into the fMP4 sample entry "
+                + "(bitstream=\(codecpar.pointee.sample_aspect_ratio.num):"
+                + "\(codecpar.pointee.sample_aspect_ratio.den) "
+                + "container=\(videoStream.pointee.sample_aspect_ratio.num):"
+                + "\(videoStream.pointee.sample_aspect_ratio.den))",
+                category: .session
+            )
+        }
         let videoConfig = HLSSegmentProducer.StreamConfig(
             codecpar: UnsafePointer(ownedVideoParams.ptr),
             timeBase: videoTimeBase,

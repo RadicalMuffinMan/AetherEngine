@@ -1468,9 +1468,11 @@ public final class AetherEngine: ObservableObject {
     /// is parsed. 0 before load or when source has no video (AetherEngine#28). Also available in SourceProbe.
     public private(set) var sourceVideoWidth: Int32 = 0
     public private(set) var sourceVideoHeight: Int32 = 0
-    /// Display-width multiplier for non-square source pixels. Hosts use this with
-    /// the coded dimensions when positioning their own overlays over anamorphic
-    /// video; the coded size alone is not the shape the picture ends up.
+    /// Display-width multiplier for non-square source pixels: `sourceVideoWidth * this` is the width
+    /// the picture presents at. 1 before load, on square-pixel sources, and whenever the declared
+    /// ratio is one the engine refuses to believe (#290), so it is never a number the picture
+    /// contradicts. Resolved once through `PixelAspectPolicy`, which is also the ratio the decoders
+    /// attach and the `pasp` the loopback fMP4 carries.
     public private(set) var sourceVideoPixelAspectRatio: Double = 1
 
     /// MKV font attachments from the probe. Hosts write these to disk for ASS renderer font config (AetherEngine#30).
@@ -2901,10 +2903,12 @@ public final class AetherEngine: ObservableObject {
                 detectedFieldOrder = stream.pointee.codecpar.pointee.field_order
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
                 sourceVideoHeight = stream.pointee.codecpar.pointee.height
-                let streamSAR = stream.pointee.sample_aspect_ratio
-                let codecSAR = stream.pointee.codecpar.pointee.sample_aspect_ratio
-                let sar = (streamSAR.num > 0 && streamSAR.den > 0) ? streamSAR : codecSAR
-                if sar.num > 0, sar.den > 0 {
+                if let sar = PixelAspectPolicy.declaredPixelAspect(
+                    bitstream: stream.pointee.codecpar.pointee.sample_aspect_ratio,
+                    container: stream.pointee.sample_aspect_ratio,
+                    width: sourceVideoWidth,
+                    height: sourceVideoHeight
+                ) {
                     sourceVideoPixelAspectRatio = Double(sar.num) / Double(sar.den)
                 }
                 detectedVideoBitrate = probe.declaredBitrate(stream: stream)
