@@ -12,6 +12,38 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.30.0] - 2026-08-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.30.0))
+
+### Added
+
+- `sourceVideoPixelAspectRatio`: the multiplier that turns the coded source size into the presented
+  one (`sourceVideoWidth * this`), for a host sizing its own overlay before a layer is laid out. It
+  is the ratio the engine itself resolved, so it stays 1 on square-pixel sources and on a declared
+  ratio the display-aspect gate refuses (#290), never a number the picture contradicts. On the paths
+  that draw, what is on screen is still the better answer: `softwareDisplaySize`,
+  `AVPlayerLayer.videoRect`. Contributed by Rasmusmart57 (#385).
+- `TrackInfo.isNativelyRenderedSubtitle`: true where the playback backend draws the track itself (a
+  remote-HLS subtitle rendition AVFoundation renders), so no cue reaches `subtitleCues` and a host's
+  overlay controls (position, delay, styling) have nothing to act on. False everywhere else.
+  Contributed by Rasmusmart57 (#385).
+
+### Fixed
+
+- **A container-declared pixel aspect reaches the picture, on every path (#385 follow-up).**
+  Matroska writes its DisplayWidth quotient and MP4 its `pasp` to `AVStream` alone (matroskadec.c,
+  mov.c) while `codecpar` keeps whatever the bitstream said, and a square bitstream ratio was read
+  as a declaration, so the resolution ended one axis above the container's. A 720x576 file whose
+  H.264 VUI says 1:1 and whose header says 64:45, which is what `mkvmerge --aspect-ratio` leaves
+  behind, was drawn at its coded shape by all three consumers: the loopback fMP4 carried `pasp` 1:1
+  (movenc writes it from the output codecpar, which the muxer copies from the source), the software
+  path presented 720x576, and a thumbnail came out 320x256 instead of 320x180. The declared ratio is
+  resolved once now, in `PixelAspectPolicy`, with the container winning where it declares a real
+  correction, which is the later authoring layer and what `av_guess_sample_aspect_ratio` returns for
+  the same file. The muxer writes that result into the codecpar it owns, so `pasp` carries the same
+  ratio the decoders attach and a ratio #290 refuses is no longer one the native path stretches to.
+
 ## [6.29.0] - 2026-08-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/6.29.0))
