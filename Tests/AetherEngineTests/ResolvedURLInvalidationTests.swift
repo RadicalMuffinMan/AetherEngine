@@ -397,6 +397,112 @@ struct ResolvedURLInvalidationTests {
                 "served reads reset the streak: \(boundaryAttempts) attempts at the boundary")
     }
 
+    /// Arms the origin's refusal at a moment the test chooses, and counts what it refused. The
+    /// arming is what makes the lease die DURING the idle rather than at open, which is the whole
+    /// shape: the pin was good when it was minted and is not good when it is next used.
+    private final class RefusalGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var armed = false
+        private var refusals = 0
+        func arm() { lock.lock(); armed = true; lock.unlock() }
+        var isArmed: Bool { lock.lock(); defer { lock.unlock() }; return armed }
+        func countRefusal() { lock.lock(); refusals += 1; lock.unlock() }
+        var refusalCount: Int { lock.lock(); defer { lock.unlock() }; return refusals }
+    }
+
+    /// #392: the keep-pin grace answers ONE shape, #307's lingering slot, and that shape requires a
+    /// byte of ours to have just been in flight. A pin that has carried nothing for longer than
+    /// `pinIdleSeconds` cannot be producing it (the pump ends its connection at the window high
+    /// water, so an idle reader holds nothing at the origin), so what refuses there is the expired
+    /// lease and the grace only delays finding out. Its first refusal must be taken at face value:
+    /// one refused attempt instead of three.
+    ///
+    /// The pause is modelled by not READING. The reader is pull-driven, so a consumer that stops is
+    /// the only thing that stops the network, which is exactly what a paused player is from here.
+    @Test("an idle pin is dropped by its FIRST refusal instead of riding out the grace",
+          .timeLimit(.minutes(2)))
+    func idlePinDropsOnTheFirstRefusal() async throws {
+        AetherEngine.reconnectBackoffScaleForTesting = 0.02
+        AetherEngine.pinIdleSecondsForTesting = 0.2
+        defer {
+            AetherEngine.reconnectBackoffScaleForTesting = 1.0
+            AetherEngine.pinIdleSecondsForTesting = nil
+        }
+
+        let leases = LeaseLatch()
+        let gate = RefusalGate()
+        let cdnMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, _, path in
+                guard gate.isArmed, leases.isStale(path: path) else { return .serve206 }
+                gate.countRefusal()
+                return .status(509)
+            }
+        )
+        let cdn = try #require(cdnMaybe)
+        defer { cdn.stop() }
+        let cdnPort = cdn.port
+        let sourceMaybe = ThrottledOriginServer(
+            totalSize: 64 * 1024 * 1024,
+            respond: { _, _, _ in
+                .redirect(to: "http://127.0.0.1:\(cdnPort)/cdn/movie.bin?lease=\(leases.mint())")
+            }
+        )
+        let source = try #require(sourceMaybe)
+        defer { source.stop() }
+
+        // A bounded first fetch, so the opening connection ends because its range was DELIVERED IN
+        // FULL rather than because a rate was reached. What the origin will ever write at open is
+        // then a fixed number, and waiting for that number is waiting for an event instead of for a
+        // duration: a loaded runner delays it, it cannot change it. Waiting on a delivery rate is
+        // what failed on CI, where the first connection was still running when the lease died and a
+        // request already in flight is never re-offered to the origin's gate.
+        let firstRange: Int64 = 1024 * 1024
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
+                                boundedInitialFetch: firstRange)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        // The bounded range plus the speculative 64 KB suffix is everything the open fetches, and
+        // the range cannot overrun its bound, so this total is reached only once both are done.
+        let openBytes = firstRange + 64 * 1024
+        var written: Int64 = 0
+        var polls = 0
+        while written < openBytes, polls < 400 {
+            try await Task.sleep(for: .milliseconds(25))
+            written = cdn.bytesWritten
+            polls += 1
+        }
+        #expect(written >= openBytes,
+                "the opening fetches never completed; the origin wrote \(written) of \(openBytes)")
+
+        // Idle past the threshold, then let the lease die. Every wait here is a LOWER bound, so a
+        // slow machine only makes the pin more idle, never less.
+        try await Task.sleep(for: .milliseconds(300))
+        gate.arm()
+
+        // Resume: the window serves out of memory, and being below low water issues the refill that
+        // meets the dead lease. The target is past the window's frontier on purpose, so the read
+        // cannot finish until that refill has actually delivered; a target inside the window would
+        // return while the healing request was still on the wire.
+        let sliceCap = 256 * 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        let target = 4 * 1024 * 1024
+        var got = 0
+        while got < target {
+            let n = reader.read(into: buf, size: Int32(min(sliceCap, target - got)))
+            if n <= 0 { break }
+            got += Int(n)
+        }
+
+        #expect(got == target, "read stopped at \(got) of \(target); the stale pin was terminal")
+        #expect(gate.refusalCount == 1,
+                "an idle pin must be dropped by its first refusal, not ridden out: \(gate.refusalCount) refusals")
+        #expect(leases.mintsAfterFault == 1,
+                "healing must cost exactly one source resolve, spent \(leases.mintsAfterFault)")
+    }
+
     @Test("hard-server-error classification excludes rate limiting")
     func classifierExcludesRateLimiting() {
         #expect(AVIOReader.isResolvedHardServerError(500))

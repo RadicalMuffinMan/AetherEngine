@@ -81,6 +81,32 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return _resolvedURL ?? url
     }
 
+    /// #392: when bytes for this source last came off the NETWORK, across generations. Wall clock
+    /// on purpose: a lease expires in wall time, and a device that slept through the gap has let it
+    /// expire too, which `uptimeNanoseconds` would hide. `lastDeliveryAt` cannot answer this
+    /// question at all, since `startPersistentConnection` rebases it to the connection start and it
+    /// therefore always reads as fresh at the moment a refusal is being judged.
+    ///
+    /// Leaf lock: these two take no other lock, and nothing takes `winCond` while holding this one,
+    /// so the delivery path can stamp it from inside its own winCond section.
+    private let deliveryClockLock = NSLock()
+    private var _lastNetworkDeliveryAt = Date()
+
+    private func noteNetworkDelivery() {
+        deliveryClockLock.lock()
+        _lastNetworkDeliveryAt = Date()
+        deliveryClockLock.unlock()
+    }
+
+    /// Negative gaps (a wall clock stepped backwards) read as zero, i.e. as "not idle", which
+    /// falls back to the keep-pin grace rather than dropping a pin on a clock adjustment.
+    private func secondsSinceNetworkDelivery() -> TimeInterval {
+        deliveryClockLock.lock()
+        let last = _lastNetworkDeliveryAt
+        deliveryClockLock.unlock()
+        return max(0, Date().timeIntervalSince(last))
+    }
+
     private func cachedResolvedURL() -> URL? {
         resolvedURLLock.lock()
         defer { resolvedURLLock.unlock() }
@@ -242,6 +268,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         counterLock.lock()
         _cumulativeBytesFetched &+= Int64(n)
         counterLock.unlock()
+        // #392: every network delivery this reader makes passes through here (pump, chunk, tail
+        // prefetch, detour fetch, streaming), which is why the idle clock is stamped here and not
+        // in one of them. A serve out of memory does not reach this call, and must not: memory is
+        // exactly what an idle reader lives on while its pin ages.
+        noteNetworkDelivery()
     }
 
     private var isStreaming: Bool { fileSize <= 0 }
@@ -446,6 +477,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // expired during a long pause and refuses forever, where only a re-resolve heals. Internal so
     // the rung is unit-tested without a live origin.
     static let rateLimitRepinStreak = 3
+    /// #392: how long the pin may carry no bytes at all before its FIRST rate-limited refusal is
+    /// taken at face value instead of being ridden out by the grace above. The grace answers one
+    /// specific shape, the lingering slot of a connection this reader just replaced, and that shape
+    /// requires a recent byte of ours: the pump ends its connection at the window high water, so a
+    /// reader that has been idle holds nothing at the origin for a slot to linger on (#310). A
+    /// minute is far longer than a lingering slot lives (seconds) and far shorter than the pause
+    /// that kills a lease (332 s in the #380 retest). Internal so the rung is unit-tested.
+    static let pinIdleRepinSecondsDefault: TimeInterval = 60
 
     /// NSCondition guards all persistent-mode fields and serves as the
     /// edge-triggered condition variable for read waits and backpressure.
@@ -675,6 +714,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let throttleKbps: Int
     /// TEST-ONLY reconnect-backoff scale (1.0 = real timing), captured once from the static hook at init.
     private let backoffScale: Double
+    /// #392: the idle gap this reader takes a first refusal at face value after. Shipped value
+    /// unless a test shortens it, captured once at init like the two hooks above.
+    private let pinIdleSeconds: TimeInterval
     /// Stall threshold this reader runs with, `connStallTimeoutDefault` unless a caller overrides it.
     /// One value for both detectors, because they are one policy: a connection that has delivered
     /// nothing for this long is replaced, whether or not a read is waiting on it (#309).
@@ -712,6 +754,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.boundedInitialFetch = boundedInitialFetch.map { max(1, $0) }
         self.throttleKbps = AetherEngine.sourceThrottleKbpsForTesting
         self.backoffScale = AetherEngine.reconnectBackoffScaleForTesting
+        self.pinIdleSeconds = AetherEngine.pinIdleSecondsForTesting ?? Self.pinIdleRepinSecondsDefault
         self.connStallTimeout = max(0.05, connStallTimeout)
         self.winHighWater = max(1, windowHighWater
             ?? (isLive ? Self.liveWinHighWaterDefault : Self.winHighWaterDefault))
@@ -1583,8 +1626,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                             EngineLog.emit("[AVIOReader] Detour rate-limit gave up at offset \(curPosition) (\(rateLimitStreak) consecutive rate-limited)", category: .demux)
                             return totalRead > 0 ? Int32(totalRead) : -1
                         }
+                        // #392: the detour fetches through the same pinned target, and this arm
+                        // carried no pin rung at all, so a pin whose lease had died could only be
+                        // given up on here (a failed read), never re-resolved. It is also the arm a
+                        // backward read after a long pause lands on, i.e. exactly when a lease has
+                        // died. Same decision as both reconnect ladders, in the same one place.
+                        let repinned = dropPinIfTheRefusalCallsForIt(isRateLimited: true)
                         let backoffStart = DispatchTime.now()
-                        backoffBeforeReconnect(streak: rateLimitStreak, retryAfter: retryAfter)
+                        backoffBeforeReconnect(streak: repinned ? 0 : rateLimitStreak, retryAfter: retryAfter)
                         diag.recordBackoff(ms: msSince(backoffStart))
                         continue
                     case .miss:
@@ -1778,30 +1827,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             EngineLog.emit("[AVIOReader] \(label) conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
             emitNetworkPhase(.reconnecting)   // unplanned reconnect now in flight (#85)
-            // Two consecutive zero-progress failures through the pinned URL point at
-            // the pin itself (an expired redirect target answers every offset alike),
-            // not a transient: drop it so the retry re-resolves through the source URL
-            // for a fresh redirect. No-op when nothing is pinned.
-            //
-            // A rate-limit streak keeps the pin for `rateLimitRepinStreak` attempts: 429/503/509
-            // says the origin is metering us, not that the target is dead (#71), and re-resolving
-            // spends a second request on the very origin that is refusing them. On the
-            // connection-capped panel behind #307 that is the request that cannot be spared — and
-            // its lingering-slot 509 clears within an attempt or two. But a streak that OUTLIVES
-            // that grace is the other 509 shape: a pinned edge target whose session died during a
-            // long pause answers 509 forever, while a fresh redirect through the source connects
-            // on the first try (field trace: 20 generations of 509 against the pin across ~85 s,
-            // then a source-resolved reader delivered in 452 ms). Past the grace the pin IS the
-            // problem; drop it once and let the 200/206 re-pin the fresh target.
-            if isRateLimited {
-                if rateLimitStreak >= Self.rateLimitRepinStreak {
-                    invalidateResolvedURL(reason: "rate-limited x\(rateLimitStreak) through pinned URL")
-                }
-            } else if unproductiveReconnects >= 2 {
-                invalidateResolvedURL(reason: "unproductive reconnect streak")
-            }
+            let repinned = dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
             let backoffStart = DispatchTime.now()
-            backoffBeforeReconnect(streak: backoffStreak, retryAfter: retryAfter)
+            // #392: a pin dropped for idleness sends this attempt to the SOURCE, which has refused
+            // nothing, so the exponential pacing charged against the target that did refuse is not
+            // its debt. A server-sent Retry-After still applies: that is the origin's own ask, and
+            // the source belongs to the same origin.
+            backoffBeforeReconnect(streak: repinned ? 0 : backoffStreak, retryAfter: retryAfter)
             diag.recordBackoff(ms: msSince(backoffStart))
             timedReconnect(seek: false, at: frontier)
         }
@@ -1865,6 +1897,54 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // without grinding a dead tuner for minutes.
     private static let reconnectMaxUnproductiveNeverProductive = 4
 
+    /// The pin rungs of every path that takes a refusal, in one place. Returns true when the pin was
+    /// dropped because it had gone IDLE, which callers use to skip their own backoff: the attempt
+    /// that follows goes to the source, an address that has refused nothing.
+    ///
+    /// Two consecutive zero-progress failures through the pinned URL point at the pin itself (an
+    /// expired redirect target answers every offset alike), not at a transient: drop it so the retry
+    /// re-resolves through the source URL for a fresh redirect. No-op when nothing is pinned.
+    ///
+    /// A rate-limit streak keeps the pin for `rateLimitRepinStreak` attempts: 429/503/509 says the
+    /// origin is metering us, not that the target is dead (#71), and re-resolving spends a second
+    /// request on the very origin that is refusing them. On the connection-capped panel behind #307
+    /// that is the request that cannot be spared, and its lingering-slot 509 clears within an attempt
+    /// or two. But a streak that OUTLIVES that grace is the other 509 shape: a pinned edge target
+    /// whose session died during a long pause answers 509 forever, while a fresh redirect through the
+    /// source connects on the first try (field trace: 20 generations of 509 against the pin across
+    /// ~85 s, then a source-resolved reader delivered in 452 ms). Past the grace the pin IS the
+    /// problem; drop it once and let the 200/206 re-pin.
+    ///
+    /// #392: the grace answers that ONE shape, and the shape is defined by a byte of ours having
+    /// just been in flight. Past `pinIdleSeconds` with nothing delivered there is no slot of ours
+    /// left to linger (the pump ends its connection at the window high water, so an idle reader
+    /// holds nothing at the origin, #310), so what is refusing is the stale lease and the grace only
+    /// delays finding out: three paced attempts against an address that will refuse all of them,
+    /// 12.5 s in the 6.30.0 retest of #380. There the first refusal is taken at face value.
+    ///
+    /// Demux-thread-only: it reads the ladder streaks.
+    @discardableResult
+    private func dropPinIfTheRefusalCallsForIt(isRateLimited: Bool) -> Bool {
+        guard isRateLimited else {
+            if unproductiveReconnects >= 2 {
+                invalidateResolvedURL(reason: "unproductive reconnect streak")
+            }
+            return false
+        }
+        let idle = secondsSinceNetworkDelivery()
+        // The pin check is what makes the return value mean "the next attempt is going somewhere
+        // else". An origin with nothing pinned refuses from the only address there is, and skipping
+        // its backoff would just retry a refusing target faster.
+        if idle >= pinIdleSeconds, cachedResolvedURL() != nil {
+            invalidateResolvedURL(reason: "rate-limited after \(Int(idle))s idle through pinned URL")
+            return true
+        }
+        if rateLimitStreak >= Self.rateLimitRepinStreak {
+            invalidateResolvedURL(reason: "rate-limited x\(rateLimitStreak) through pinned URL")
+        }
+        return false
+    }
+
     /// Exponential backoff (0.5s..8s) growing with streak; immediate on streak=0. How long the
     /// ladder waits before its next attempt. Shared by the blocking backoff below and the
     /// non-blocking one in `chargeFaultedRunwayRefill`, so both pace an origin identically.
@@ -1909,18 +1989,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             return false
         }
         let streak = isRateLimited ? rateLimitStreak : unproductiveReconnects
-        // Same pin rungs as the empty-window ladder: a hard-error streak drops the pin early, a
-        // rate-limited streak keeps it through the lingering-slot grace and drops it only when
-        // the refusals outlive that shape (the stale-edge-session 509, see the ladder comment).
-        if isRateLimited {
-            if rateLimitStreak >= Self.rateLimitRepinStreak {
-                invalidateResolvedURL(reason: "rate-limited x\(rateLimitStreak) through pinned URL")
-            }
-        } else if unproductiveReconnects >= 2 {
-            invalidateResolvedURL(reason: "unproductive reconnect streak")
-        }
+        let repinned = dropPinIfTheRefusalCallsForIt(isRateLimited: isRateLimited)
         lastUnplannedReconnectAt = Date()
-        let delay = backoffDelay(streak: streak, retryAfter: retryAfter)
+        let delay = backoffDelay(streak: repinned ? 0 : streak, retryAfter: retryAfter)
         winCond.lock()
         nextFaultedRefillAt = Date().addingTimeInterval(delay)
         winCond.unlock()
