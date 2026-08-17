@@ -10,8 +10,26 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- `PlaybackErrorKind.sourceRefused` (#378): the origin answered the source request with an HTTP
+  status instead of media (a 401/403 refusal, a 404, a 5xx), and `underlyingCode` is that status.
+  A refused source used to arrive as `sourceOpenFailed` carrying FFmpeg's "Invalid data found when
+  processing input", indistinguishable from a corrupt file, because the forward-only streaming
+  reader accepted the origin's error page as container bytes.
+
 ### Fixed
 
+- The forward-only streaming reader hangs up at the response header on anything but a 200/206 and
+  fails the open typed with the status, so an origin's error page never reaches the demuxer (#378).
+  After a 401/403/404/410 on the open-time data connection the HEAD / `bytes=0-1` size probes are
+  skipped: the one request still made is the unranged GET, so an origin that refuses `Range` but
+  serves a plain GET plays forward-only, and one that refuses both fails with its status. 5xx and
+  429/503/509 keep the probe ladder.
+- The tail-prefetch "no suffix range support" latch (#281) is set only by the origin's answer to the
+  range form: a 200 that ignored it, a 416 that rejected it. A 401/403/404/429/5xx on that request
+  says nothing about suffix ranges and no longer disables the prefetch for the origin for the rest of
+  the process (#378).
 - **The software path's clock parks at end of media instead of free-running past it (#374).**
   `.ended` stopped the demux loops and published the state, but left the master synchronizer at
   rate 1. So a finished session kept publishing a position that grew without bound (20.13 s on a

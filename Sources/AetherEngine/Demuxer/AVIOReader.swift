@@ -233,6 +233,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// consumer treats EOF as "played to the end" and deliberately never retries it. Guarded by
     /// `streamLock`.
     private var streamExpectedBytes: Int64 = -1
+    /// The status the streaming GET was answered with when it was anything but 200/206, 0 while
+    /// none. A status is not media: the delegate hangs up at the header, and `open()` fails typed
+    /// on it rather than handing FFmpeg an empty stream to misreport as invalid data. Written on
+    /// the delegate queue before `streamEnded`; guarded by `streamLock`.
+    private var streamRefusedStatus = 0
 
     // MARK: - Persistent Mode (single forward-streaming connection, playback path)
 
@@ -700,6 +705,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // non-seekable.
             startStreamingDownload()
             _ = streamDataReady.wait(timeout: .now() + .seconds(15))
+            try failIfStreamingRefused(fallbackStatus: 0)
         } else if prefetchEnabled {
             // #281: the parse seeks that follow this open are what the retained head exists for.
             winCond.lock()
@@ -745,22 +751,40 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // a size; if not, abandon it (generation bump ignores a size landing in the
                 // race window). fileSize is read under the lock because the delegate thread now
                 // writes it (issue #70 review #4/#5).
-                let (haveSize, abandonedTask) = resolveOptimisticOpen()
+                let (haveSize, abandonedTask, pumpStatus) = resolveOptimisticOpen()
                 abandonedTask?.cancel()
                 Self.releaseBudgetTicket(of: abandonedTask)
                 if !haveSize {
-                    // The data connection resolved no size (no-length origin, a transient 429,
-                    // slow headers, or an origin whose length only comes via HEAD). Fall back to
-                    // the exact pre-#70 probe path (Range bytes=0- then HEAD, on its own
-                    // connection and budget): it keeps seekability whenever a size is reachable
-                    // and only streams on a genuinely length-less source, restoring main's
-                    // resilience to all of those cases (issue #70 review #1/#3/#4).
                     tookFallback = true
-                    EngineLog.emit("[AVIOReader] Data connection resolved no size, falling back to probe", category: .demux, level: .verbose)
-                    fileSize = resolveInitialFileSize()
+                    // A 401/403/404/410 at byte 0 is the origin's answer to the RESOURCE, not to
+                    // the range form: a HEAD or a `bytes=0-1` from the same client is answered
+                    // alike, and a size learned from either would only re-issue the refused range
+                    // on the persistent path (which then dies after one retry with the status
+                    // lost). Skip the ladder. The one request still worth making is the unranged
+                    // GET below: an origin that refuses `Range` but serves a plain GET plays
+                    // forward-only (which is what the ladder's streaming fallback did for it
+                    // anyway), and one that refuses both fails typed with its status.
+                    let pumpRefusal = (!gotData && Self.isResolvedExpiryStatus(pumpStatus)) ? pumpStatus : 0
+                    if pumpRefusal != 0 {
+                        EngineLog.emit(
+                            "[AVIOReader] \(label) data connection refused status=\(pumpRefusal) at offset 0; "
+                            + "skipping the size probes, trying one unranged GET",
+                            category: .demux)
+                        fileSize = -1
+                    } else {
+                        // The data connection resolved no size (no-length origin, a transient 429,
+                        // slow headers, or an origin whose length only comes via HEAD). Fall back to
+                        // the exact pre-#70 probe path (Range bytes=0- then HEAD, on its own
+                        // connection and budget): it keeps seekability whenever a size is reachable
+                        // and only streams on a genuinely length-less source, restoring main's
+                        // resilience to all of those cases (issue #70 review #1/#3/#4).
+                        EngineLog.emit("[AVIOReader] Data connection resolved no size, falling back to probe", category: .demux, level: .verbose)
+                        fileSize = resolveInitialFileSize()
+                    }
                     if isStreaming {
                         startStreamingDownload()
                         _ = streamDataReady.wait(timeout: .now() + .seconds(15))
+                        try failIfStreamingRefused(fallbackStatus: pumpRefusal)
                     } else {
                         startPersistentConnection(at: 0)
                         if !awaitFirstPersistentData() {
@@ -780,6 +804,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if isStreaming {
                 startStreamingDownload()
                 _ = streamDataReady.wait(timeout: .now() + .seconds(15))
+                try failIfStreamingRefused(fallbackStatus: 0)
             } else {
                 if let data = fetchChunk(from: 0, size: chunkSize) {
                     currentBuffer = data
@@ -811,6 +836,29 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let gotData = !window.isEmpty
         winCond.unlock()
         return gotData
+    }
+
+    /// The streaming GET was answered with a status instead of a body, or the ranged open was
+    /// already refused with one and the unranged GET then delivered nothing either. Either way the
+    /// demuxer would be handed an empty stream (or an error page) and report it as invalid data;
+    /// close and fail typed instead, the way the AE#140/AE#154 classifications do, so load()
+    /// publishes the status. `fallbackStatus` is the ranged open's refusal (0 when there was
+    /// none): a hung-up unranged GET whose header never arrived within the open budget still
+    /// carries the verdict the origin already gave. Demux thread, open-time only.
+    private func failIfStreamingRefused(fallbackStatus: Int) throws {
+        streamLock.lock()
+        let refused = streamRefusedStatus
+        let ended = streamEnded
+        let empty = streamBuffer.isEmpty && streamBytesRead == 0
+        streamLock.unlock()
+        let status = refused != 0 ? refused : ((ended && empty) ? fallbackStatus : 0)
+        guard status != 0 else { return }
+        EngineLog.emit(
+            "[AVIOReader] \(label) source refused: HTTP \(status); failing the open typed",
+            category: .demux)
+        markClosed()
+        close()
+        throw AVIOReaderError.httpStatus(status)
     }
 
     /// Snapshot up to `max` leading bytes of the first window (open-time, before any read has consumed
@@ -845,17 +893,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the read means a size that lands in the race window is ignored rather than racing a
     /// half-done teardown (issue #70 review #4/#5). Returns the session to cancel outside
     /// the lock. Demux thread, open-time only; leaves the AVIO context intact (unlike close()).
-    private func resolveOptimisticOpen() -> (haveSize: Bool, abandonedTask: URLSessionDataTask?) {
+    /// `pumpStatus` is the HTTP status the abandoned connection was answered with (0 when no
+    /// response arrived), so the caller can tell a refused resource from a length-less one.
+    private func resolveOptimisticOpen() -> (haveSize: Bool, abandonedTask: URLSessionDataTask?, pumpStatus: Int) {
         winCond.lock()
         defer { winCond.unlock() }
-        if fileSize > 0 { return (true, nil) }
+        if fileSize > 0 { return (true, nil, connStatus) }
+        let status = connStatus
         connGeneration &+= 1
         let task = activeTask
         activeTask = nil
         window = Data()
         connEnded = true
         winCond.broadcast()
-        return (false, task)
+        return (false, task, status)
     }
 
     // Close flags written on the teardown thread (markClosed / fullyClose) and read on the demux
@@ -1199,6 +1250,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
 
         if totalRead > 0 { return Int32(totalRead) }
+        streamLock.lock()
+        let refusedStatus = streamRefusedStatus
+        streamLock.unlock()
+        if refusedStatus != 0 {
+            // The response header arrived after open()'s budget: still a refusal, not end-of-media.
+            EngineLog.emit(
+                "[AVIOReader] \(label) streaming GET refused status=\(refusedStatus) after open; reporting EIO",
+                category: .demux)
+            return FFmpegErr.eio
+        }
         if sequentialOnly {
             streamLock.lock()
             let ended = streamEnded
@@ -2026,13 +2087,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     "[AVIOReader] \(self.label) tail prefetch \(installed ? "installed" : "dropped") "
                     + "\(data.count)B at \(start) after \(Int(elapsedMs))ms",
                     category: .demux)
-            } else if case .rejected(let reason, let byOrigin) = outcome {
+            } else if case .rejected(let reason, let verdict) = outcome {
                 var learned = false
-                if byOrigin {
+                switch verdict {
+                case .declinedByOrigin:
                     SuffixRangeSupport.shared.noteDeclined(url, reason: reason)
                     learned = true
-                } else {
+                case .transportFailure:
                     learned = SuffixRangeSupport.shared.noteTransportFailure(url, reason: reason)
+                case .unrelated:
+                    // A 403 during a connection-cap window, a 429, a 5xx: the origin has said
+                    // nothing about suffix ranges, and the very next open may be served. Not a
+                    // transport strike either — two opens inside one short outage would otherwise
+                    // still latch for the rest of the process.
+                    break
                 }
                 EngineLog.emit(
                     "[AVIOReader] \(self.label) tail prefetch rejected after \(Int(elapsedMs))ms: \(reason)"
@@ -2076,6 +2144,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// The bound itself, free of the reader's state so it can be checked without a socket.
     nonisolated static func tailPrefetchWaitBudget(firstDataMs: Double) -> TimeInterval {
         min(5.0, max(0.25, (firstDataMs / 1000) * 2))
+    }
+
+    /// Which non-206 answers to `bytes=-n` are the origin's verdict on the suffix-range FORM, and so
+    /// worth remembering for the session: a 200 that ignored it (and would have sent the whole
+    /// file), a 416 that rejected it. A 401/403/404/410 is the origin's verdict on the resource, a
+    /// 429/503/509 on the moment, a 5xx a fault: those repeat only while their condition does, and
+    /// latching on one of them silently disabled the prefetch for the origin for the process
+    /// lifetime after a single refusal.
+    static func suffixRangeStatusDeclinesTheForm(_ status: Int) -> Bool {
+        return status == 200 || status == 416
     }
 
     /// Start offset of the bytes a 206 actually carries, from `Content-Range: bytes a-b/total`.
@@ -2631,6 +2709,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 self.streamLock.lock()
                 self.streamExpectedBytes = expected
                 self.streamLock.unlock()
+            },
+            onRefused: { [weak self] status in
+                guard let self else { return }
+                self.streamLock.lock()
+                self.streamRefusedStatus = status
+                self.streamLock.unlock()
+                EngineLog.emit(
+                    "[AVIOReader] \(self.label) streaming GET refused status=\(status); hanging up at the header",
+                    category: .demux)
             }
         ) { [weak self] data in
             guard let self, !self.isClosed else { return }
@@ -3517,6 +3604,9 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     let onComplete: @Sendable () -> Void
     /// Response hook (advisory Content-Length capture on the sequential-origin path).
     let onResponse: (@Sendable (URLResponse) -> Void)?
+    /// The origin answered with a status instead of media (anything but 200/206). Called at the
+    /// response header, before the hang-up, so the reader can fail the open typed.
+    let onRefused: (@Sendable (Int) -> Void)?
     /// Re-applied across cross-host redirects like every other delegate in this file;
     /// IPTV origins routinely 302 twice (portal -> panel -> archive host) and the final
     /// host must still see the caller's User-Agent / auth headers.
@@ -3525,11 +3615,13 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     init(
         extraHeaders: [String: String] = [:],
         onResponse: (@Sendable (URLResponse) -> Void)? = nil,
+        onRefused: (@Sendable (Int) -> Void)? = nil,
         onData: @escaping @Sendable (Data) -> Void,
         onComplete: @escaping @Sendable () -> Void
     ) {
         self.extraHeaders = extraHeaders
         self.onResponse = onResponse
+        self.onRefused = onRefused
         self.onData = onData
         self.onComplete = onComplete
     }
@@ -3551,6 +3643,16 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
+        // Redirects never reach here (willPerformHTTPRedirection follows them), so anything but
+        // a 200/206 is the origin's verdict, not media: a 401/403 refusal, a 404, a 429, a 5xx.
+        // Hang up at the header so the error page never enters the stream buffer, where FFmpeg
+        // would probe it as container bytes and report "Invalid data found when processing
+        // input" for what was a refusal (#378).
+        if let http = response as? HTTPURLResponse, http.statusCode != 200, http.statusCode != 206 {
+            onRefused?(http.statusCode)
+            completionHandler(.cancel)
+            return
+        }
         onResponse?(response)
         completionHandler(.allow)
     }
@@ -3628,10 +3730,13 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
 /// already demonstrated it cannot serve it. A request that structurally cannot be answered belongs
 /// once per origin, not once per open.
 ///
-/// Only the origin's own answer latches. A transport failure is the network's rather than the
-/// server's, and a link bad enough to time out this request will time out others, so it takes two
-/// before the origin is judged by it. Process lifetime: a server does not gain suffix-range support
-/// mid-session, and forgetting across launches costs exactly one request.
+/// Only the origin's own answer to the RANGE FORM latches (a 200 that ignored it, a 416 that rejected
+/// it, a Content-Range that does not describe the span, a short body). A transport failure is the
+/// network's rather than the server's, and a link bad enough to time out this request will time out
+/// others, so it takes two before the origin is judged by it. A status about the resource or the
+/// moment (401/403/404/410, 429/503/509, other 5xx) says nothing about suffix ranges and never
+/// latches: it repeats only while its condition does. Process lifetime: a server does not gain
+/// suffix-range support mid-session, and forgetting across launches costs exactly one request.
 final class SuffixRangeSupport: @unchecked Sendable {
     static let shared = SuffixRangeSupport()
 
@@ -3700,17 +3805,25 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
         /// Named so the log says WHICH way an origin declined, since "no suffix ranges", "a 200 with
         /// the whole file" and "a short body" are three different origins to talk to a reporter about.
         ///
-        /// `byOrigin` separates the origin's own answer from the network's: the first is a property
-        /// of the server and will repeat on every open, the second may not. Only the first is worth
-        /// remembering after one occurrence (`SuffixRangeSupport`).
-        case rejected(String, byOrigin: Bool)
+        /// `verdict` separates what the answer was about. Only the origin's answer to the RANGE FORM
+        /// is a property of the server that repeats on every open and is worth remembering after
+        /// one occurrence (`SuffixRangeSupport`); a transport failure is the network's; and a status
+        /// about the resource or the moment (a 403, a 404, a 429, a 5xx) says nothing about suffix
+        /// ranges at all and must not disable the prefetch for the origin once the condition passes.
+        case rejected(String, verdict: Verdict)
+    }
+
+    enum Verdict {
+        case declinedByOrigin
+        case transportFailure
+        case unrelated
     }
 
     private let expectedLength: Int
     private let extraHeaders: [String: String]
     private var buffer = Data()
     private var spanStart: Int64?
-    private var rejection: String?
+    private var rejection: (String, Verdict)?
 
     /// Called exactly once, on completion, whatever happened. A caller waits on this fetch, so a
     /// silent failure would be a caller waiting out its whole budget for bytes that are never coming.
@@ -3741,18 +3854,22 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
         guard let http = response as? HTTPURLResponse else {
-            rejection = "no HTTP response"
+            rejection = ("no HTTP response", .declinedByOrigin)
             completionHandler(.cancel)
             return
         }
         guard http.statusCode == 206 else {
-            rejection = "status=\(http.statusCode) (no suffix range support)"
+            let status = http.statusCode
+            rejection = AVIOReader.suffixRangeStatusDeclinesTheForm(status)
+                ? ("status=\(status) (no suffix range support)", .declinedByOrigin)
+                : ("status=\(status) (about the resource, not the range form)", .unrelated)
             completionHandler(.cancel)
             return
         }
         guard let start = AVIOReader.suffixRangeStart(http, expectedLength: expectedLength) else {
             let cr = http.value(forHTTPHeaderField: "Content-Range") ?? "absent"
-            rejection = "Content-Range: \(cr) does not describe the \(expectedLength)B asked for"
+            rejection = ("Content-Range: \(cr) does not describe the \(expectedLength)B asked for",
+                         .declinedByOrigin)
             completionHandler(.cancel)
             return
         }
@@ -3772,16 +3889,16 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     private func outcome(error: Error?) -> Outcome {
-        if let rejection { return .rejected(rejection, byOrigin: true) }
-        if let error { return .rejected("transport: \(error.localizedDescription)", byOrigin: false) }
+        if let (reason, verdict) = rejection { return .rejected(reason, verdict: verdict) }
+        if let error { return .rejected("transport: \(error.localizedDescription)", verdict: .transportFailure) }
         guard let start = spanStart else {
-            return .rejected("no usable response header", byOrigin: true)
+            return .rejected("no usable response header", verdict: .declinedByOrigin)
         }
         // A short body would put later offsets in the span at the wrong place, so a partial
         // delivery is dropped rather than trimmed: this is an optimisation, and a wrong
         // optimisation is worse than none.
         guard buffer.count == expectedLength else {
-            return .rejected("short body: \(buffer.count)B of \(expectedLength)B", byOrigin: true)
+            return .rejected("short body: \(buffer.count)B of \(expectedLength)B", verdict: .declinedByOrigin)
         }
         return .span(start, buffer)
     }
@@ -3812,7 +3929,7 @@ private func seekCallback(
 
 // MARK: - Errors
 
-enum AVIOReaderError: Error, CustomStringConvertible, LocalizedError {
+enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError {
     case allocationFailed
     case noResponse
     case requestTimeout
@@ -3823,6 +3940,11 @@ enum AVIOReaderError: Error, CustomStringConvertible, LocalizedError {
     /// --disable-network) can never demux it; surfaced to load() so it reroutes the source onto the
     /// native remote-HLS bypass instead of dying with a bare AVERROR_INVALIDDATA.
     case hlsPlaylistOnVODPath
+    /// The origin answered the source request with an HTTP status instead of media: a 401/403
+    /// refusal, a 404, a 5xx. Typed so load() publishes the status (`PlaybackErrorKind.sourceRefused`)
+    /// instead of the AVERROR_INVALIDDATA FFmpeg reports for an empty or error-page stream, and so the
+    /// error page never reaches the demuxer.
+    case httpStatus(Int)
 
     var description: String {
         switch self {
@@ -3831,6 +3953,7 @@ enum AVIOReaderError: Error, CustomStringConvertible, LocalizedError {
         case .requestTimeout: return "Request timed out"
         case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
         case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
+        case .httpStatus(let status): return "Origin answered HTTP \(status) for the source"
         }
     }
 

@@ -17,6 +17,11 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// The source could not be opened, probed or routed. `underlyingDomain` / `underlyingCode` name the
     /// failure the open ran into.
     public static let sourceOpenFailed = PlaybackErrorKind(rawValue: "sourceOpenFailed")
+    /// The origin answered the source request with an HTTP status instead of media: a 401/403 refusal,
+    /// a 404, a 5xx. `underlyingCode` is that status; `underlyingDomain` is nil, the sentence is the
+    /// engine's. Before this kind existed both this and a corrupt file arrived as `sourceOpenFailed`
+    /// carrying FFmpeg's "Invalid data found when processing input".
+    public static let sourceRefused = PlaybackErrorKind(rawValue: "sourceRefused")
     /// A custom `IOReader`'s initial probe failed. The host built that reader, so only the host can
     /// re-point it.
     public static let customSourceProbeFailed = PlaybackErrorKind(rawValue: "customSourceProbeFailed")
@@ -127,5 +132,18 @@ extension AetherEngine {
     @MainActor
     func publishError(_ kind: PlaybackErrorKind, _ message: String, underlying: Error?) {
         publishError(PlaybackErrorInfo(kind: kind, message: message, underlying: underlying))
+    }
+
+    /// A failed open: `sourceRefused` with the status when the reader typed the origin's answer
+    /// (`AVIOReaderError.httpStatus`), otherwise `sourceOpenFailed` with whatever was underneath.
+    @MainActor
+    func publishLoadFailure(_ error: Error) {
+        if let readerError = error as? AVIOReaderError, case .httpStatus(let status) = readerError {
+            publishError(PlaybackErrorInfo(kind: .sourceRefused,
+                                           message: "Failed to load: \(error.localizedDescription)",
+                                           underlyingCode: status))
+            return
+        }
+        publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)
     }
 }
