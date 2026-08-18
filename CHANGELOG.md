@@ -10,6 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.31.0] - 2026-08-18
+
+### Added
+
+- **`PlaybackErrorKind.audioBridgeProducedNoOutput`.** A source whose audio has to be transcoded into
+  fMP4 (MP3, MP2, DTS, TrueHD, Vorbis, PCM) produced no encoded audio at all, so the mp4 muxer could
+  not build the sample entry it derives from a written packet. It used to arrive as `.vodSourceFailed`,
+  which reads as "the source is gone" and is a reason for a host to end a fallback ladder; the source is
+  neither gone nor unreadable here, and a second player that decodes the track itself plays the file, so
+  this one is a demote.
+
 ### Fixed
 
 - **A transcoding audio bridge that produces nothing now says so, instead of dying as a muxer error two
@@ -31,10 +44,6 @@ the public-API contract.
   re-opens the encoder, both downstream of a failing decoder, so the same bytes were read three times
   for the same answer. Zero decoded frames now ends the session at once; frames decoded with no packets
   emitted is the encoder side, which a rebuild does heal, and keeps its revive.
-- **New `PlaybackErrorKind.audioBridgeProducedNoOutput` for that failure.** It used to arrive as
-  `.vodSourceFailed`, which reads as "the source is gone" and ends a host's fallback ladder; the source
-  is neither gone nor unreadable here, and a second player that decodes the track itself plays the file.
-  Hosts with a ladder should demote on this kind, not stop.
 
 ## [6.30.2] - 2026-08-18
 
