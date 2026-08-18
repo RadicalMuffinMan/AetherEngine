@@ -10,7 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The audio bridge picks its encoder from the SOURCE, not from the mode alone: a source with two
+  channels or fewer no longer becomes an E-AC-3 bitstream (AE#395).** `.surroundCompat` exists to carry
+  SURROUND across a route that cannot take multichannel LPCM, and it was applying its E-AC-3 encoder to
+  every bridged source regardless of channel count. On a source of two channels or fewer there is no
+  surround to carry, so that encoder bought nothing and cost twice: 256 kbps lossy where the FLAC
+  encoder in the same build is lossless, and a Dolby bitstream handed to every output route, including
+  the ones that can only pass one through rather than decode it. Measured on a rebuilt MPEG-TS program
+  (H.264 + MP2 stereo + AC-3 5.1 + a second MP2 stereo), all three selectable tracks reached AVPlayer as
+  Dolby: the AC-3 5.1 stream-copied as `ac-3`, and each MP2 "stereo" track came out of the bridge as
+  `ec-3`, so "the stereo track was silent too" ruled nothing out. `.surroundCompat` now resolves to
+  E-AC-3 only above two channels and to FLAC at or below it; `.lossless` is unchanged, a surround source
+  is unchanged (5.1 PCM still bridges to `ec-3` at 768 kbps), and stream-copy is untouched. The caps and
+  the per-channel rate now key on the encoder rather than the mode, and the master playlist's `CODECS`
+  attribute and the pipeline label follow the encoder the bridge actually opened. The #165 cascade
+  became an ENCODER cascade for the same reason: a mode list would now name the same encoder twice on a
+  stereo source and land on exactly the silent video-only fallback #165 exists to prevent.
+  Route-blind by construction, the input is the source's channel count and never the current output
+  route (#34 measured route-dependent bridging wrong and it was removed). Reported by Simpendaal, whose
+  A/B on an AirPlay 2 optical adapter is what separated the two: the stream-copied AC-3 5.1 played and
+  the bridged E-AC-3 stereo of the same program did not. Covered by `Issue395StereoBridgeEncoderTests`.
 
 ## [6.31.0] - 2026-08-18
 

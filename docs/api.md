@@ -352,7 +352,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `nativeRemoteHLS` | false | Hand a remote `master.m3u8` straight to AVPlayer: no demuxer probe, no loopback. Pair with `isLive: true`. |
 | `nativeRemoteHLSIngestFallback` | true | The #168 / #293 carriage recovery and the #363 401/403 bypass refusal recovery. Setting it false turns both off. |
 | `audioOnly` | false | Lean audio pipeline, no video machinery. Also set automatically when the probe finds no video stream. |
-| `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot stream-copy into fMP4. `.lossless` uses FLAC up to 7.1 and needs a sink that accepts multichannel LPCM. |
+| `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot stream-copy into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels and FLAC for one with two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. |
 | `confirmAtmos` | false | Background per-track JOC confirmation, republishing `audioTracks` as tracks confirm. Never on the start path; skipped for live and forward-only readers. |
 | `preferredAudioLanguages` | empty | First-frame audio pick from the engine's single probe. An explicit `audioSourceStreamIndex` still wins. |
 | `preferredSubtitleLanguages` | empty | Post-load subtitle activation on the host-overlay path. Pure convenience: no reload and no pre-probe, unlike the audio equivalent. |
