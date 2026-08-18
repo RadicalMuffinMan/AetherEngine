@@ -1637,6 +1637,17 @@ extension AetherEngine {
             storeIn: &audioNativeCancellables
         )
         // No timeControlStatus reconciliation on the audio path: all transport flows through engine play()/pause(). Feeding it back mis-latched a TRANSIENT .paused AVFoundation emits on background transition as a real pause, zeroing MPNowPlayingInfoPropertyPlaybackRate and breaking Now-Playing badge + Siri Remote routing.
+        // The rebuffer axis is a different matter: it never touches `state`, only `isBuffering`, so
+        // `playbackPhase` reads `.rebuffering` while a played item is starved (a dead progressive radio
+        // stream, a slow origin). Gated on the engine's own `.playing`, like the native video sinks, so a
+        // paused engine refilling its buffer stays `.paused`.
+        host.$isRebuffering
+            .sink { [weak self] rebuffering in
+                guard let self else { return }
+                if case .error = self.state { return }
+                self.isBuffering = self.state == .playing && rebuffering
+            }
+            .store(in: &audioNativeCancellables)
 
         // No detached hop: AudioAVPlayerHost.load is MainActor + replaceCurrentItem-based (no blocking I/O), and the host is SHARED. Detaching opened a reorder window where a superseded load A's body ran after successor B, putting A's item back on the shared AVPlayer.
         try checkLoadCurrent(generation)
