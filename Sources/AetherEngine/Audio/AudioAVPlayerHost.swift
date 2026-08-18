@@ -273,15 +273,15 @@ final class AudioAVPlayerHost {
             forName: AVPlayerItem.newErrorLogEntryNotification,
             object: item,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let event = self.playerItem?.errorLog()?.events.last else { return }
-                EngineLog.emit(
-                    "[AudioAVPlayerHost] item error log: domain=\(event.errorDomain) status=\(event.errorStatusCode) "
-                    + "comment=\(event.errorComment ?? "-") uri=\(event.uri ?? "-")",
-                    category: .swPlayback
-                )
-            }
+        ) { notification in
+            // Read the item off the notification, not `self.playerItem`: nothing here touches the host, and a
+            // load() that swapped the property would leave the line describing the wrong item (or none).
+            guard let event = (notification.object as? AVPlayerItem)?.errorLog()?.events.last else { return }
+            EngineLog.emit(
+                "[AudioAVPlayerHost] item error log: domain=\(event.errorDomain) status=\(event.errorStatusCode) "
+                + "comment=\(event.errorComment ?? "-") uri=\(event.uri ?? "-")",
+                category: .swPlayback
+            )
         }
 
         avPlayer.replaceCurrentItem(with: item)

@@ -25,7 +25,9 @@ the public-API contract.
   that once mis-latched Now-Playing is untouched); only the buffering axis moves. The item's error log
   entries and stall notifications are logged under `sw.playback` so a field failure on this path leaves
   a trace. Diagnosed on tvOS 26.6 (Apple TV 4K) with an MP3/ICY station where the reload watchdog in the
-  host app was the only recovery. Covered by `AudioAVPlayerHostRebufferingTests`.
+  host app was the only recovery. A starve that begins inside a seek window is re-read when the seek
+  lands, so it cannot slip past the `.seeking` gate and leave a frozen `.playing` behind. Covered by
+  `AudioAVPlayerHostRebufferingTests`. Thanks to @tschuegy for the report and the fix.
 
 ## [6.30.1] - 2026-08-17
 

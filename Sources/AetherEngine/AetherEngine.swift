@@ -4216,6 +4216,14 @@ public final class AetherEngine: ObservableObject {
         if let parked = Self.seekEndParkState(target: target, duration: duration, isLive: isLive) {
             state = parked
         }
+        // #394 follow-up: the audio host writes the buffering level only on its own rebuffer edges, and a
+        // starve that began inside the seek window carries no edge across the landing (on the way in the
+        // `.seeking` gate suppressed the level). Re-read it against the state this finalize just settled,
+        // or a seek into an unbuffered span lands as a frozen `.playing`, the very shape the axis exists
+        // to end. The native path already reconciles its own level in reconcileNativeSeekTransport.
+        if audioAVPlayerActive, let host = audioAVPlayerHost {
+            isBuffering = state == .playing && host.isRebuffering
+        }
         setProgrammaticSeek(inFlight: false, target: nil)
         // `sourceTime` is the on-screen frame (#49/#123): the honest landing position, which keyframe
         // granularity or a still-draining chase can put a little off the target. Folded onto the display
