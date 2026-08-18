@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.32.0] - 2026-08-18
+
 ### Changed
 
 - **The audio bridge picks its encoder from the SOURCE, not from the mode alone: a source with two
