@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [6.30.2] - 2026-08-18
+
 ### Fixed
 
 - **The bare-AVPlayer audio host now publishes a rebuffer, so `playbackPhase` reads `.rebuffering` on the
