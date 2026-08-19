@@ -397,11 +397,16 @@ extension HLSVideoEngine {
         restartLock.unlock()
         guard admitted else {
             if metered {
+                // #377 round 5: the status code says "refused", it does not say what for, and the
+                // two answers need different fixes. The books do carry the difference, and this is
+                // the last line a session gets, so it says what they hold rather than asserting the
+                // shape the code has been guessing at since round 1.
                 EngineLog.emit(
                     "[HLSVideoEngine] #377 VOD rate-limit revive cap reached "
-                    + "(\(attempts) refusals, cap \(cap)); giving up. The source is being METERED, "
+                    + "(\(attempts) refusals, cap \(cap)); giving up. The source is REFUSING us, "
                     + "not lost: retrying this same request later is expected to work, and handing "
-                    + "off to another player will meet the same refusal",
+                    + "off to another player will meet the same refusal."
+                    + OriginRequestBudget.shared.refusalShapeNote(for: sourceURL),
                     category: .session
                 )
                 surfaceVODSourceFailure(code, "Source is rate limiting this session",
@@ -443,7 +448,7 @@ extension HLSVideoEngine {
         // over its quota stops re-asking every few seconds without ending.
         let delay = Self.rateLimitReviveDelay(attempt: attempts)
         EngineLog.emit(
-            "[HLSVideoEngine] #377 VOD pump died mid-session on a METERED origin (readError \(code)); "
+            "[HLSVideoEngine] #377 VOD pump died mid-session on a REFUSING origin (readError \(code)); "
             + "waiting \(String(format: "%.0f", delay))s before rebuilding the producer at "
             + "\(String(format: "%.2f", anchor))s -> seg\(idx) (attempt \(attempts)/\(cap))",
             category: .session
