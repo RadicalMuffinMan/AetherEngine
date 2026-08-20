@@ -12,6 +12,46 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.33.0] - 2026-08-20
+
+### Changed
+
+- **A source that is REFUSING a session gets a stated wall-clock budget per refusal window, instead of
+  a lifetime that emerged from two constants that did not know about each other (AE#377).** The reporter
+  measured his origin with curl and 35 KB of traffic: it serves for about six minutes, refuses every NEW
+  request for about four, and recovers on its own. Seven 1 KB requests a minute apart are enough to reach
+  it, so the trigger is time, not volume, concurrency or request count, and re-resolving through the
+  source does not clear it because the source hands back the same edge host. His recovery arrived at
+  243 s. The engine gave up at 212 s, and no constant said 212: it was four paced revive attempts
+  (3, 8, 20, 45 s) each followed by a reopen that walks the reader's own seven-rung reconnect ladder
+  against the refusing origin, roughly 34 s, unpaced and uncounted on that side. `RefusingSourceReviveBudget`
+  states the figure instead (600 s), and the attempt count now follows from the pacing rather than
+  deciding the outcome. Also removes the trap in the old shape: making the reopen cheaper would have
+  silently cut a session's life by two thirds. Covered by `Issue377RefusingSourceBudgetTests`.
+- **`playbackPhase` reports `.stalled(reconnecting:)` for as long as that budget runs.** The reader emits
+  `.flowing` as it EXITS, deliberately, so the terminal outcome carries the state; between that exit and
+  the rebuilt reader's first byte there is no reader at all, so the phase read `playing` through minutes
+  in which nothing was being delivered. A host no longer has to infer the stall from silence.
+
+### Fixed
+
+- **The refusing-source budget is reset per refusal window, so a session that recovers is not penalised
+  for having recovered (AE#377).** The gate it replaces was never reset, which made its four attempts a
+  SESSION budget: a session that survived one window began the next with part of it spent and the third
+  with none. On a long title against an origin with this shape, the later windows were given up on for
+  arithmetic reasons rather than measured ones. Windows are separated by a gap longer than any that can
+  occur inside one (a ladder rung plus a reopen).
+- **The record of which redirect targets a source has dropped lives on the origin's books rather than on
+  the reader, so a rebuilt reader is not blind to it (AE#377).** A metered revive builds a fresh demuxer,
+  so the reader that meets a re-minted target is routinely not the one that dropped it: no pin, no dropped
+  slot, empty ledger, and the verdict fell through to "a target the source resolved freshly", the single
+  answer that puts origin metering back on the table. In the reporter's capture that was 32 of the refusals
+  of one host in one window, against 8 correct ones from the reader that had done the dropping. The ledger
+  is now kept on the source's chain head, merged when a chain folds, and cleared when a target answers
+  again. The give-up line reports the books it can back up (peak requests in flight, refusals, dropped
+  targets) instead of asserting that the origin is metering us. Covered by `Issue377RefusingTargetTests`
+  and `OriginRequestBudgetTests`.
+
 ## [6.32.0] - 2026-08-18
 
 ### Changed
