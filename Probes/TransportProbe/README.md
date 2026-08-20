@@ -58,6 +58,16 @@ AE_PROBE_URL=http://127.0.0.1:8477/big.bin AE_PROBE_WINDOW_SECONDS=110 \
 Loopback makes arm B inconclusive by construction (250 ms of loopback is gigabytes), which is the
 harness telling the truth about itself.
 
+One arm at a time, if sitting through the set is not wanted. The trailing `()` is not optional:
+without it xcodebuild matches nothing, runs zero tests and reports green.
+
+```bash
+xcodebuild test -scheme TransportProbe-Package -destination '…' \
+  '-only-testing:TransportProbe/TransportProbe/heldAcrossWindow()'
+```
+
+Names: `resolve()`, `streamBackpressure()`, `dataTaskSuspendControl()`, `heldAcrossWindow()`.
+
 ## The arms
 
 They are serialized and run in order. About 20 minutes for the set. Each arm waits for the origin
