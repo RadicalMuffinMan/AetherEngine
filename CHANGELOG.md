@@ -12,6 +12,47 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.34.0] - 2026-08-21
+
+### Fixed
+
+- **The software-path audio tap trapped on the FIRST buffer of every multichannel track (AE#400).**
+  `AudioTapPCMConverter` rebuilt its input format from the channel count alone and force-unwrapped the
+  result, but `AVAudioFormat(commonFormat:sampleRate:channels:interleaved:)` returns nil for every count
+  above 2 (measured 3 through 8; this is AVFAudio behaviour on every platform, not a macOS specialty).
+  `AudioDecoder` emits the source layout up to 7.1 without downmixing, so this was not a race: any
+  multichannel track on the software path with a tap installed trapped on its first audio buffer. The
+  layout the converter needed was already attached to the sample buffer's format description by the
+  decoder, so it is read back from there now instead of being re-derived, with the engine's own mapping
+  as a fallback for a description that carries none. Reported by dlev02 from a Prism TestFlight crash.
+- **Some channel layouts convert to digital silence without reporting an error, which the crash had been
+  hiding (AE#400).** Measured: 4-channel Quadraphonic and every DiscreteInOrder layout produce a buffer
+  of zeroes with no `NSError` set, which at a tap consumer is indistinguishable from a muted source. The
+  converter now pushes one full-scale buffer through each new converter and folds the channels itself
+  when the answer is silence. The check sits on the measured behaviour rather than on a table of the
+  layouts Apple currently mixes, because such a table goes stale without saying so.
+- **The channel layout stamped on software-path audio now names the order the resampler actually wrote
+  (AE#401).** `AudioDecoder` resamples into `av_channel_layout_default(channels)` and stamped a layout
+  from a second, independent table; the two agreed only for 5.0 and 5.1. Measured per channel through a
+  real downmix: on 7.1 every channel moved and the LFE, a bass-only channel, was placed hard left at full
+  gain; on 4.0 the centre, which carries dialogue, went hard left; on 2.1 the LFE was mixed into both
+  channels instead of being dropped. 5.1 being the common multichannel case is most likely why it went
+  unseen. 7.1 is also where the mistake came from: the old comment called `AAC_7_1` "MPEG_7_1_C,
+  Hollywood L R C LFE Ls Rs Lsr Rsr", but those are two different layouts. Fixed by naming what is
+  already in the buffer (`WAVE_2_1`, `MPEG_4_0_A`, `MPEG_7_1_C`) rather than by moving the audio; 6.1 is
+  the one count no CoreAudio tag matches, so there the resampler is pointed at `6.1(back)` instead.
+  Covered by `ChannelLayoutOrderTests`, which compares placement through a real downmix and not names.
+
+### Added
+
+- **`aetherctl audiotap --software`, a headless driver for the tap path that had none.** The two existing
+  modes drive their readers directly, so the software sink, which only exists inside a real session, could
+  not be run from the CLI at all. That is how AE#400 shipped and survived: every path around it had a
+  harness. The new mode loads the source through the whole engine, refuses it if it did not route to the
+  software host, installs the tap through the public `installAudioTap()` and plays. It reports `peak` next
+  to the buffer count, and exit 3 covers both no buffers and buffers of digital silence, because both look
+  like a healthy run otherwise. `AudioTapProbe.runSoftware` backs it.
+
 ## [6.33.0] - 2026-08-20
 
 ### Changed
