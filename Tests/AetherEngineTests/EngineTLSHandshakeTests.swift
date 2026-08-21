@@ -18,6 +18,14 @@
     @Suite("EngineTLS live handshake against a self-signed origin", .serialized)
     struct EngineTLSHandshakeTests {
 
+        /// Lives here rather than beside the resolver tests because reading the
+        /// flag is as much a claim on the process global as writing it, and a
+        /// suite that only reads still races the ones that write.
+        @Test("The flag defaults to off")
+        func defaultsOff() {
+            #expect(EngineTLS.allowUntrustedCertificates == false)
+        }
+
         @Test("Flag off: the handshake is refused and no request reaches the origin")
         func refusedByDefault() async throws {
             let server = try #require(SelfSignedTLSOrigin())
