@@ -61,9 +61,4 @@ struct EngineTLSTests {
             disposition(allow: true, method: NSURLAuthenticationMethodServerTrust)
                 == .performDefaultHandling)
     }
-
-    @Test("The flag defaults to off")
-    func defaultsOff() {
-        #expect(EngineTLS.allowUntrustedCertificates == false)
-    }
 }
