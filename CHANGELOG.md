@@ -12,6 +12,33 @@ the public-API contract.
 
 _Nothing yet._
 
+## [6.34.1] - 2026-08-22
+
+### Added
+
+- **A startup witness for which FFmpeg the engine is actually executing against (AE#396).** The engine
+  calls `avcodec_*` as ordinary external symbols, so which binary serves them is decided by the host
+  executable's link, not by the package graph: a static FFmpeg pulled in with `-force_load` becomes a
+  definition inside the executable and beats every dylib, and a dependency exporting the same symbols
+  (libVLC does) wins whenever the build system sorts it ahead of a vendored framework. AE#396 was
+  reported as a bridged-audio defect across five fixtures, three codecs and two containers, and was a
+  second libavcodec one major behind. Every session now opens with the four loaded versions, and a
+  major that does not match the headers the engine compiled against turns that line into an `ERROR:`
+  naming the mismatch, the two shapes that cause it, the `nm -m` / `otool -L` probes, and the configure
+  line of the libavcodec that answered. All four linked libraries are checked; libavutil matters most,
+  since a major shift there moves struct layouts. Reported and diagnosed by @kskchaitanya1993.
+
+### Changed
+
+- **The bridge-encoder cascade names the libavcodec that answered instead of "this FFmpeg build"
+  (AE#396).** The old sentence was true and pointed away from the cause: the build missing
+  `--enable-encoder=flac` was the host's second FFmpeg, not the engine's.
+
+### Documentation
+
+- **A linking contract in `docs/api.md`**, plus the README's static-linking and diagnostics sections.
+  Being dynamically embedded is not the same as being reached.
+
 ## [6.34.0] - 2026-08-21
 
 ### Fixed
