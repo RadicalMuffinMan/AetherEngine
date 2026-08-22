@@ -130,6 +130,35 @@ Four exceptions, and each is an exception for a reason:
 
 `FrameExtractor` is an `actor`, so its `thumbnail` / `snapshot` / `prewarm` / `shutdown` are `await`ed from anywhere. The audio tap's `AsyncStream` is likewise consumed from any task; only `installAudioTap()` itself is main-actor.
 
+### One FFmpeg, and it has to be the engine's
+
+AetherEngine calls `avcodec_*`, `avformat_*`, `avutil_*` and `swr_*` as ordinary external symbols. Which binary serves them is decided by the host executable's link, not by the package graph, so a second FFmpeg anywhere in the app can take the calls. Two shapes do it, and neither announces itself:
+
+- **A static FFmpeg pulled in with `-force_load`.** Its symbols become ordinary definitions inside the executable, and a definition in a `.o` beats a dylib for every other object in the same link.
+- **A dependency that exports the same symbols.** libVLC is the common one, and it is a reasonable thing to have beside AetherEngine, since the fallback ladder the API is built around invites exactly that pairing. CocoaPods sorts a pod ahead of a vendored framework, so libVLC's libavcodec wins by default.
+
+The engine then runs against headers it was never compiled against: struct layouts, codec ids and the encoder set are all whatever the other build decided. Symptoms do not look like a linking problem. They look like a defect in the engine, and specifically like a defect in whatever the other build happens to be missing.
+
+Every session says which FFmpeg answered, once, at `init`:
+
+```
+[FFmpeg] libavcodec 62.28.102, libavformat 62.6.100, libavutil 60.13.100, libswresample 6.0.100
+```
+
+and when a major does not match the headers the engine compiled against, that line becomes an `ERROR:` naming the mismatch, the likely cause and the two commands that show it:
+
+```
+$ nm -m <executable> | grep _avcodec_find_encoder     # which binary wins
+(__TEXT,__text) external _avcodec_find_encoder        #   a definition in the executable itself
+(undefined) external _avcodec_find_encoder (from MobileVLCKit)   #   or someone else's dylib
+
+$ otool -L <executable>                               # and in what order
+```
+
+The fix is the host's, because nothing inside a library can reach it: link AetherEngine's frameworks ahead of the other FFmpeg, or drop the second copy. The majors the engine expects are the ones FFmpegBuild's headers declare for the pinned version; the line above prints both sides, so there is nothing to look up.
+
+This is not hypothetical. AE#396 was reported as an audio-bridge defect, reproduced on five fixtures and two devices, and was a second FFmpeg one major behind: the engine's only trace was `flac bridge encoder absent from this FFmpeg build`, a true sentence about a build that was not the engine's. That line now names the libavcodec that answered.
+
 ## Constructing and binding
 
 ```swift
