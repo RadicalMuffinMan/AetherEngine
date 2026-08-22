@@ -2493,6 +2493,8 @@ public final class AetherEngine: ObservableObject {
     public init() throws {
         // Route av_log into EngineLog before any libav* entry point so probe/load diagnostics are captured.
         FFmpegLogBridge.install()
+        // Which FFmpeg answers is decided by the host's link, not by the package graph (AE#396).
+        FFmpegRuntimeCheck.logOnce()
         _ = DeinterlaceHardwareWarmup.shared
 
         // Declare category + multichannel support but do NOT activate the session here.
