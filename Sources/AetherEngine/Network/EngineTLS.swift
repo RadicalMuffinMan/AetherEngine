@@ -31,6 +31,22 @@ public enum EngineTLS {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var _evaluator: (@Sendable (URLProtectionSpace) -> Bool)?
 
+    /// Presents a client certificate for an mTLS origin, per challenge.
+    ///
+    /// nil, the default, leaves client-certificate challenges to the system's
+    /// default handling (which, with no keychain identity, is to decline). A
+    /// host that stores per-host credentials answers with the matching
+    /// `URLCredential`, or nil when it holds nothing for that origin. Read per
+    /// challenge, so replacing it applies from the next connection without
+    /// rebuilding sessions. Called off the main actor, from whichever queue
+    /// the session raised the challenge on, so it has to be thread-safe.
+    /// Lock-guarded like `serverTrustEvaluator`.
+    public static var clientCredentialProvider: (@Sendable (URLProtectionSpace) -> URLCredential?)? {
+        get { lock.lock(); defer { lock.unlock() }; return _clientProvider }
+        set { lock.lock(); _clientProvider = newValue; lock.unlock() }
+    }
+    nonisolated(unsafe) private static var _clientProvider: (@Sendable (URLProtectionSpace) -> URLCredential?)?
+
     /// Session-level delegate for the owned sessions that otherwise run
     /// without one (disc reader, HLS ingest readers, audio tap fetcher,
     /// carriage probe, subtitle proxy, live rendition fetch) and the fallback
@@ -38,19 +54,33 @@ public enum EngineTLS {
     static let sessionDelegate = SessionTrustDelegate()
 
     /// Single disposition shared by the session-level delegate and the
-    /// per-task delegates in AVIOReader. Anything other than a server-trust
-    /// challenge the host accepted is left to default handling, so client
-    /// certificates and HTTP auth behave exactly as before.
+    /// per-task delegates in AVIOReader. A client-certificate challenge is
+    /// answered from `clientCredentialProvider` when a host set one; anything
+    /// else a server-trust challenge the host accepted is accepted; and the
+    /// rest (HTTP auth, a declined client cert, a trust the host did not
+    /// accept) is left to default handling.
     static func resolve(
         _ challenge: URLAuthenticationChallenge,
         completionHandler: (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
+        let space = challenge.protectionSpace
+
+        if space.authenticationMethod == NSURLAuthenticationMethodClientCertificate {
+            if let provider = clientCredentialProvider,
+                let credential = provider(space)
+            {
+                completionHandler(.useCredential, credential)
+                return
+            }
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
         guard
-            challenge.protectionSpace.authenticationMethod
-                == NSURLAuthenticationMethodServerTrust,
+            space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
             let evaluator = serverTrustEvaluator,
-            evaluator(challenge.protectionSpace),
-            let trust = challenge.protectionSpace.serverTrust
+            evaluator(space),
+            let trust = space.serverTrust
         else {
             completionHandler(.performDefaultHandling, nil)
             return
