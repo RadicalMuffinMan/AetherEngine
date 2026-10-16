@@ -633,7 +633,8 @@ extension AetherEngine {
 
     /// Stand a loopback origin in front of the remote master and return the URL AVPlayer should open.
     /// Nil means "play the origin directly", which is the answer for a live source, and for a session
-    /// with neither text sidecars to inject (#316) nor a trust evaluator to honor (AE#495).
+    /// with no text sidecars to inject (#316), no trust evaluator to honor (AE#495) and no client
+    /// certificate to present.
     ///
     /// Bitmap sidecars (`.sup`) are excluded: WebVTT is a text rendition, and promising one for a PGS file
     /// would serve an empty `.vtt` that AVPlayer never re-fetches. Those keep the overlay (and Phase D OCR).
@@ -651,8 +652,11 @@ extension AetherEngine {
     private func prepareRemoteHLSStandIn(originURL: URL,
                                          options: LoadOptions,
                                          expectedGeneration: UInt64) async -> URL? {
-        let mayNeedRelay = EngineTLS.serverTrustEvaluator != nil
-            && originURL.scheme?.lowercased() == "https"
+        // AVPlayer can't present a client certificate, so an origin the host holds one for always goes
+        // through the relay, whose session can, whatever the system makes of its server certificate.
+        let holdsClientCredential = EngineTLS.holdsClientCredential(for: originURL)
+        let mayNeedRelay = holdsClientCredential
+            || (EngineTLS.serverTrustEvaluator != nil && originURL.scheme?.lowercased() == "https")
         let tracks = options.isLive
             ? []
             : externalSubtitleRegistry
@@ -661,9 +665,14 @@ extension AetherEngine {
                 .map { RemoteHLSSubtitleProvider.Track(externalID: $0.key, source: $0.value) }
         // Nothing to stand in for, so the origin is never asked.
         guard !tracks.isEmpty || mayNeedRelay else { return nil }
-        let needsRelay = mayNeedRelay
-            ? await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
-            : false
+        let needsRelay: Bool
+        if holdsClientCredential {
+            needsRelay = true
+        } else if mayNeedRelay {
+            needsRelay = await HLSOriginRelay.systemTrustRefuses(originURL, headers: options.httpHeaders)
+        } else {
+            needsRelay = false
+        }
         guard !options.isLive || needsRelay else { return nil }
         guard !tracks.isEmpty || needsRelay else { return nil }
 

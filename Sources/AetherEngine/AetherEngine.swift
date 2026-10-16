@@ -4691,7 +4691,9 @@ public final class AetherEngine: ObservableObject {
             let audioCodecID: AVCodecID = (probeOpened && resolvedInitialAudio >= 0)
                 ? (probe.stream(at: resolvedInitialAudio)?.pointee.codecpar.pointee.codec_id ?? AV_CODEC_ID_NONE)
                 : AV_CODEC_ID_NONE
+            // An origin that wants a client certificate stays on FFmpeg, since AVPlayer can't present one.
             let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID)
+                && !EngineTLS.holdsClientCredential(for: url)
             EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.
