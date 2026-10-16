@@ -54,7 +54,7 @@ let package = Package(
             name: "DolbyVisionStillReshaping",
             description: "Compile the CPU reshaping that turns a Dolby Vision Profile 5 / 10.0 frame into a still (scrub thumbnails, I-frame stills, held pictures)."
         ),
-        .default(enabledTraits: []),
+        .default(enabledTraits: ["DualLayerDolbyVision"]),
     ],
     dependencies: [
         // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).

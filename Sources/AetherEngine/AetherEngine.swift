@@ -4860,7 +4860,9 @@ public final class AetherEngine: ObservableObject {
                 && (probe.stream(at: resolvedInitialAudio).map {
                     FLACStreamInfo.coreMediaRejectsSource(UnsafePointer($0.pointee.codecpar))
                 } ?? false)
+            // An origin that wants a client certificate stays on FFmpeg, since AVPlayer can't present one.
             let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID) && !flacBlocksTooSmall
+                && !EngineTLS.holdsClientCredential(for: url)
             EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.
@@ -5345,6 +5347,8 @@ public final class AetherEngine: ObservableObject {
            let vStream = probe.stream(at: probe.videoStreamIndex),
            let codecpar = vStream.pointee.codecpar {
             let dvProfile = Self.dvProfile(stream: vStream)
+            // Xcode 26's compiler reports the pointer captured across the await below as a data race.
+            let codecparAddress = UInt(bitPattern: codecpar)
             let forcesSoftware = {
                 VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
                    codecID: detectedCodecID,
@@ -5353,7 +5357,9 @@ public final class AetherEngine: ObservableObject {
                    // AE#532: a record the RPU corrected is not on that route either, and its base layer
                    // is standard Main10, so the gate judges it the way it judges any Profile 7 / 8.
                    dvProfile: presentsDolbyVisionBaseLayer ? nil : (correctedDVProfile ?? dvProfile),
-                   canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
+                   canHardwareDecode: {
+                       VTCapabilityProbe.canHardwareDecode(codecpar: UnsafePointer(bitPattern: codecparAddress)!)
+                   })
             }
             var routesSoftware = forcesSoftware()
             // AE#348: with the pre-flight gate beside the load, this probe's throwaway session can open while
