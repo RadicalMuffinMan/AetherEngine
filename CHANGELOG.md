@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **RealMedia, feature-phone 3GP, Theora and VobSub, through FFmpegBuild 3.8.0 (FFmpegBuild#7, thanks
+  @williamliu0516).** `.rm` / `.rmvb` (RealVideo 1-4 with every RealAudio the container carries), 3GP / 3G2
+  (H.263 with AMR), `.ogv` (Theora), DVD LPCM, and local VobSub `.idx` + `.sub` sidecars as external
+  subtitle tracks. `AudioCodecCompat` names the new audio as `realAudio` and `amr` (DVD LPCM as `pcm`),
+  all bridged; the video takes the software path.
+
 ### Fixed
 
 - **A seek that misses the software path's packet cache no longer ends playback at its landing.**
@@ -21,9 +29,196 @@ the public-API contract.
   loop reads again. Seen on DVD-Video, whose time-map seek settles at once: a seek past the first
   cell ended playback in 7 of 8 runs, in none of 8 with the fix (48 seeks that missed the cache).
 
+- **The persistent HTTP/1.1 HLS ingest checks FIFO headroom before every segment and key request.**
+  The gap closed in 7.40.0 only covered a clear segment whose last chunk filled the buffer; after an
+  AES-128 segment the next key and segment request still went out over the ceiling. Seek, close,
+  cancellation and a failed reader retire the wait (#832, thanks @orut34iop).
+
+### Changed
+
+- **With object rendering on and no audio track tagged with a language, TrueHD Atmos or DTS:X replaces
+  the default track.** The fallback compared the default's language and had none to compare, so a file
+  that tags nothing (Dolby's Unfold demo) opened on its E-AC-3 JOC, and a host that remembered the
+  TrueHD pick paid a second load for the switch. One tagged track keeps the old behaviour: the file
+  names its dubs, and an untagged default is not matched by guess.
+
+## [7.42.0] - 2026-10-19
+
+### Added
+
+- **`LoadOptions.displayCriteriaOwner` (`.engine` / `.avKit` / `.host`), AE#842.** `suppressDisplayCriteria`
+  means "AVKit writes the criteria", and every branch behind it waits for that write: a host that keeps
+  the panel in its system format (or writes rate-only criteria itself) had no correct setting and paid up
+  to a second of play-gate wait per HDR or Dolby Vision title for a write that never came, with the
+  engine's panel readout switched off. `.host` writes nothing, takes the brief budget, reads the panel
+  and still waits out a switch it observes. `suppressDisplayCriteria = true` keeps meaning `.avKit`.
+
+### Fixed
+
+- **`confirmAtmos` no longer starves the video pump on an origin limited to one request.** Each
+  E-AC-3 track's pass is a second handle on the source, and at `maxConcurrentSourceRequests = 1`
+  every read it made took the pump's only slot: an integrator measured stalls every ten seconds on a
+  4K remux with 17 E-AC-3 tracks behind an Xtream origin that answers a second connection with 509,
+  and the pass never finished. The pass is now declined there, and for `sequentialOrigin` and
+  `heldSourceConnection`, the same set the I-frame rendition declines; the budget is re-checked
+  before every track, so a limit learned from refusals mid-session stops it too. The
+  `[AtmosConfirmation]` line now also appears for a stopped pass, with how many tracks it reached.
+
+## [7.41.0] - 2026-10-19
+
+### Added
+
+- **Dolby Vision Profile 5 / 10.0 scrub previews in colour, drawn by the system compositor.**
+  `scrubPreviewDrawsInView`, `showScrubPreview(atSeconds:in:)` and `AetherScrubPreviewView`: the
+  keyframe that opens a resident segment becomes a one-sample fMP4, and a muted `AVPlayer` inside
+  the view shows it, so the colour comes from the same place as the playing picture rather than from
+  a reshaping of our own. Needs no `DolbyVisionStillReshaping` trait. Positions outside the resident
+  window read the segment's keyframe off the source with a side demuxer, as the I-frame rendition
+  does, and get the same gates (no read on a sequential, serial or held-connection origin, waits out a
+  seek, skips superseded requests); before, the preview only covered the cached span around the
+  playhead. 26 to 45 ms per new position on an M1, 18 to 25 ms for one read off a local source,
+  byte-identical to the source's keyframe; verified next to 4K Profile 5 playback on an Apple TV.
+- **The held picture of an audio switch covers Dolby Vision Profile 5 / 10.0 without the reshaping
+  trait.** The resident segment's video becomes a standalone file, and a player on the bound surface
+  seeks it frame-exactly to the outgoing position, so the compositor colours the held frame. It was
+  skipped before. On three Profile 5 clips the held frame is pixel-identical to the paused outgoing
+  picture, up in 165 to 220 ms on an M1. The offset adds the segment's B-frame delay; without it the
+  frame lands two frames early.
+
+## [7.40.1] - 2026-10-18
+
+### Fixed
+
+- **TrueHD Atmos that starts after the probe window is rendered again.** A track whose first packet
+  lies beyond `find_stream_info`'s budget (John Wick: Chapter 2 carries TrueHD from 22 s, 45.8 MB
+  into the file) kept an unknown profile, so `objectAudioRendering` played it through the channel
+  bridge. With rendering requested and the profile unknown, the engine now reads the track's major
+  sync where the first producer starts, the same test mlpdec applies (four substreams, top bit of
+  `substream_info`), and renders it when it is Atmos. Costs 679 ms and 44.7 MB of held packets from
+  the start of that file at the tvOS probe budget, 30 ms on a resume; nothing for any other track.
+
+## [7.40.0] - 2026-10-18
+
+### Changed
+
+- **TrueHD Atmos is built from the stream's own channel presentation.** With `objectAudioRendering`
+  in a `TrueHDObjectAudio` build, every output is now a share of the 7.1 (or 5.1) bed Dolby renders
+  the same mix into, split per frequency bin between floor and heights by where the objects' energy
+  lies (`BedSplitter`). No object signal is mixed into an output; the objects are decoded without
+  their matrix interpolation (LibTrueHD 3.0 no longer compiles the interpolating decode at all) and
+  taken as points at their positions, without size, snap, zones, screen anchoring, the elevation
+  switch or metadata ramps. Measured against the previous exact render through Apple's APAC decode on
+  72 windows of six films, 0.35 % of the energy lands on another speaker (median of the windows with
+  heights), Dolby's Unfold demo 3.3 %, the heights within about a dB. A 5.1 bed now covers a 7.1
+  layout's rears as well as its sides, and the split's 2048-frame latency is drained at the end of
+  input and before every encoder restart. The exact render it is measured against is only built with
+  the measurement-only `TrueHDReferenceRender` trait (#731).
+- **DTS:X plays its standard presentation only, into 7.1.4 or 9.1.6.** With LibDTSX 3.0, the heights
+  are removed from the 7.1 bed by the standard's own constant (each at -3 dB in the speaker under it)
+  instead of the gains the stream's metadata states, which is no longer read; on twelve DTS:X tracks
+  every frame stated exactly that fold, so the output is bit-identical. The alternate presentations,
+  which carry objects (some IMAX-labelled streams), are refused and play as 7.1, and DTS:X is rendered
+  only into the two layouts that carry the bed and the four heights one to one; any other layout
+  keeps the channel bridge. The object position mapping and the fold renderer are gone (#744).
+- **The documentation no longer says TrueHD Atmos objects are always lost.** The Known limitations
+  entry in `docs/formats.md`, the `AudioDelivery.bridged` reference and the channel bridge's notes
+  predate `objectAudioRendering` (#731) and said objects and heights never survive. They now say the
+  channel bridge drops them and `objectAudioRendering = .apac(layout)` keeps them, in a build with the
+  `TrueHDObjectAudio` / `DTSXObjectAudio` traits (off by default since 7.39.0), rendered into a speaker
+  bed as lossy APAC that tvOS sends to an Atmos receiver as Dolby MAT. No behaviour change (#802,
+  thanks @aravindhsampath).
+
+### Added
+
+- **`LiveTelemetry.objectAudio`: how many Atmos objects play, and how many overhead.** While
+  `objectAudioRendering` plays TrueHD Atmos or DTS:X (a build with the `TrueHDObjectAudio` /
+  `DTSXObjectAudio` traits; without them it stays nil), the 1 Hz snapshot carries an
+  `ObjectAudioActivity`: the bed it renders into, the objects the presentation declares, how many of
+  them play and how many sit above ear level, and its bed channels on height speakers (DTS:X's standard
+  heights). These are the counts the `bed levels` log line has carried since #731, for a host's stats
+  panel without reading the log; they sit behind a lock of their own, so the sampler never waits for a
+  decode. `aetherctl play` takes `--atmos-bed` as `serve` does and prints them: on a TrueHD Atmos
+  remux, `obj=13/13 up=4 bed=7.1.4`.
+
+### Fixed
+
+- **The persistent HTTP/1.1 ingest holds the next segment request whenever the buffer is full.**
+  Backpressure applied only while a segment still had bytes left over, so a segment whose last chunk
+  was taken just under the 16 MB ceiling sent the next request at once, past the ceiling. The
+  producer now waits for room between segments either way (#732; a test pins the case, and the
+  timing test that caught it on CI no longer flakes).
+- **A slow origin no longer fails large HEVC-in-TS segments on the persistent HTTP/1.1 ingest.**
+  Segment bodies stream to the demuxer instead of downloading whole first, the 45 s ceiling covers
+  only the wait for a response head, and a body ends on its size or on 30 s without a byte (typed
+  `.stalled` rather than the socket's Code=60). One request per origin at a time, so a seek never
+  opens a second connection beside a response in flight (#732).
+- **The relay admits only http and https origins.** A playlist naming another scheme (`file://`
+  included) answers 404 instead of reaching URLSession.
+
+## [7.39.0] - 2026-10-17
+
+**Not built by default any more: TrueHD Atmos and DTS:X object rendering, Profile 7 FEL dual-layer
+composition, and Dolby Vision Profile 5 / 10.0 stills.** Each is now an optional component behind a
+package trait that is off by default (`TrueHDObjectAudio`, `DTSXObjectAudio`, `DualLayerDolbyVision`,
+`DolbyVisionStillReshaping`). A host that used any of them re-enables it on its package dependency:
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.39.0",
+         traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
+```
+
+or in Xcode's package dependency editor (XcodeGen cannot set traits; see
+[README › Optional components](README.md#optional-components)). These components may be subject to
+third-party patent licensing; integrators who enable them are responsible for their own licensing.
+
+### Changed
+
+- **Optional components, off by default.** Without its trait a component is not compiled, and a library
+  behind it is neither linked nor resolved. The public API is unchanged and the options become no-ops:
+  `objectAudioRendering` keeps the codec on the channel bridge, and `preferDualLayerDolbyVision` keeps a
+  Profile 7 source on the native route (the route line reads `not taken (built without the
+  DualLayerDolbyVision trait)`, and `reloadAtCurrentPosition(applying:)` no longer refuses flipping it on a
+  custom-reader session, since nothing would move). The two audio traits used to be on by default; the
+  dual-layer path (`DualLayerVideoDecoder`, the Metal composer, `OrderedDelivery`, the per-frame display
+  metadata and the FEL diagnostics) and the still reshaping (`DolbyVisionStillConverter`) were always
+  compiled.
+- **A Dolby Vision Profile 5 / 10.0 source has no stills without `DolbyVisionStillReshaping`.** Its planes
+  are IPT, which the standard still path would read as YCbCr (the green / magenta picture of #103), so it
+  yields none: `scrubThumbnail` and `scrubPreviewFrame` return nil without decoding anything,
+  `supportsCacheBackedStills` is false, the I-frame rendition is absent (`dolbyVisionStillsNotBuiltIn`),
+  an audio switch holds no picture, and the session log says so once. Playback is unaffected, as are
+  Profile 8.x, HDR10, HLG and SDR stills.
+
+### Added
+
+- **`AetherEngine.OptionalComponent`**, with `isBuiltIn` and `traitName` per component, so a host can
+  hide a setting its build would ignore.
+- **`Probes/AllTraits`**, a consumer package that enables every trait; CI builds it for tvOS and iOS, runs
+  the suite with all traits (including on a one-thread cooperative pool) and builds a release `aetherctl`
+  with them. The Dolby Vision pulse probe links the engine through `PulseEngine/` with
+  `DualLayerDolbyVision` and refuses to run its FEL arms without it.
+- `aetherctl feltest`, `play --cycle-el` and `play --dv-pin` need `DualLayerDolbyVision` and exit 64
+  without it; the `@_spi(Diagnostics)` FEL tooling (`felDecodeProbe`, `FelProbeResult`,
+  `felResidualEnabled`, `armDolbyVisionPinTest` and the pin queries) exists only with it.
+
 ## [7.38.1] - 2026-10-16
 
 ### Fixed
+
+- **The HEVC-in-MPEG-TS HLS VOD ingest under `heldSourceConnection` no longer fails on a slow origin.**
+  A segment body now reaches the demuxer as it arrives instead of after its last byte, the carriage
+  probe reads the first segment's head and hands the still open response to the producer instead of
+  downloading it whole, and the 45 s ceiling on a whole exchange is gone: it now covers only the wait
+  for a response head, and a body is limited by its size and by 30 s without a byte, so a large
+  segment that keeps arriving is never cut off. That ceiling surfaced as `NSPOSIXErrorDomain Code=60`,
+  which named neither cause; a stall now says `body stalled, no bytes for 30 s after <received>/<expected>
+  bytes in <elapsed> s`. A seek that abandons a body with at most 2 MB left, at a rate that brings it in within 3 s,
+  drains it and keeps the connection, and the next request waits for that instead of opening a
+  second connection beside it; a larger or slower remainder closes it at once. With the FIFO full the current segment is read to its
+  end, so a paused session leaves the connection idle between two requests, not mid-body. Measured on a
+  loopback origin at 200 KB/s with 11.6 MB segments: before, the probe died at 45.1 s with `Code=60` and
+  the session left the ingest; after, the ingest held and played. The h2 path's 45 s resource timeout
+  is lifted the same way (#732, thanks @qoli for the paired device runs).
 
 - **The package compiles in Release with Xcode 26 again.** `FelResidualMeasure` (the
   `AETHER_FEL_MEASURE` diagnostic from 7.37.0) formatted its luma-band line inside the closure it
