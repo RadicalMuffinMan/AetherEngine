@@ -15,6 +15,7 @@ swift run aetherctl dvsurvey <url>       # survey per-frame Dolby Vision L1 / L2
 swift run aetherctl pktdump <url>        # dump raw demuxer packet timing (dts/pts/keyframe) per open profile
 swift run aetherctl dualsubs <file> ...  # dual subtitle-track render probe (--primary / --secondary stream index)
 swift run aetherctl extract <url>        # FrameExtractor still-image extraction + leak testing
+swift run aetherctl scrubpreview <url>   # Dolby Vision Profile 5 / 10.0 compositor scrub previews, resident and from the source
 swift run aetherctl audio [--seconds N] <url>   # audio-only pipeline smoke test (default 10 s)
 swift run aetherctl audiotap <url>       # decode the PCM audio tap headless, write mono 48 kHz WAV (#95)
 swift run aetherctl bgaudio <url>        # SW-path background-audio keepalive probe (iOS background behavior)
@@ -29,7 +30,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Twenty-three subcommands plus the bare-URL `serve` alias.
+Twenty-four subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -75,7 +76,7 @@ open 'http://127.0.0.1:<port>/<token>/master.m3u8'   # macOS QuickTime
 
 `--start-position S` starts the session at S seconds, the resume anchor a host passes to `load(url:startPosition:)`. Also available on `play`.
 
-`--atmos-bed <layout>` is `LoadOptions.objectAudioRendering = .apac(layout)` (`5.1.2`, `5.1.4`, `7.1.2`, `7.1.4` or `9.1.6`, #731, #744), rendered only by a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` traits: a TrueHD Atmos or DTS:X track is rendered into that bed and served as APAC, so a master reads `CODECS="…,apac.31.03"` (up to 12 channels) or `apac.31.04` (16), and the log carries `TrueHD Atmos: objects rendered into …` (or `DTS:X: bed, heights and objects rendered into …`) and the `[SpatialAudioBridge] bed levels` lines. A DTS-HD MA track that LibDTSX does not confirm as DTS:X logs `DTS-HD MA track is not DTS:X LibDTSX renders (…); keeping the channel bridge` instead. `--audio-index <n>` serves source stream `n`, as a host's audio picker would. Dolby's Unfold demo, whose TrueHD Atmos track is stream 1: `serve --no-dv --atmos-bed 7.1.4 --audio-index 1 unfold.m2ts`.
+`--atmos-bed <layout>` is `LoadOptions.objectAudioRendering = .apac(layout)` (`5.1.2`, `5.1.4`, `7.1.2`, `7.1.4` or `9.1.6`, #731, #744), rendered only by a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` traits: a TrueHD Atmos or DTS:X track is rendered into that bed and served as APAC, so a master reads `CODECS="…,apac.31.03"` (up to 12 channels) or `apac.31.04` (16), and the log carries `TrueHD Atmos: channel presentation split into … by the objects' energy` (or `DTS:X: bed and heights routed one to one into …`) and the `[SpatialAudioBridge] bed levels` lines. A DTS-HD MA track that LibDTSX does not confirm as DTS:X logs `DTS-HD MA track is not DTS:X LibDTSX renders (…); keeping the channel bridge` instead. `--audio-index <n>` serves source stream `n`, as a host's audio picker would. Dolby's Unfold demo, whose TrueHD Atmos track is stream 1: `serve --no-dv --atmos-bed 7.1.4 --audio-index 1 unfold.m2ts`. In a build with the `TrueHDReferenceRender` trait (and a LibTrueHD built with `matrix-interpolation`), `AETHER_TRUEHD_REFERENCE_RENDER=1` in the environment decodes the TrueHD track exactly and mixes its objects through the renderer instead (`… objects rendered into 7.1.4 (reference render, …)`), the reference the split is measured against: serve the file both ways, decode each APAC track to PCM and compare per channel.
 
 `--audio-delay <ms>` parks the server with the AE#464 audio offset already in its muxer, which is how the DELIVERED offset is measured rather than argued about: fetch the media playlist and walk its segments, then read the first audio and video packet timestamps out of `init.mp4` + a segment with `ffprobe -show_entries packet=stream_index,pts_time`. On a 30 fps H.264 + AAC fixture the source's own alignment is +21.8 ms, `--audio-delay 200` reads +221.8 ms and `--audio-delay -150` reads -128.2 ms, i.e. exactly the offset asked for, with the video timestamp unchanged in every arm.
 
@@ -107,6 +108,7 @@ swift run aetherctl play --live --dvr-window 1800 --audio-stats <url>           
 swift run aetherctl play --live --native-hls <master.m3u8>      # nativeRemoteHLS bypass (carriage watchdog + #293 probe)
 swift run aetherctl play --sidecar de=/tmp/de.srt --subs de <master.m3u8>   # declare a sidecar at load (#316)
 swift run aetherctl play --native-hls --trust-any-certificate <https master.m3u8>  # the AE#495 origin relay
+swift run aetherctl play --atmos-bed 7.1.4 <truehd-atmos.mkv>  # render TrueHD Atmos or DTS:X into a bed as APAC (LoadOptions.objectAudioRendering); the 1 Hz line adds obj=<active>/<declared> up=<overhead> bed=<layout>, and hch=<n> for height channels
 swift run aetherctl play --fel <p7-file.mkv>                    # opt in to the Profile 7 FEL dual-layer route (off by default, like LoadOptions.preferDualLayerDolbyVision; --no-fel / --no-dual-layer are accepted and do nothing)
 swift run aetherctl play --fel --surface --cycle-el 10 <p7-file.mkv>   # flip the residual off and on every 10 s over a visible window (--window is the same flag)
 swift run aetherctl play --fel --surface --dv-pin 'darkest:240,period:2' <url>   # DEBUG: pulse a pinned frame's DV metadata (from dvsurvey)
@@ -283,7 +285,12 @@ connection after five seconds and cost exactly one re-request at the frontier wh
 On a finite HEVC-in-MPEG-TS HLS VOD (the AE#268 ingest) the same flag puts the playlist and every
 segment on one persistent HTTP/1.1 connection (AE#732); the observable there is the
 `[HLSVODIngest] AE#732 connection ... open` and `... closed after N requests reason=...` lines, one
-pair per connection, and a run without seeks should show exactly one.
+pair per connection. A seek mid-body logs `draining abandoned body, <received>/<expected> bytes` and
+then `drained, kept for the next request`, or closes with `abandoned mid-body`; a stalled body ends
+the session with `body stalled, no bytes for 30 s after ...`. The engine's own repositions onto segment
+0 right after the open still cost one connection each. For the slow-origin case, serve 11 MB HEVC-in-TS
+segments from a keep-alive origin at 200 KB/s shared across its connections: each segment then takes
+about 58 s, longer than the 45 s a whole exchange used to be allowed (#732).
 
 `--progressive-segments` sets `LoadOptions.progressiveSegmentDelivery`: each VOD segment is served
 while it is written. Run it against a throttled origin and compare the `FIRSTFRAME` and first
@@ -513,6 +520,14 @@ swift run aetherctl pktdump --at 660 --count 300 --profile stillExtraction <url>
 `--profile` defaults to `playback`; `stillExtraction` is the third open profile, the one the `FrameExtractor` uses (a short-range AVIO with its own thread count), for comparing what a still-extraction open resolves against what playback resolves.
 
 The profile differential is the diagnostic: a `video_delay=0` plus NOPTS or non-monotonic dts under one profile while the other is clean means that profile's open path cannot reconstruct decode-order dts for B-frame content (the #93 post-recovery judder root cause). Backed by the public `PacketTimingProbe.run(url:seekSeconds:packetCount:profileName:)`.
+
+## scrubpreview
+
+Loads a Dolby Vision Profile 5 / 10.0 source on the native path, plays it for `--warm S` seconds (default 4), then asks `showScrubPreview(atSeconds:in:)` for each position in `--at s1,s2,...` and prints whether a picture came, how long it took, the span it stands for, and whether the position was resident. A position inside the resident window is cut from the segment cache, one outside it is read off the source as the keyframe that opens its plan segment, so `--throttle-kbps N` (which keeps the producer close to the playhead) is how one run covers both. `--keep DIR` copies the session's preview files out before teardown: `seg<N>-*.mp4` came from the cache, `plan<N>-*.mp4` from the source, and comparing them with `ffprobe -show_data_hash` against the source's own keyframes is the byte-for-byte check. Exit codes: `0` every position showed a picture, `1` load failed or the source does not draw its previews in a view, `2` at least one position showed none.
+
+```bash
+swift run aetherctl scrubpreview --throttle-kbps 20000 --at 2,30,50,65 --keep /tmp/previews <p5-source>
+```
 
 ## extract
 
