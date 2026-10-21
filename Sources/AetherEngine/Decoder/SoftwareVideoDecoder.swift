@@ -52,6 +52,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// smeared picture names its own cause instead of looking like a renderer bug.
     private var loggedSARReject = false
 
+    /// AV1 Dolby Vision Profile 10.1 (`AV1DolbyVisionRPU.carriesProfile10_1`): every frame gets the RPU
+    /// of its temporal unit attached, the way `HardwareVideoDecoder` does it where AV1 decodes in
+    /// hardware. The frames already come from a pool of our own, which is what the system's Dolby Vision
+    /// display management needs to apply an attached RPU (see `HardwareVideoDecoder.handleDecodedFrame`).
+    private var attachesAV1DolbyVisionRPU = false
+    private let rpuTable = AV1DolbyVisionRPUTable(logPrefix: "[SWDecoder]")
+
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth = 0
     private var poolHeight = 0
@@ -246,9 +253,11 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
         let isHDRTransfer = ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
         use10Bit = bitsPerSample > 8 || isHDRTransfer
+        attachesAV1DolbyVisionRPU = AV1DolbyVisionRPU.carriesProfile10_1(stream: stream)
 
         // Release-visible log (no #if DEBUG): needed for TestFlight users and DrHurt #4 black-screen reports.
-        EngineLog.emit("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")", category: .swPlayback)
+        EngineLog.emit("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")"
+                       + (attachesAV1DolbyVisionRPU ? ", Dolby Vision 10.1 (RPU attached per frame)" : ""), category: .swPlayback)
     }
 
     /// #407: the timestamp to put on a decoded frame that carries none, or nil when the frame is
@@ -288,6 +297,12 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// every subsequent send hit the same wall: video wedged permanently until a seek flushed
     /// the decoder, while audio kept playing.
     func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64? = nil) {
+        // Before the send, outside the lock (libdovi parses the RPU here). A packet a flush then retires
+        // leaves an entry no frame will ask for, bounded by the table.
+        if attachesAV1DolbyVisionRPU, let data = packet.pointee.data, packet.pointee.size > 0 {
+            rpuTable.store(temporalUnit: UnsafePointer(data), size: Int(packet.pointee.size),
+                           pts: SourceTimestampBounds.cmTime(ticks: packet.pointee.pts, timeBase: timeBase))
+        }
         lock.lock()
         // AE#492: a packet decided on before a flush must not be sent after it. Checked here rather
         // than at the caller because only this lock orders the two: `flush()` takes it to retire the
@@ -440,6 +455,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         skipLock.lock()
         _framesDecoded &+= 1
         skipLock.unlock()
+        // Taken before the pre-roll skip, so a skipped frame does not leave its RPU in the table.
+        let rpu = attachesAV1DolbyVisionRPU ? rpuTable.take(for: cmPTS) : nil
         if let threshold = skipUntilPTS, cmPTS.isValid {
             if CMTimeCompare(cmPTS, threshold) < 0 {
                 return
@@ -476,6 +493,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             guard let converted = convertFrameToPixelBuffer(f) else { return }
             pixelBuffer = converted
         }
+        if attachesAV1DolbyVisionRPU {
+            AV1DolbyVisionRPUTable.attach(AV1DolbyVisionRPU.attachEnabled ? rpu : nil, to: pixelBuffer)
+        }
 
         reportDecodedFormat(pixelBuffer: pixelBuffer)
 
@@ -508,6 +528,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         _feedEpoch &+= 1
         // Deinterlacer temporal references are stale across seeks; drop the graph (lazily rebuilt on next interlaced frame).
         if resetFilterGraph { deinterlacer.teardown() }
+        rpuTable.removeAll()
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
     }

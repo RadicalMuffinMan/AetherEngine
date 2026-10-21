@@ -1,6 +1,7 @@
 import Foundation
 import CoreMedia
 import CoreVideo
+import IOSurface
 import VideoToolbox
 import AetherLibavformat
 import AetherLibavcodec
@@ -47,6 +48,26 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var streamCodecID = AV_CODEC_ID_NONE
     private var streamProfile = AV_PROFILE_UNKNOWN
     private var reportedPixelBufferType: OSType = 0
+
+    /// AV1 Dolby Vision Profile 10.1 (`decodesAV1DolbyVision`): every frame gets the RPU of its temporal
+    /// unit attached (`AV1DolbyVisionRPU`), passed from `decode` to the output callback by presentation
+    /// time rather than as the frame refcon, so a frame VideoToolbox drops costs a missing attachment,
+    /// never an over-release.
+    private var attachesAV1DolbyVisionRPU = false
+    private let rpuFrameCopier = FrameCopier()
+    private let rpuTable = AV1DolbyVisionRPUTable(logPrefix: "[HardwareVideoDecoder]")
+
+    /// Whether this device decodes AV1 in hardware (Apple silicon from M3 and A17 Pro on).
+    static var canDecodeAV1InHardware: Bool { VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) }
+
+    /// AV1 Dolby Vision Profile 10.1 on hardware that decodes AV1: the one AV1 stream this decoder
+    /// opens, since Dolby Vision display management needs its RPU on the decoded frame, which only a
+    /// host that decodes the frame itself can put there. Elsewhere, and with
+    /// `AetherEngine.decodesAV1DolbyVisionInSoftware`, `SoftwareVideoDecoder` attaches it.
+    static func decodesAV1DolbyVision(stream: UnsafeMutablePointer<AVStream>) -> Bool {
+        canDecodeAV1InHardware && !AV1DolbyVisionRPU.softwareDecodeForced
+            && AV1DolbyVisionRPU.carriesProfile10_1(stream: stream)
+    }
 
     /// Skip pre-seek RASL frames to avoid the "fast forward" effect; decoded for reference but not delivered.
     /// Guarded by `skipLock` not `lock`: close() holds `lock` across VTDecompressionSessionWaitForAsynchronousFrames,
@@ -273,24 +294,44 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             )
         }
 
-        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else {
+        let isAV1 = codecpar.pointee.codec_id == AV_CODEC_ID_AV1
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC || (isAV1 && Self.canDecodeAV1InHardware) else {
             throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
         }
 
-        // 1. Build CMVideoFormatDescription from the hvcC extradata via
+        // 1. Build CMVideoFormatDescription from the hvcC (HEVC) or av1C (AV1) extradata via
         //    kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms (same shape AVFoundation uses for .mp4/.mkv).
+        //    Matroska's AV1 CodecPrivate is the av1C record, and its blocks are the low-overhead OBU
+        //    temporal units VideoToolbox takes as samples.
         guard let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 else {
             throw VideoDecoderError.noExtradata
         }
-        let hvcCData = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
+        let configData = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
         var fd: CMVideoFormatDescription?
-        let atomsDict: NSDictionary = ["hvcC": hvcCData]
-        let extensions: NSDictionary = [
+        let atomsDict: NSDictionary = [isAV1 ? "av1C" : "hvcC": configData]
+        let extensions = NSMutableDictionary(dictionary: [
             kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atomsDict,
-        ]
+        ])
+        // AV1: without colour in the description VideoToolbox guesses (`ColorInfoGuessedBy`) and tags its
+        // output BT.709 SDR in the buffer's CGColorSpace and the IOSurface's colour space ID, under the
+        // PQ transfer the frame handler attaches afterwards. A frame that says both is shown as neither:
+        // on the built-in XDR panel a PQ source came out blown out, while a screen capture looked right.
+        // HEVC gets its colour from the VUI in the hvcC's SPS and needs none of this.
+        if isAV1 {
+            if let primaries = ColorAttachments.primaries(codecpar.pointee.color_primaries) {
+                extensions[kCMFormatDescriptionExtension_ColorPrimaries] = primaries
+            }
+            if let transfer = ColorAttachments.transfer(codecpar.pointee.color_trc) {
+                extensions[kCMFormatDescriptionExtension_TransferFunction] = transfer
+            }
+            if let matrix = ColorAttachments.matrix(codecpar.pointee.color_space) {
+                extensions[kCMFormatDescriptionExtension_YCbCrMatrix] = matrix
+            }
+            extensions[kCMFormatDescriptionExtension_FullRangeVideo] = codecpar.pointee.color_range == AVCOL_RANGE_JPEG
+        }
         let fdStatus = CMVideoFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
-            codecType: kCMVideoCodecType_HEVC,
+            codecType: isAV1 ? kCMVideoCodecType_AV1 : kCMVideoCodecType_HEVC,
             width: width,
             height: height,
             extensions: extensions,
@@ -348,8 +389,10 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         session = createdSession
 
+        attachesAV1DolbyVisionRPU = Self.decodesAV1DolbyVision(stream: stream)
         EngineLog.emit(
-            "[HardwareVideoDecoder] opened HEVC \(width)x\(height) "
+            "[HardwareVideoDecoder] opened \(isAV1 ? "AV1" : "HEVC") \(width)x\(height) "
+            + (attachesAV1DolbyVisionRPU ? "Dolby Vision 10.1 (RPU attached per frame) " : "")
             + "\(use10Bit ? "10-bit" : "8-bit") "
             + "transfer=\(codecpar.pointee.color_trc.rawValue)",
             category: .swPlayback
@@ -617,6 +660,11 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             onFirstHDR10PlusDetected?()
         }
 
+        // Before the send: the output callback can fire before VTDecompressionSessionDecodeFrame returns.
+        if attachesAV1DolbyVisionRPU {
+            rpuTable.store(temporalUnit: UnsafePointer(data), size: size, pts: pts)
+        }
+
         // Tag non-keyframes as DependsOnOthers so VT can drop pre-seek RASL frames after a flush.
         if (packet.pointee.flags & AV_PKT_FLAG_KEY) == 0 {
             if let attachArray = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
@@ -718,6 +766,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         VTDecompressionSessionWaitForAsynchronousFrames(session)
         VTDecompressionSessionFinishDelayedFrames(session)
         hdr10PlusLock.lock(); hdr10PlusByPTS.removeAll(); hdr10PlusLock.unlock()
+        rpuTable.removeAll()
     }
 
     func close() {
@@ -771,6 +820,8 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             hdr10PlusData = hdr10PlusByPTS.removeValue(forKey: HDR10PlusKey(pts))
             hdr10PlusLock.unlock()
         }
+        // Taken before the pre-roll skip, so a skipped frame does not leave its RPU in the table.
+        let rpu = attachesAV1DolbyVisionRPU ? rpuTable.take(for: pts) : nil
         if let threshold = skipUntilPTS {
             if CMTimeCompare(pts, threshold) < 0 {
                 return
@@ -803,8 +854,20 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             CVBufferRemoveAttachment(imageBuffer, kCVImageBufferPixelAspectRatioKey)
         }
 
-        reportDecodedFormat(imageBuffer)
-        onFrame?(imageBuffer, pts, hdr10PlusData)
+        var outputBuffer = imageBuffer
+        if attachesAV1DolbyVisionRPU {
+            // On VideoToolbox's own output buffer the attachment is set but never reaches the panel: viewed
+            // on the built-in XDR display, switching the RPU off and on changed nothing, and neither did the
+            // layer's dynamic range, while the same RPU on a copy in a pool of our own was visibly applied
+            // and responded to both (DVLab ab-test2, rounds 1 and 2). So the frame goes out as that copy.
+            if let copy = rpuFrameCopier.copy(imageBuffer) {
+                outputBuffer = copy
+            }
+            AV1DolbyVisionRPUTable.attach(AV1DolbyVisionRPU.attachEnabled ? rpu : nil, to: outputBuffer)
+        }
+
+        reportDecodedFormat(outputBuffer)
+        onFrame?(outputBuffer, pts, hdr10PlusData)
     }
 
     /// VideoToolbox decodes straight into the display buffer, so the buffer IS the decoded picture; its
