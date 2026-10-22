@@ -1405,6 +1405,10 @@ public final class AetherEngine: ObservableObject {
     /// Phase D: forward-prefetch lead while the OCR worker is armed; exceeds
     /// subtitleOCRLeadSeconds so the packet store actually holds the worker's window.
     nonisolated static let subtitleOCRPrefetchLeadSeconds: Double = 270
+    /// When a native select of an OCR rendition that is still waiting for the worker to cover
+    /// `subtitleOCRLeadSeconds` reports what it is waiting on. The worker is armed on demand, so the
+    /// wait is the prefetcher reading 270 s of the source at link rate plus the recognition.
+    nonisolated static let subtitleOCRPrefillReportSeconds: Double = 60
     /// Phase D: per-tick decode cap; smooths the initial 240 s backfill over a few ticks
     /// instead of one long MainActor pass.
     nonisolated static let subtitleOCRMaxPacketsPerTick: Int = 48

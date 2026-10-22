@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A bitmap subtitle track no longer makes the forward prefetch read four and a half minutes
+  ahead while the viewer stays fullscreen.** Selecting a PGS / DVB / DVD track armed the OCR worker
+  for its native rendition at once, and with it the prefetch lead of 270 s; on Matroska that reader
+  pulls every cluster, so a 4K remux paid ten times the prefetch bytes of the overlay-only lead (434
+  against 17 MB in 90 s), and an Apple TV 4K (1st generation) dropped frames on an 89 Mbit/s source.
+  The worker now follows the native selection (PiP, AirPlay, external display), and the native
+  select waits until it has recognized the whole window AVKit fetches in one burst, so the
+  rendition is never handed over partly empty.
+  
 - **A session-preserving reload recovers from its own master rejection again.** The reactive
   master→media fallback's single-shot latch reset only in `load()`'s prologue, which the reload
   paths (`reloadWithAudioOverride`, `reloadAtCurrentPosition`) never pass through: a fallback spent
@@ -21,6 +30,7 @@ the public-API contract.
   and the session surfaced `.masterPlaylistRejected` ("Cannot open"). The latch now resets in
   `stopInternal`, the shared teardown every rebuild passes through, so the reload's fresh master
   gets its own single-shot.
+  
 
 ## [7.45.0] - 2026-10-21
 
