@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A session-preserving reload recovers from its own master rejection again.** The reactive
+  master→media fallback's single-shot latch reset only in `load()`'s prologue, which the reload
+  paths (`reloadWithAudioOverride`, `reloadAtCurrentPosition`) never pass through: a fallback spent
+  on the outgoing session's master — e.g. a Dolby Vision P8.1 source's one `-11868` + media
+  fallback at mount — leaked into the reload. The rebuilt master's own rejection (an audio-track
+  switch to AC-3 on macOS) was then classified and signalled, but the media mount never happened
+  and the session surfaced `.masterPlaylistRejected` ("Cannot open"). The latch now resets in
+  `stopInternal`, the shared teardown every rebuild passes through, so the reload's fresh master
+  gets its own single-shot.
 
 ## [7.45.0] - 2026-10-21
 
