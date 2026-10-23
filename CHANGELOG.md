@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.47.0] - 2026-10-23
+
 ### Added
 
 - **3D on visionOS: MV-HEVC keeps its second view, and side-by-side / over-under HEVC plays as stereo (AE#812, thanks @williamliu0516).**
@@ -41,6 +45,15 @@ the public-API contract.
 
 ### Fixed
 
+- **The Atmos activator plays on HDMI again.** Since 7.45.0 (AE#834) it compared the route against
+  `"HDMI"`, while `AVAudioSession.Port.HDMI` is `"HDMIOutput"`, so it refused every HDMI route and logged
+  `off on route ports=[HDMIOutput]`. Receivers and soundbars that need the silent Atmos stream (a Samsung
+  HW-Q990C, a reporter's AV receiver) stopped showing Dolby Atmos for TrueHD Atmos rendered to APAC.
+- **A resume from pause no longer reports one tick of `.rebuffering` (Sodalite#168).** Every resume passes
+  through `waitingToPlay` with `AVPlayerWaitingWhileEvaluatingBufferingRateReason` for a frame or two, and
+  the native and audio-only hosts folded any wait into the buffering flag, so a host that raises a spinner
+  on it flickered its controls on each Play press. That evaluation no longer counts; a wait that is really
+  short of media moves on to `toMinimizeStalls`, which still does.
 - **A software live join starts picture and sound together (AE#844, thanks @l984-451).** A join reads
   the source mid-GOP, and the clock armed on the first audio while the first picture only decoded at
   the next keyframe: 1.3 to 2.9 s of sound over a black screen on every join, measured on an Apple TV
