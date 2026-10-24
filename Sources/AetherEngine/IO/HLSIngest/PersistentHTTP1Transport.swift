@@ -72,23 +72,36 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
               diagnosticContext: SourceNetworkDiagnostics.Context? = nil,
               role: SourceNetworkDiagnostics.Role = .boundedBody) async throws -> Body {
         let trace = SourceNetworkDiagnostics.Trace(role: role, context: diagnosticContext)
+        let hop = OpenHop(url: url)
         do {
-            return try await open(url, headers: headers, limit: limit, trace: trace)
+            return try await open(url, headers: headers, limit: limit, trace: trace, hop: hop)
         } catch {
+            // The hop that failed, with the status its head carried: a failure after a redirect or
+            // after the head arrived (an oversized or malformed answer) names what was answered.
             trace.record(error is BoundedFetch.Exceeded ? .bodyLimitExceeded : .completed,
-                         originalURL: url, url: url, error: error)
+                         originalURL: url, url: hop.url, status: hop.status, error: error)
             throw error
         }
     }
 
+    /// The request an open is on, for the terminal event of an open that fails. Task-confined.
+    private final class OpenHop {
+        var url: URL
+        var status: Int?
+        init(url: URL) { self.url = url }
+    }
+
     private func open(_ url: URL, headers: [String: String], limit: Int,
-                      trace: SourceNetworkDiagnostics.Trace) async throws -> Body {
+                      trace: SourceNetworkDiagnostics.Trace, hop: OpenHop) async throws -> Body {
         var target = url
         var hops = 0
         while true {
+            hop.url = target
+            hop.status = nil
             let hopHeaders = RedirectHeaderPolicy.headersToReplay(
                 extraHeaders: headers, originalURL: url, redirectURL: target)
             let (connection, head, reused) = try await request(target, headers: hopHeaders)
+            hop.status = head.status
             trace.record(.response, originalURL: url, url: target, status: head.status)
             let success = (200..<300).contains(head.status)
             let location = HeldSourceConnection.redirectLocation(head)

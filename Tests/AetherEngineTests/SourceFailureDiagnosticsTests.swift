@@ -311,8 +311,37 @@ struct SourceFailureDiagnosticsTests {
         }
         let captured = events.snapshot()
         #expect(captured.map(\.phase) == [.response, .bodyLimitExceeded])
-        #expect(captured.first?.status == 200)
+        #expect(captured.allSatisfy { $0.status == 200 }, "the terminal event keeps the status the head carried")
         #expect(captured.allSatisfy { $0.context == nil && $0.role == .hlsSegment })
+        #expect(Set(captured.map(\.requestID)).count == 1)
+    }
+
+    // A held open that fails after a redirect names the hop that answered, not the URL it started at.
+    @Test("A held open that fails after a redirect reports the failing hop and its status",
+          .timeLimit(.minutes(1)))
+    func heldOpenFailureAfterRedirect() async throws {
+        let payload = Data(repeating: 0x47, count: 4096)
+        let server = try #require(ScriptedOriginServer { request in
+            request.path.hasSuffix("/moved.ts")
+                ? .init(status: 200, declaredLength: Int64(payload.count), close: true, body: payload)
+                : .init(status: 302, declaredLength: 0, location: "/moved.ts")
+        })
+        defer { server.stop() }
+        let transport = PersistentHTTP1Transport(label: "diagnostics-redirect-test")
+        defer { transport.close() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString).ts")!
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { if $0.originalURL == url { events.add($0) } }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        await #expect(throws: BoundedFetch.Exceeded.self) {
+            _ = try await transport.get(url, headers: [:], limit: 16, role: .hlsSegment)
+        }
+        let captured = events.snapshot()
+        #expect(captured.map(\.phase) == [.response, .redirect, .response, .bodyLimitExceeded])
+        let terminal = try #require(captured.last)
+        #expect(terminal.url?.path == "/moved.ts")
+        #expect(terminal.status == 200)
         #expect(Set(captured.map(\.requestID)).count == 1)
     }
 

@@ -1297,7 +1297,9 @@ context before teardown, keeping the running session and its attribution intact.
 The held HTTP/1 HLS transport emits the same event contract: a streamed body emits
 `completed` only when it ends or fails, `body_limit_exceeded` when its bound is
 exceeded, and `abandoned` when the consumer drops or abandons it. The byte count
-excludes bytes discarded by a background drain. AVPlayer's own internal
+excludes bytes discarded by a background drain. An open that fails after a response
+head arrived reports the hop that answered (the redirect target, not the original
+URL) and that head's status. AVPlayer's own internal
 network requests are not exposed, and a source path without instrumentation or
 captured context cannot be attributed by this API.
 
