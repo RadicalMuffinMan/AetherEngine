@@ -41,6 +41,11 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var _skipUntilPTS: CMTime?
     private let skipLock = NSLock()
 
+    var framesDecoded: UInt64 {
+        skipLock.lock(); defer { skipLock.unlock() }; return _framesDecoded
+    }
+    private var _framesDecoded: UInt64 = 0  // guarded by skipLock
+
     /// Clear the skip threshold only if it is still the one we acted on.
     private func clearSkip(ifStillAt threshold: CMTime) {
         skipLock.lock()
@@ -716,6 +721,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         imageBuffer: CVImageBuffer,
         pts: CMTime
     ) {
+        skipLock.lock()
+        _framesDecoded &+= 1
+        skipLock.unlock()
         if let threshold = skipUntilPTS {
             if CMTimeCompare(pts, threshold) < 0 {
                 return

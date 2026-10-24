@@ -150,6 +150,37 @@ public final class AetherEngine: ObservableObject {
 
     private let seekEventSubject = PassthroughSubject<SeekEvent, Never>()
 
+    /// #800: true while the software host holds the clock at rate 0 until the decoder has caught up
+    /// with its position. The clock standing still in that window is not a stall. See `ClockHoldEvent`.
+    @Published public internal(set) var isClockHeld = false
+
+    /// #800: one value per hold of the clock and per release, with how it ended. See `ClockHoldEvent`.
+    public var clockHoldEvents: AnyPublisher<ClockHoldEvent, Never> { clockHoldSubject.eraseToAnyPublisher() }
+
+    private let clockHoldSubject = PassthroughSubject<ClockHoldEvent, Never>()
+
+    /// The `AudioOutput` generation of the newest hold transition applied. The host reports off main and
+    /// each report hops here in its own task, so one that arrives behind a newer one is dropped.
+    private var clockHoldGeneration = -1
+
+    func applyClockHoldTransition(_ transition: AudioOutput.PrerollTransition) {
+        guard transition.generation >= clockHoldGeneration else { return }
+        if transition.generation == clockHoldGeneration, transition.event == .began { return }
+        clockHoldGeneration = transition.generation
+        let held = transition.event == .began
+        guard held != isClockHeld else { return }
+        isClockHeld = held
+        clockHoldSubject.send(transition.event)
+    }
+
+    /// Ends a hold with its session: the host's own cancellation arrives after the host is gone.
+    func endClockHold() {
+        clockHoldGeneration = -1
+        guard isClockHeld else { return }
+        isClockHeld = false
+        clockHoldSubject.send(.released(.cancelled))
+    }
+
     /// AE#792: the origin refused the session's credentials mid-session. One value per header set,
     /// the HTTP status (401 or 403), sent on the first refusal of that set, so a host can renew a
     /// lapsed or revoked token and hand it over with `updateRequestHeaders(_:)` while the reader is
@@ -7857,6 +7888,7 @@ public final class AetherEngine: ObservableObject {
 
         softwareCancellables.removeAll()
         softwareClockSessionZero = nil
+        endClockHold()
         // #353: the picture belongs to the session. Left standing, the next source would be laid out
         // against this one's rectangle for as long as it takes its own first frame to arrive.
         softwareDisplaySize = nil

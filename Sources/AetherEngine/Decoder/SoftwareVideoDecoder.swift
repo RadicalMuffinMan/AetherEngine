@@ -69,6 +69,11 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
     private var _skipUntilPTS: CMTime?
 
+    var framesDecoded: UInt64 {
+        skipLock.lock(); defer { skipLock.unlock() }; return _framesDecoded
+    }
+    private var _framesDecoded: UInt64 = 0  // guarded by skipLock
+
     /// AE#492: guarded by `lock`, the same one `flush()` and `decode(packet:epoch:)` take.
     private var _feedEpoch: UInt64 = 0
     var feedEpoch: UInt64 {
@@ -432,6 +437,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     private func emitInner(_ f: UnsafeMutablePointer<AVFrame>, timeBase tb: AVRational) {
         let cmPTS = SourceTimestampBounds.cmTime(ticks: f.pointee.pts, timeBase: tb)
+        skipLock.lock()
+        _framesDecoded &+= 1
+        skipLock.unlock()
         if let threshold = skipUntilPTS, cmPTS.isValid {
             if CMTimeCompare(cmPTS, threshold) < 0 {
                 return
