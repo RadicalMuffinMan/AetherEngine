@@ -34,6 +34,16 @@ the public-API contract.
 
 ### Fixed
 
+- **A pump that cannot keep up on the efficiency class stops dropping to it (#850, thanks @imbenjamin).**
+  The AE#286 relaxation moved the segment pump to `.utility` once it was 16 s ahead, on the
+  assumption that it still produces faster than real time there. A 4K Dolby Vision remux with
+  TrueHD Atmos rendered to APAC on an A15 Apple TV made 0.10 to 0.51x on `.utility`, so every
+  relaxed stretch drained the lead, the forward window never filled and VOD stalled every few
+  minutes. The pump now measures what it produces against wall time while relaxed and stays on
+  `.userInitiated` for the rest of the session once that falls below real time, and it rechecks
+  once a second instead of only at segment boundaries, where one slow segment had outlasted the
+  whole lead. A session that keeps up relaxes exactly as before.
+
 - **HDR10+ reaches the display on the software path (#814, thanks @williamliu0516).** The VideoToolbox decoder there never read the
   ST 2094-40 SEI, so a PQ HEVC title played as plain HDR10 and `videoFormat` stayed `.hdr10`; it now
   reports `.hdr10Plus` on the first message and hands each frame its payload as
