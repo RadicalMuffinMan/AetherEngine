@@ -229,6 +229,9 @@ final class SoftwarePlaybackHost {
     /// clock's real zero.
     nonisolated(unsafe) var onClockSessionZero: (@Sendable (Double) -> Void)?
 
+    /// #800: every hold of the clock by the preroll and its end, forwarded from `AudioOutput`, off-main.
+    nonisolated(unsafe) var onClockHoldTransition: (@Sendable (AudioOutput.PrerollTransition) -> Void)?
+
     /// AE#658: forwarded from the video decoder, off-main.
     nonisolated(unsafe) var onDecodedVideoFormat: (@Sendable (DecodedVideoFormat) -> Void)?
 
@@ -1389,6 +1392,12 @@ final class SoftwarePlaybackHost {
         self.audioOutput?.videoPrerollSatisfied = { [weak self] clock in
             guard self?.backgroundAudioOnly != true else { return nil }
             return prerollRenderer.prerollSatisfied(clock: clock, live: prerollLive)
+        }
+        // A decoder still working up to the target holds the clock past the plain timeout (#800).
+        let prerollDecoder = videoDecoder
+        self.audioOutput?.videoPrerollProgress = { prerollDecoder.framesDecoded }
+        self.audioOutput?.onPrerollTransition = { [weak self] transition in
+            self?.onClockHoldTransition?(transition)
         }
         // AE#395: the route this session plays into, the counterpart of the native host's line. Without
         // it a silent software session on a long-latency route and an audible one on HDMI log the same.

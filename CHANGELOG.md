@@ -10,7 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`isClockHeld` and `clockHoldEvents` publish the software path's clock hold (AE#800, thanks @cmcpherson274).**
+  The clock that waits for the first frames after a start, a seek, an in-place switch or a resume
+  stood at rate 0 with nothing but an `[AudioOutput]` log line to say so, so a host judging stalls
+  from the clock counted the hold as one, and with several engines at once could not tell whose line
+  it was. The level and a `.began` / `.released(.ready | .timedOut | .cancelled)` stream now come from
+  each engine instance. See `docs/api.md`.
+
 ### Fixed
+
+- **4K AV1 in software no longer starts its clock ahead of the picture after a seek (AE#800, thanks @cmcpherson274).**
+  The preroll gave up after a fixed 2 s, and libdav1d on an Apple TV 4K (A15) took 2.9 to 3.9 s to
+  decode from the keyframe up to a seek target in a 4K AV1 title, so the clock started 0.6 to 1.6 s
+  before the first frame and the frames due in that time dropped. The hold now runs on for as long as
+  the decoder keeps producing frames (the ones it skips on the way to the target included), up to 6 s;
+  a decoder that produces nothing still times out after 2 s.
 
 - **A title whose audio ends before its video plays the rest of the picture in silence (AE#847, thanks @narenh).**
   AVPlayer ends a muxed HLS item the moment its audio runs out, so a hybrid remux (a web video track

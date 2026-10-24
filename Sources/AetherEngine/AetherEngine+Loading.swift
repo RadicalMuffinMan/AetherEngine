@@ -2086,6 +2086,12 @@ extension AetherEngine {
                 self.decodedVideoFormat = format
             }
         }
+        host.onClockHoldTransition = { [weak self, weak host] transition in
+            Task { @MainActor in
+                guard let self, let host, self.softwareHost === host else { return }
+                self.applyClockHoldTransition(transition)
+            }
+        }
         // The clock's real session zero, for the chapter axis (`mediaChapters`).
         host.onClockSessionZero = { [weak self, weak host] zero in
             Task { @MainActor in
