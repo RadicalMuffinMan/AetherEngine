@@ -90,6 +90,15 @@ the public-API contract.
   loop reads again. Seen on DVD-Video, whose time-map seek settles at once: a seek past the first
   cell ended playback in 7 of 8 runs, in none of 8 with the fix (48 seeks that missed the cache).
 
+- **A session-preserving reload recovers from its own master rejection again (#849, thanks @adityabakare).**
+  The reactive master-to-media fallback is single-shot per session, and its latch was reset only in
+  `load()`'s prologue, which `reloadWithAudioOverride` and `reloadAtCurrentPosition` never pass
+  through. A fallback spent on the outgoing session's master (a Dolby Vision P8.1 source's one
+  `-11868` at mount) carried into the reload, so the rebuilt master's own rejection (an audio switch
+  to AC-3 on macOS) was signalled but never mounted the media playlist and ended the session at
+  `.masterPlaylistRejected` ("Cannot open"). The latch now resets in `stopInternal`, the teardown
+  every rebuild passes through.
+
 ## [7.47.0] - 2026-10-23
 
 ### Added
@@ -171,17 +180,6 @@ the public-API contract.
   The worker now follows the native selection (PiP, AirPlay, external display), and the native
   select waits until it has recognized the whole window AVKit fetches in one burst, so the
   rendition is never handed over partly empty.
-  
-- **A session-preserving reload recovers from its own master rejection again.** The reactive
-  master→media fallback's single-shot latch reset only in `load()`'s prologue, which the reload
-  paths (`reloadWithAudioOverride`, `reloadAtCurrentPosition`) never pass through: a fallback spent
-  on the outgoing session's master — e.g. a Dolby Vision P8.1 source's one `-11868` + media
-  fallback at mount — leaked into the reload. The rebuilt master's own rejection (an audio-track
-  switch to AC-3 on macOS) was then classified and signalled, but the media mount never happened
-  and the session surfaced `.masterPlaylistRejected` ("Cannot open"). The latch now resets in
-  `stopInternal`, the shared teardown every rebuild passes through, so the reload's fresh master
-  gets its own single-shot.
-  
 
 ## [7.45.0] - 2026-10-21
 

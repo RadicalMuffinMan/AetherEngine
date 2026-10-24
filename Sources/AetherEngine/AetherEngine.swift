@@ -2693,7 +2693,8 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let itemDeathConfirmSeconds: TimeInterval = 3.0
 
     /// Single-shot latch for the reactive master->media fallback (#98): fall back at most once per
-    /// session so a media reload that also fails cannot loop. Reset on each load.
+    /// session so a media reload that also fails cannot loop. Reset in loadSession and in
+    /// stopInternal, so a session-preserving rebuild gets its own (#849).
     var masterFallbackUsed = false
 
     /// #93 PiP skips: AVKit-side seeks (PiP +-15s buttons) bypass the engine seek API, so a far
@@ -7816,7 +7817,7 @@ public final class AetherEngine: ObservableObject {
         // (`reloadWithAudioOverride`, `reloadAtCurrentPosition`) reach loadNative directly and
         // never pass through there, so a fallback spent on the outgoing session's master used to
         // leak into the reload's, which then could not recover from its own master rejection and
-        // surfaced `.masterPlaylistRejected` instead of falling back (#98).
+        // surfaced `.masterPlaylistRejected` instead of falling back (#849).
         masterFallbackUsed = false
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
         // #356: counterpart to the install line, because a session-preserving reload lands here

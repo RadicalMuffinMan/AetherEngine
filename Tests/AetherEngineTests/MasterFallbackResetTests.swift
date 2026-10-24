@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-/// #98: the master->media fallback single-shot is per SESSION. A session-preserving rebuild (an
+/// #849: the master->media fallback (#98) single-shot is per SESSION. A session-preserving rebuild (an
 /// audio-track switch, `reloadAtCurrentPosition`) tears down through `stopInternal` and rebuilds a
 /// fresh `HLSVideoEngine` with its own master, so the new session deserves its own single-shot.
 /// The reset used to live only in `loadSession`'s prologue, which the reload path never passes
@@ -10,7 +10,7 @@ import Testing
 /// media fallback at mount) leaked into the reload, and the reload's own master rejection then
 /// surfaced `.masterPlaylistRejected` ("Cannot open") instead of falling back to the media
 /// playlist. The rejection was classified and signalled; the mount never came.
-@Suite("#98: the master-fallback single-shot resets across a session-preserving reload")
+@Suite("#849: the master-fallback single-shot resets across a session-preserving reload")
 @MainActor
 struct MasterFallbackResetTests {
 
