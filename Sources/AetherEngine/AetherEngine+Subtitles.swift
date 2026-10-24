@@ -125,9 +125,12 @@ extension AetherEngine {
         subtitleDrainTargets[.primary] = Int32(index)
         subtitleDrainDecoders[.primary] = nil
         subtitleDrainCursors[.primary] = nil
-        // Phase D: a bitmap track additionally arms the OCR worker feeding its native rendition.
-        // Armed BEFORE the prefetcher start so the raised lead is picked up.
-        if let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
+        // Phase D: a bitmap track additionally arms the OCR worker feeding its native rendition, but
+        // only while the host is showing that rendition (PiP / AirPlay / external display). Armed
+        // BEFORE the prefetcher start so the raised lead is picked up. Otherwise the native-selection
+        // path arms it on demand (`syncSubtitleOCRWithNativeSelection`).
+        if nativeSubtitleRenderingRequested,
+           let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
            nativeSubtitleTrackTable[ordinal].needsOCR {
             startSubtitleOCRWorker(ordinal: ordinal, streamIndex: Int32(index))
         }
@@ -2163,6 +2166,7 @@ extension AetherEngine {
         // Remembered before any guard: the #93 recovery reload replays the host's last request
         // onto the fresh item even when this call raced a not-yet-current player.
         nativeSubtitleReapplyOrdinal = ordinal
+        syncSubtitleOCRWithNativeSelection(ordinal: ordinal)
         // #15: lazy readers, run the side-demuxer only while a native track is selected (PiP), idle otherwise.
         // Sodalite#32: an eager read-to-EOF reader survives deselect (it is building whole-session coverage;
         // cancelling it on PiP exit left the store frozen at ~48s and every later .vtt served empty).
@@ -2214,7 +2218,19 @@ extension AetherEngine {
             // early when the reader stops making progress (EOF / read-ahead parked) so we never wait the full
             // deadline for content with little remaining.
             var prefilledCues: Int?
-            if let stores = nativeSubtitleReaderParams?.stores, ordinal < stores.count {
+            if ordinal < nativeSubtitleTrackTable.count, nativeSubtitleTrackTable[ordinal].needsOCR,
+               let store = nativeStore(atOrdinal: ordinal) {
+                // A bitmap rendition is filled by the OCR worker, which this selection may have
+                // just armed. Its window is known exactly, so wait for that rather than for cue ends:
+                // a forced track's cues are sparse and would never reach the heuristic's target.
+                let began = Date()
+                let exit = await awaitSubtitleOCRCoverage(ordinal: ordinal, store: store, item: item)
+                let waited = Int(Date().timeIntervalSince(began) * 1000)
+                EngineLog.emit("[AetherEngine] native subtitle OCR pre-fill done: ordinal=\(ordinal) "
+                               + "cues=\(store.cueCount) exit=\(exit) waited=\(waited)ms", category: .engine)
+                guard exit != "superseded" else { return }
+                prefilledCues = store.cueCount
+            } else if let stores = nativeSubtitleReaderParams?.stores, ordinal < stores.count {
                 let store = stores[ordinal]
                 let target = currentTime + 240.0
                 let deadline = Date().addingTimeInterval(15.0)

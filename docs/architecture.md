@@ -404,7 +404,7 @@ Sources/AetherEngine/
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)
 ├── FFmpegErrorConstants.swift               AVERROR sentinels Swift can't import from the C macros
 ├── AetherEngine+LiveSubtitleRenditions.swift Live path: the upstream master's `EXT-X-MEDIA:TYPE=SUBTITLES` renditions surfaced as tracks (synthetic ids from 300000) and, once one is selected, fetched as WebVTT segments onto the host-overlay surface; cues are placed by the playlist geometry the renditions share (`EXT-X-PROGRAM-DATE-TIME`), anchored at the playhead rather than at the head of a two-hour DVR playlist, and re-anchored when a producer seam moves the source axis (#359)
-├── AetherEngine+SubtitleOCR.swift           Arming, per-ordinal cursors and the MainActor tick of the bitmap-subtitle OCR worker that fills a text rendition for PiP / AirPlay / external display while a PGS / DVB / DVD track is selected
+├── AetherEngine+SubtitleOCR.swift           Arming, per-ordinal cursors and the MainActor tick of the bitmap-subtitle OCR worker that fills a text rendition for PiP / AirPlay / external display while a PGS / DVB / DVD track's rendition is selected natively (PiP / AirPlay / external display)
 ├── AetherEngine+TeletextPage.swift          The teletext caption page as a live setting: `setTeletextPage(_:)` rebuilds the drain decoder of every channel currently showing a teletext track and leaves the others alone, so a page libzvbi does not flag as a subtitle page is correctable without leaving the channel (#364)
 ├── AetherEngine+ScrubThumbnail.swift        Cache-backed scrub still for the active native session: decodes from already-produced SegmentCache bytes, so single-connection sources (debrid / torrent links) that refuse the FrameExtractor's second demuxer still get previews (#106)
 ├── SeekEvent.swift                          One statement about a seek's lifecycle (outcome plus the target it belonged to): `isSeeking` / `seekTarget` are a level signal, and a level cannot say why it fell (#38 follow-up)
@@ -420,6 +420,7 @@ Sources/AetherEngine/
 │   ├── AudioDecoder.swift                   SW path: libavcodec → PCM → CMSampleBuffer with channel-layout tagging that names the resampler's own order (#401)
 │   ├── AudioOutput.swift                    SW path: AVSampleBufferAudioRenderer + Synchronizer (master clock)
 │   ├── AudioPlaybackHost.swift              Audio-only path: FFmpeg demux + decode into AVSampleBufferAudioRenderer for codecs off the whitelist
+│   ├── AudioTailPadding.swift               Native path: silence in the delivered codec from where a title's audio ends to where its video does, written into the final segment at end of file, because AVPlayer ends an item when its audio runs out (AE#847)
 │   └── Tap/
 │       ├── AudioTapController.swift         Lifecycle owner for one tap: owns the AsyncStream continuation + (native path) the LoopbackAudioReader; one per engine, re-install replaces it (#95)
 │       ├── AudioTapDecoder.swift            FFmpeg decode of tap packets into mono Float32 48 kHz AVAudioPCMBuffers (lazy resampler, own lock discipline)
@@ -476,6 +477,7 @@ Sources/AetherEngine/
 │   ├── AVPlayerItemDiagnostics.swift        Item-bound log snapshots, coalesced notification/failure reads, bounded shared admission and asynchronous counter retirement
 │   ├── MallocBlockCensus.swift              In-process census of live malloc blocks by size class (#220), so a step in resident memory can name the allocation instead of being guessed at from a block count and a total
 │   ├── MallocBlockCensusTrigger.swift       Jump-triggered capture of that census: every kill on record is flat and then steps inside a single 30 s memprobe sample, so a periodic sampler can never catch the allocation (#220)
+│   ├── ThreadCPUSampler.swift               CPU time per thread group between two samples (consumed time, ended threads included), the `cpuprobe` line beside every memprobe; public so a host can profile its UI from a field log
 │   ├── VMRegionCensus.swift                 Per-`user_tag` census of the dirty + swapped pages `phys_footprint` counts, delta against the session's first tick: names the region a rising footprint rose in when every itemized bucket (heap census included) is flat, which is the state AE#445 kept ending in
 │   └── SubtitleDeliveryStatement.swift      Value + formatter for the #357 line stating what a drain tick did with the packets it found, so "nothing appeared on screen" is attributable from outside instead of inferred from an absent log line; `harvestHole` names the tick that decoded nothing on purpose, which would otherwise read as `empty` (#362); `landingWithheld=` counts the sets refused the landing because the ground between them and the playhead was never read (#416)
 ├── Disc/

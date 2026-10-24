@@ -917,4 +917,20 @@ extension AetherEngine {
         let target = Swift.max(floor, edge - offset)
         await seek(to: target)
     }
+
+    /// AE#851: the loopback's first-serve gate, waited out before AVPlayer asks for the playlist.
+    /// Returns when the gate does (window ready, degraded at its deadline, or cancelled by a stop),
+    /// so a superseded load still has to check its generation afterwards.
+    nonisolated static func awaitFirstLiveWindow(_ provider: VideoSegmentProvider) async {
+        let timeout = LiveEdgePolicy.firstServeTimeoutSeconds(edgeCushionSeconds: provider.liveEdgeCushionSeconds)
+        let started = DispatchTime.now()
+        let ready = await BlockingWork.detached(priority: .userInitiated) {
+            provider.waitForFirstLiveSegment(timeout: timeout)
+        }.value
+        let waited = Double(DispatchTime.now().uptimeNanoseconds &- started.uptimeNanoseconds) / 1_000_000_000
+        EngineLog.emit(
+            "[AetherEngine] AE#851 first live window \(ready ? "ready" : "not ready") after "
+            + "\(LiveEdgePolicy.seconds(waited))s, before the item was attached",
+            category: .session)
+    }
 }

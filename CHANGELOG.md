@@ -10,6 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`isClockHeld` and `clockHoldEvents` publish the software path's clock hold (AE#800, thanks @cmcpherson274).**
+  The clock that waits for the first frames after a start, a seek, an in-place switch or a resume
+  stood at rate 0 with nothing but an `[AudioOutput]` log line to say so, so a host judging stalls
+  from the clock counted the hold as one, and with several engines at once could not tell whose line
+  it was. The level and a `.began` / `.released(.ready | .timedOut | .cancelled)` stream now come from
+  each engine instance. See `docs/api.md`.
+
+### Changed
+
+- **TrueHD Atmos is decoded exactly and its objects are rendered again (#731).**
+  Since 7.40.0 the `TrueHDObjectAudio` path built every output out of the stream's 7.1 channel
+  presentation, split by where the objects' energy lay, with the objects decoded without their matrix
+  interpolation and taken as plain points. Against the exact render that left the heights 0.4 to
+  1.1 dB low and at a correlation of 0.91 to 0.96, and could not tell front heights from rear ones
+  once the energy sat between them. The path now decodes the object presentation exactly (LibTrueHD
+  3.1.0, which ships its interpolating decode again) and mixes the objects into the layout, with
+  size, snap, zone masks, screen anchoring and the elevation switch, as before 7.40.0. `BedSplitter`
+  and the `TrueHDReferenceRender` measurement trait are gone. The trait stays opt-in, and the
+  integrator remains responsible for the licensing of what it enables.
+
 ### Fixed
 
 - **HDR10+ reaches the display on the software path.** The VideoToolbox decoder there never read the
@@ -20,6 +42,125 @@ the public-API contract.
   start with (`0xB5 0x00 0x3C 0x00 0x01 0x04`); they are put back. The loopback path needed nothing:
   the SEI is in every served fragment from MKV, MP4 and MPEG-TS sources, and AVPlayer's decoded buffers
   carry the per-frame metadata (measured on macOS 27 with a two-scene fixture).
+
+- **A plain-URL live open the origin answers with a status fails with that answer (#796, thanks @cmcpherson274).**
+  7.38.0 typed the refusal in the reader, but the live fail-fast after the probe dropped it, so a 503
+  reached the host as `liveSourceUnavailable` and `load` threw `DemuxerError.openFailed(-5)`. It now
+  publishes `sourceRateLimited` (429/503/509) or `sourceRefused` with the status in `underlyingCode`,
+  and `load` throws `AVIOReaderError.httpStatus`, as the release notes of 7.38.0 said it did. A live
+  open that reaches nothing keeps `liveSourceUnavailable`.
+
+- **4K AV1 in software no longer starts its clock ahead of the picture after a seek (AE#800, thanks @cmcpherson274).**
+  The preroll gave up after a fixed 2 s, and libdav1d on an Apple TV 4K (A15) took 2.9 to 3.9 s to
+  decode from the keyframe up to a seek target in a 4K AV1 title, so the clock started 0.6 to 1.6 s
+  before the first frame and the frames due in that time dropped. The hold now runs on for as long as
+  the decoder keeps producing frames (the ones it skips on the way to the target included), up to 6 s;
+  a decoder that produces nothing still times out after 2 s.
+
+- **A title whose audio ends before its video plays the rest of the picture in silence (AE#847, thanks @narenh).**
+  AVPlayer ends a muxed HLS item the moment its audio runs out, so a hybrid remux (a web video track
+  over a disc's audio) stopped at the end of the audio and its credits never played, and a resume
+  inside that tail ended the item at load. A re-seek in place (the AE#287 cure for the opposite case)
+  does not get past it, and neither does disabling the audio track. The final segment now carries
+  silence from where its audio stops to where its video does, encoded in the codec the track is
+  delivered in; AVPlayer bridges any gap in front of it on its own. Covered: AC-3, E-AC-3 and FLAC
+  stream copy, every FLAC / E-AC-3 bridge (TrueHD, DTS, PCM and the rest), and AAC (LC) and ALAC through
+  the encoders FFmpegBuild 3.10.0 adds (now pinned). A codec this build cannot encode (MP3, Opus, an APAC
+  bed) logs `AE#847 audio tail not padded` and ends as before. Tracks that end within half a second
+  of each other are muxed exactly as before. When the source arrives barely faster than its bitrate
+  and the silent tail is longer than the producer's lead, playback waits at the end of the audio until
+  the producer has reached the end of the file, then plays the tail.
+
+- **A seek that misses the software path's packet cache no longer ends playback at its landing (AE#811, thanks @williamliu0516).**
+  The miss empties the read-ahead store while holding the store's operation lock, and a demux-loop
+  read that began inside the seek's window could leave its wait at once (its reader was not current
+  yet), get the lock only after the seek had landed, find the store empty and return nil, which the
+  loop takes for end of stream: "end of media" at the landing. An empty store is now the end only
+  when the producer has seen the source's own end; before that the read throws `.interrupted` and the
+  loop reads again. Seen on DVD-Video, whose time-map seek settles at once: a seek past the first
+  cell ended playback in 7 of 8 runs, in none of 8 with the fix (48 seeks that missed the cache).
+
+## [7.47.0] - 2026-10-23
+
+### Added
+
+- **3D on visionOS: MV-HEVC keeps its second view, and side-by-side / over-under HEVC plays as stereo (AE#812, thanks @williamliu0516).**
+  An MV-HEVC stream reached AVPlayer as plain `hvc1` (movenc writes `lhvC` only for a stream marked
+  `AV_DISPOSITION_MULTILAYER`, and the muxer's new stream had no disposition), so only the base view
+  was decoded. A frame-packed source now gets Apple's `vexu { eyes, pack }` in its init segment (the box
+  AVAssetWriter writes for `ViewPackingKind`), read back by AVFoundation as a side-by-side or over-under
+  stereo track, with no re-encode. Both declare `REQ-VIDEO-LAYOUT="CH-STEREO"` (EXT-X-VERSION 12).
+  `LoadOptions.stereoPresentation` (`.automatic` default: MV-HEVC and a container's declared packing;
+  `.sideBySide` / `.overUnder` for files that say so only in their name; `.mono`). Frame packing is
+  signalled on HEVC only: AVPlayer refuses a packed H.264 init over HLS (-12927), so H.264 plays 2D.
+  Other systems still play these files in 2D. Measured on the visionOS 27 simulator and macOS 27;
+  `aetherctl serve --stereo auto|mono|sbs|ou` serves a source as visionOS gets it.
+- **MV-HEVC decodes both views through the engine.** The AE#187 hvcC canonicalization dropped every SEI
+  array, including the three_dimensional_reference_displays_info SEI (payload 176) Apple's MV-HEVC writer
+  puts in the `hvcC`; without it AVFoundation decoded the base view alone despite `lhvC` and every layer-1
+  slice (one buffer for both eyes from `AVPlayerVideoOutput`; the left eye only on a Vision Pro). A
+  multiview session now keeps that SEI and still drops every other one.
+
+### Changed
+
+- **`AtmosOutputActivator` runs for TrueHD Atmos only.** A DTS:X track rendered to APAC no longer
+  loops the silent Dolby Atmos stream beside it, so the receiver does not show Dolby Atmos for a DTS
+  programme.
+- **Object size, snap and zone masks are built only into the `TrueHDReferenceRender` measurement
+  build.** The shipped TrueHD path already took every object as a point; the panner's size and snap
+  code and the element state's size, snap and zone fields are now compiled out of it as well. No
+  change to what a shipped build plays.
+
+### Fixed
+
+- **The Atmos activator plays on HDMI again.** Since 7.45.0 (AE#834) it compared the route against
+  `"HDMI"`, while `AVAudioSession.Port.HDMI` is `"HDMIOutput"`, so it refused every HDMI route and logged
+  `off on route ports=[HDMIOutput]`. Receivers and soundbars that need the silent Atmos stream (a Samsung
+  HW-Q990C, a reporter's AV receiver) stopped showing Dolby Atmos for TrueHD Atmos rendered to APAC.
+- **A resume from pause no longer reports one tick of `.rebuffering` (Sodalite#168).** Every resume passes
+  through `waitingToPlay` with `AVPlayerWaitingWhileEvaluatingBufferingRateReason` for a frame or two, and
+  the native and audio-only hosts folded any wait into the buffering flag, so a host that raises a spinner
+  on it flickered its controls on each Play press. That evaluation no longer counts; a wait that is really
+  short of media moves on to `toMinimizeStalls`, which still does.
+- **A software live join starts picture and sound together (AE#844, thanks @l984-451).** A join reads
+  the source mid-GOP, and the clock armed on the first audio while the first picture only decoded at
+  the next keyframe: 1.3 to 2.9 s of sound over a black screen on every join, measured on an Apple TV
+  4K over Plex Live TV. The join now starts on the first keyframe. With a DVR ring the cursor moves
+  there and waits, at most 3 s, until the lead over the newest media stands where the unmoved start
+  had it (capped at the 2 s rebuffer resume lead); without one the audio read before that keyframe is
+  dropped. A stream that flags no keyframe keeps its old start after 3 s.
+
+## [7.46.0] - 2026-10-22
+
+### Added
+
+- **`ThreadCPUSampler` and a `cpuprobe` line next to every 30 s memprobe.** It states the CPU time
+  each thread group consumed over the window, as a share of one core, with the main thread and the
+  time of threads that ended inside the window on their own fields:
+  `cpuprobe t=30s cpu=87% main=6% threads=42 top=AetherEngine.HLSSegmentProducer.pump:29 ...`.
+  Consumed time, not the scheduler's decaying `cpu_usage`, so the figures add up. A field log from a
+  box nobody here owns is now a coarse profile instead of a guess. The class is public so a host can
+  sample its UI the same way outside a playback session.
+
+### Fixed
+
+- **A live edge cushion deeper than about 20 s now starts on tvOS (AE#851).** The loopback built
+  its first live window behind AVPlayer's first playlist request, so the whole wait ran on
+  AVPlayer's playlist timer, which gives up after about 20 s on tvOS (`-16839`, then `-1008`). A
+  raw MPEG-TS channel that fills at 1x after its connect burst therefore never started with a 30 s
+  cushion, and the plain `.standard` holdback (19.2 s on a strict-realtime origin with
+  TARGETDURATION 6) sat right at the limit. The engine now waits out the same gate before the item
+  is attached, so the request is answered at once and the session still plays the full cushion
+  behind the edge (29 s with 30 s asked, `aetherctl live --realtime --preroll 0`).
+
+- **A bitmap subtitle track no longer makes the forward prefetch read four and a half minutes
+  ahead while the viewer stays fullscreen.** Selecting a PGS / DVB / DVD track armed the OCR worker
+  for its native rendition at once, and with it the prefetch lead of 270 s; on Matroska that reader
+  pulls every cluster, so a 4K remux paid ten times the prefetch bytes of the overlay-only lead (434
+  against 17 MB in 90 s), and an Apple TV 4K (1st generation) dropped frames on an 89 Mbit/s source.
+  The worker now follows the native selection (PiP, AirPlay, external display), and the native
+  select waits until it has recognized the whole window AVKit fetches in one burst, so the
+  rendition is never handed over partly empty.
 
 ## [7.45.0] - 2026-10-21
 

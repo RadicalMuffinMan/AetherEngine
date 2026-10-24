@@ -78,7 +78,8 @@ public final class AetherEngine: ObservableObject {
 
     /// Mid-playback rebuffer flag. `state` stays `.playing` across a rebuffer to avoid icon flicker;
     /// gate on this when you need to distinguish a stall from real playback (AetherEngine#35).
-    /// Always false during initial load spin-up (`state == .loading`).
+    /// Always false during initial load spin-up (`state == .loading`). On the AVPlayer paths a wait
+    /// AVPlayer spends evaluating its buffering rate (every resume from pause) does not count.
     @Published public internal(set) var isBuffering: Bool = false {
         didSet { recomputePlaybackPhase() }
     }
@@ -149,6 +150,37 @@ public final class AetherEngine: ObservableObject {
 
     private let seekEventSubject = PassthroughSubject<SeekEvent, Never>()
 
+    /// #800: true while the software host holds the clock at rate 0 until the decoder has caught up
+    /// with its position. The clock standing still in that window is not a stall. See `ClockHoldEvent`.
+    @Published public internal(set) var isClockHeld = false
+
+    /// #800: one value per hold of the clock and per release, with how it ended. See `ClockHoldEvent`.
+    public var clockHoldEvents: AnyPublisher<ClockHoldEvent, Never> { clockHoldSubject.eraseToAnyPublisher() }
+
+    private let clockHoldSubject = PassthroughSubject<ClockHoldEvent, Never>()
+
+    /// The `AudioOutput` generation of the newest hold transition applied. The host reports off main and
+    /// each report hops here in its own task, so one that arrives behind a newer one is dropped.
+    private var clockHoldGeneration = -1
+
+    func applyClockHoldTransition(_ transition: AudioOutput.PrerollTransition) {
+        guard transition.generation >= clockHoldGeneration else { return }
+        if transition.generation == clockHoldGeneration, transition.event == .began { return }
+        clockHoldGeneration = transition.generation
+        let held = transition.event == .began
+        guard held != isClockHeld else { return }
+        isClockHeld = held
+        clockHoldSubject.send(transition.event)
+    }
+
+    /// Ends a hold with its session: the host's own cancellation arrives after the host is gone.
+    func endClockHold() {
+        clockHoldGeneration = -1
+        guard isClockHeld else { return }
+        isClockHeld = false
+        clockHoldSubject.send(.released(.cancelled))
+    }
+
     /// AE#792: the origin refused the session's credentials mid-session. One value per header set,
     /// the HTTP status (401 or 403), sent on the first refusal of that set, so a host can renew a
     /// lapsed or revoked token and hand it over with `updateRequestHeaders(_:)` while the reader is
@@ -195,6 +227,18 @@ public final class AetherEngine: ObservableObject {
     nonisolated static func publishesTransportPause(hasTransportRolled: Bool,
                                                     transportIntentIsPlaying: Bool) -> Bool {
         hasTransportRolled || !transportIntentIsPlaying
+    }
+
+    /// Whether an AVPlayer wait is a rebuffer (Sodalite#168).
+    ///
+    /// Every resume from pause passes through `waitingToPlay` with `evaluatingBufferingRate` for a frame
+    /// or two while AVPlayer checks a buffer it already holds. Counting that as a rebuffer published
+    /// `.rebuffering` on each Play press, and a host that raises a spinner on it flashed its chrome away
+    /// and back. A wait that is really short of media moves on to `toMinimizeStalls`, which still counts,
+    /// as does any other or missing reason.
+    nonisolated static func nativeWaitIsRebuffer(status: AVPlayer.TimeControlStatus,
+                                                 reason: AVPlayer.WaitingReason?) -> Bool {
+        status == .waitingToPlayAtSpecifiedRate && reason != .evaluatingBufferingRate
     }
 
     /// Reader source-fetch axis feeding `playbackPhase`. Updated off the demux thread via
@@ -1405,6 +1449,10 @@ public final class AetherEngine: ObservableObject {
     /// Phase D: forward-prefetch lead while the OCR worker is armed; exceeds
     /// subtitleOCRLeadSeconds so the packet store actually holds the worker's window.
     nonisolated static let subtitleOCRPrefetchLeadSeconds: Double = 270
+    /// When a native select of an OCR rendition that is still waiting for the worker to cover
+    /// `subtitleOCRLeadSeconds` reports what it is waiting on. The worker is armed on demand, so the
+    /// wait is the prefetcher reading 270 s of the source at link rate plus the recognition.
+    nonisolated static let subtitleOCRPrefillReportSeconds: Double = 60
     /// Phase D: per-tick decode cap; smooths the initial 240 s backfill over a few ticks
     /// instead of one long MainActor pass.
     nonisolated static let subtitleOCRMaxPacketsPerTick: Int = 48
@@ -4732,6 +4780,12 @@ public final class AetherEngine: ObservableObject {
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
         // Proceeding would dispatch on codec NONE and grind another ~30 s before erroring.
         if options.isLive, !probeOpened {
+            // #796: a live open the origin answered with a status fails with that answer, as the VOD
+            // path's does. Without this a 503 from a metered panel reached the host as an outage.
+            if let readerError = probeFailure as? AVIOReaderError, case .httpStatus = readerError {
+                publishLoadFailure(readerError)
+                throw readerError
+            }
             publishError(.liveSourceUnavailable, "Live source unavailable")
             throw DemuxerError.openFailed(code: -5)
         }
@@ -7840,6 +7894,7 @@ public final class AetherEngine: ObservableObject {
 
         softwareCancellables.removeAll()
         softwareClockSessionZero = nil
+        endClockHold()
         // #353: the picture belongs to the session. Left standing, the next source would be laid out
         // against this one's rectangle for as long as it takes its own first frame to arrive.
         softwareDisplaySize = nil
