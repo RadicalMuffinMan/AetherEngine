@@ -10,7 +10,7 @@ import Foundation
 /// in place of the lossless 7.1, which is why this is the host's choice and not the engine's.
 ///
 /// Applies to TrueHD sources FFmpeg identifies as Atmos (profile 30) and to DTS-HD Master Audio that
-/// LibDTSX confirms as DTS:X on its first frames, at 48 kHz, and only on OS 26 and later, where the
+/// decodes as DTS:X in its standard presentation on its first frame, at 48 kHz, and only on OS 26 and later, where the
 /// APAC encoder API exists. Everything else keeps `audioBridgeMode`.
 ///
 /// The software playback host (the route Dolby Vision Profile 7 FEL and video the hardware decoder

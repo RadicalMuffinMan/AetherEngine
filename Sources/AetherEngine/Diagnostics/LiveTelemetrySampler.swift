@@ -433,6 +433,7 @@ final class LiveTelemetrySampler {
             instantBitrateMbps: instantBitrateMbps,
             averageBitrateMbps: averageBitrateMbps,
             audioBridgeBitrateMbps: audioBridgeBitrateMbps,
+            objectAudio: engine.objectAudioActivity,
             observedFps: observedFps,
             droppedFrameCount: droppedFrameCount,
             forwardBufferSeconds: forwardBufferSeconds,
@@ -455,6 +456,8 @@ final class LiveTelemetrySampler {
             rssMb: AetherEngine.residentMemoryMB()
         )
         engine.applyLiveTelemetry(snapshot)
+        engine.refreshNativeBufferedPosition()
+        await engine.refreshSessionCacheStatus()
     }
 
     /// One line per tick on the native path (#93 post-recovery lag diagnosis). Discriminates

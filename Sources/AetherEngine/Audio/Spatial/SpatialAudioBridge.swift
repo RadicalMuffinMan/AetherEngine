@@ -90,6 +90,13 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private var stats = AudioBridge.FeedStats()
     private(set) var outputBytesLifetime: Int64 = 0
 
+    /// `LiveTelemetry.objectAudio`: written on the pump thread for every rendered block, read at 1 Hz
+    /// by the telemetry sampler. Behind a lock of its own, so that read never waits for a decode or
+    /// an encode holding `opLock`.
+    private let activityLock = NSLock()
+    private var latestActivity: ObjectAudioActivity?
+    var objectAudioActivity: ObjectAudioActivity? { activityLock.withLock { latestActivity } }
+
     /// AE#641: called once, on the pump thread, when the object decoder has been fed
     /// `silentFeedPacketThreshold` packets in a row without returning a block. The APAC
     /// sample entry is written up front, like FLAC's, so nothing downstream fails on its own and the
@@ -374,6 +381,8 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         }
         levelMeter.observe(roles: block.roles, updates: block.updates, configurationChanged: rebuilt)
         levelMeter.measureInput(roles: block.roles, planes: block.planes, frameCount: block.frameCount)
+        let activity = levelMeter.activity
+        activityLock.withLock { latestActivity = activity }
         // Anchor the encoder on the first block after a reset, and keep the encoder's input
         // contiguous with the source afterwards: a gap the decoder skipped (corrupt access units) is
         // filled with silence so everything after it stays on its timestamp.

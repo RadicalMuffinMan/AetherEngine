@@ -165,10 +165,17 @@ struct SpatialAudioBridgeTests {
     func dtsEligibility() {
         let on = ObjectAudioRendering.apac(.l714)
         // FFmpeg names only two of DTS:X's markers, so a plain DTS-HD MA label can still be DTS:X;
-        // LibDTSX decides on the track's first frames.
+        // the DTS:X decoder decides on the track's first frame.
         for profile in [AV_PROFILE_DTS_HD_MA, AV_PROFILE_DTS_HD_MA_X, AV_PROFILE_DTS_HD_MA_X_IMAX] {
             #expect(HLSVideoEngine.spatialRenderingLayout(rendering: on, codecID: AV_CODEC_ID_DTS, profile: profile, sampleRate: 48_000) == .l714)
             #expect(HLSVideoEngine.objectAudioSource(codecID: AV_CODEC_ID_DTS, profile: profile) == .dtsHDMasterAudio)
+        }
+        // Only layouts that carry the 7.1 bed and the four heights one to one.
+        for layout in SpatialSpeakerLayout.allCases {
+            let expected: SpatialSpeakerLayout? = layout == .l714 || layout == .l916 ? layout : nil
+            #expect(HLSVideoEngine.spatialRenderingLayout(
+                rendering: .apac(layout), codecID: AV_CODEC_ID_DTS, profile: AV_PROFILE_DTS_HD_MA_X,
+                sampleRate: 48_000) == expected, "\(layout.rawValue)")
         }
         for profile in [AV_PROFILE_DTS, AV_PROFILE_DTS_ES, AV_PROFILE_DTS_HD_HRA, AV_PROFILE_DTS_EXPRESS] {
             #expect(HLSVideoEngine.spatialRenderingLayout(rendering: on, codecID: AV_CODEC_ID_DTS, profile: profile, sampleRate: 48_000) == nil)
@@ -638,6 +645,28 @@ struct BedLevelMeterTests {
         _ = meter.restart()
         let afterSeek = try #require(feed(&meter, chunks: 118).first)
         #expect(afterSeek.contains("; objects: up to 0 active, 0 elevated;"))
+    }
+
+    @Test("the counts reach LiveTelemetry as they stand, with heights carried as bed channels")
+    func activityForTelemetry() {
+        var meter = BedLevelMeter(layout: .l714, sampleRate: 48_000)
+        #expect(meter.activity == ObjectAudioActivity(
+            layout: .l714, objects: 0, activeObjects: 0, elevatedObjects: 0, heightChannels: 0))
+        // DTS:X's standard presentation: its heights are bed channels, not objects.
+        meter.observe(roles: [.bed(.left), .bed(.right), .bed(.topFrontLeft), .bed(.topFrontRight)], updates: [])
+        #expect(meter.activity == ObjectAudioActivity(
+            layout: .l714, objects: 0, activeObjects: 0, elevatedObjects: 0, heightChannels: 2))
+        // TrueHD Atmos: an LFE and objects, one overhead, one at ear level, one muted.
+        meter.observe(roles: [.lfe, .object, .object, .object], updates: [ObjectAudioMetadataUpdate(
+            frameOffset: 0, rampFrames: 0, states: [
+                .init(), .init(position: SIMD3(0.5, 0.5, 1)), .init(position: SIMD3(0.5, 0.5, 0)), .init(gain: 0),
+            ])], configurationChanged: true)
+        #expect(meter.activity == ObjectAudioActivity(
+            layout: .l714, objects: 3, activeObjects: 2, elevatedObjects: 1, heightChannels: 0))
+        // A seek forgets which objects play until the decoder restates them; the configuration stays.
+        _ = meter.restart()
+        #expect(meter.activity.activeObjects == 0)
+        #expect(meter.activity.objects == 3)
     }
 
     @Test("a configuration without objects does not keep reporting the previous configuration's objects")
