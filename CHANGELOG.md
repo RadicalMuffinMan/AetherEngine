@@ -99,6 +99,14 @@ the public-API contract.
   `.masterPlaylistRejected` ("Cannot open"). The latch now resets in `stopInternal`, the teardown
   every rebuild passes through.
 
+- **An audio switch keeps the media playlist its session fell back to (#849).** When the display
+  refused the session's HDR master (`-11868` / `-11848`), the switch rebuilt a master that differs
+  only in its audio CODECS and paid the same rejection and in-place fallback again. It now serves
+  the media playlist straight away, and the rebuilt session carries the refusal so the switch after
+  it does too. A parse failure, an SDR refusal, `selectTitle` and `reloadAtCurrentPosition` still
+  route afresh: those either change the picture or follow a return from the background, where the
+  display may have changed.
+
 ## [7.47.0] - 2026-10-23
 
 ### Added

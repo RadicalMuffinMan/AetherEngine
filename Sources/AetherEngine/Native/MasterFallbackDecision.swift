@@ -100,4 +100,16 @@ enum MasterFallbackDecision {
     ) -> Bool {
         isMasterRejectionCode(errorCode) && servingMasterPlaylist && !alreadyFellBack
     }
+
+    /// AE#849: whether an audio switch rebuilds onto the media playlist its session already fell back to.
+    ///
+    /// The switch changes the audio and nothing the display was asked about, so a display that refused
+    /// this session's HDR master refuses the rebuilt one too and the rebuild pays the same rejection and
+    /// fallback again. Only a display refusal of an HDR master carries: a `-1002` parse failure is about
+    /// the playlist, which the switch rewrites, and an SDR refusal is about the window (#535).
+    static func audioSwitchKeepsMediaRoute(
+        outgoingServingMaster: Bool, outgoingMasterRefusedByDisplay: Bool
+    ) -> Bool {
+        !outgoingServingMaster && outgoingMasterRefusedByDisplay
+    }
 }
