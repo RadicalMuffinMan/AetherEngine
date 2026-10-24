@@ -38,11 +38,6 @@ let package = Package(
             description: "Link LibTrueHD and the object renderer, so objectAudioRendering can render TrueHD Atmos objects to APAC."
         ),
         .trait(
-            name: "TrueHDReferenceRender",
-            description: "Measurement only: with TrueHDObjectAudio and a LibTrueHD built with matrix interpolation, AETHER_TRUEHD_REFERENCE_RENDER=1 decodes TrueHD Atmos exactly and mixes its objects, the reference the bed split is measured against. Never ship it.",
-            enabledTraits: ["TrueHDObjectAudio"]
-        ),
-        .trait(
             name: "DTSXObjectAudio",
             description: "Compile the DTS:X decoder (FFmpeg's dca with FFmpegBuild's height patch) and the object renderer, so objectAudioRendering can render DTS:X heights to APAC."
         ),
