@@ -107,6 +107,14 @@ the public-API contract.
   route afresh: those either change the picture or follow a return from the background, where the
   display may have changed.
 
+- **A refused HDR master no longer latches the panel refusal on iOS and macOS (#849).** The AE#588
+  latch only moves the panel answer, and the routing on a panel that engages HDR on demand reads the
+  display's eligibility instead, so on those platforms it changed nothing except a log line claiming
+  every later HDR title went media-direct. Such a refusal is not a fact about the panel either: on a
+  MacBook Air M1 SDR panel a Dolby Vision P8.1 master with and without `SUPPLEMENTAL-CODECS`, a
+  High-tier 3832x1600 PQ master and an audio switch to AC-3 on each were all accepted. The item still
+  falls back, later titles are still offered the master, and the log now says so. tvOS is unchanged.
+
 ## [7.47.0] - 2026-10-23
 
 ### Added

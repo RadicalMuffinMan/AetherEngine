@@ -1678,6 +1678,9 @@ public final class AetherEngine: ObservableObject {
     /// master and refusal answers the question the display will not. Latched for the process because the
     /// answer costs a fallback to obtain and does not change while the output configuration does not.
     ///
+    /// AE#849: tvOS only. A panel that engages HDR on demand (iOS, macOS) is never latched, see
+    /// `MasterFallbackDecision.shouldLatchPanelRefusal`.
+    ///
     /// Set ONLY by the two display-rejection codes. `-1002` also reaches the same fallback and means the
     /// manifest was filtered at parse time (#130), which is a statement about the playlist and not about
     /// the display; latching on it would teach the process a fact about the panel from an unrelated bug.
@@ -2879,11 +2882,17 @@ public final class AetherEngine: ObservableObject {
                     category: .engine)
             } else if MasterFallbackDecision.shouldLatchPanelRefusal(
                 code: rejection.code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
-                displaySwitchInProgress: switching) {
+                displaySwitchInProgress: switching,
+                panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand) {
                 Self.panelRefusedHDRMaster = true
                 EngineLog.emit(
                     "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
                     + "routes HDR sources media-direct until it returns from the background (#588)",
+                    category: .engine)
+            } else if HLSVideoEngine.builtInPanelEngagesOnDemand {
+                EngineLog.emit(
+                    "[DisplayCriteria] HDR master refused (code=\(rejection.code)) on a panel that engages HDR "
+                    + "on demand; this item falls back, later titles still offer the master (#849)",
                     category: .engine)
             } else {
                 EngineLog.emit(
