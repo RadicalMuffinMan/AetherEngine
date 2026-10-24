@@ -21,6 +21,20 @@ the public-API contract.
 
 ### Changed
 
+- **A Profile 7 FEL source keeps the native route while the host reports an AirPlay video receiver on the audio route (iOS).**
+  The dual-layer route draws into a local layer that no receiver picks up, so a TV the viewer sent the
+  title to played sound only. When the host says the receiver shows video
+  (`setAirPlayReceiverShowsVideo(_:)`, new, default off), the load takes the native route instead (8.1
+  where the display takes Dolby Vision, the enhancement layer is lost), logs
+  `an AirPlay video receiver ...` as the reason and skips the `el_type` scan. An audio-only output such
+  as a HomePod does not set it, so the title keeps the dual-layer route; the engine cannot tell the two
+  apart itself. The route is decided at each load: on a URL source `reloadAtCurrentPosition()` decides
+  again, a custom source keeps its route until the next `load()`.
+- **The software host waits for a running display-mode switch before it starts playing (tvOS).** The
+  native path already did; the software path gave up on an HDR switch at the pre-flight cap and never
+  waited for a rate-only one.
+- **`airPlayPictureStaysLocal` reads false while the screen is mirrored.** The host reports it through
+  `setScreenMirrored(_:)` (new).
 - **TrueHD Atmos is decoded exactly and its objects are rendered again (#731).**
   Since 7.40.0 the `TrueHDObjectAudio` path built every output out of the stream's 7.1 channel
   presentation, split by where the objects' energy lay, with the objects decoded without their matrix

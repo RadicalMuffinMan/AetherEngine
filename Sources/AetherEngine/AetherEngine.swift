@@ -773,18 +773,66 @@ public final class AetherEngine: ObservableObject {
     /// H.264, a host's `preferredDecodePath = .software`): it draws into an `AVSampleBufferDisplayLayer`,
     /// and only its `AVSampleBufferAudioRenderer` follows the route. Nothing fails, so without this a host
     /// has no way to tell the viewer why the TV shows no picture. iOS only; false everywhere else, and
-    /// false on the native paths, where AVPlayer hands the receiver the stream.
+    /// false on the native paths, where AVPlayer hands the receiver the stream. False too while the host
+    /// reports the screen as mirrored (`setScreenMirrored(_:)`), because the mirror carries the layer.
     @Published public internal(set) var airPlayPictureStaysLocal = false
 
     nonisolated static func airPlayPictureStaysLocal(backend: PlaybackBackend,
-                                                     wirelessAirPlayRoute: Bool) -> Bool {
-        wirelessAirPlayRoute && backend == .software
+                                                     wirelessAirPlayRoute: Bool,
+                                                     screenMirrored: Bool = false) -> Bool {
+        // A mirrored screen carries the layer to the receiver, so the picture is not local.
+        wirelessAirPlayRoute && backend == .software && !screenMirrored
+    }
+
+    /// iOS: whether the system is mirroring this screen, as the host reports it
+    /// (`UITraitCollection.sceneCaptureState` is `.active`). Only `airPlayPictureStaysLocal` reads it.
+    private(set) var screenMirrored = false
+
+    /// Tell the engine whether the screen is being mirrored. A mirror carries the software host's layer
+    /// to the receiver, so `airPlayPictureStaysLocal` reads false while it is on. The engine has no scene
+    /// of its own to read, so the host passes it on from `sceneCaptureState` (a recording reads as
+    /// captured too; pass `true` only for a mirror). Has no effect off iOS.
+    public func setScreenMirrored(_ mirrored: Bool) {
+        guard screenMirrored != mirrored else { return }
+        screenMirrored = mirrored
+        recomputeAirPlayPictureStaysLocal()
+    }
+
+    /// iOS: whether the AirPlay receiver on the audio route shows video (an Apple TV or a TV), as the host
+    /// reports it. False, the default, means an audio-only output or unknown. There is no public way for
+    /// the engine to tell the two apart: the audio session reports every AirPlay output as the same port
+    /// type. See `setAirPlayReceiverShowsVideo(_:)`.
+    private(set) var airPlayReceiverShowsVideo = false
+
+    /// Tell the engine whether the AirPlay receiver the viewer picked shows video. While one does, a
+    /// Profile 7 FEL source loads on the native route (8.1 where the display takes Dolby Vision, the
+    /// enhancement layer is lost) so the receiver gets a picture: the dual-layer route draws into a local
+    /// layer that no receiver picks up. An audio-only output such as a HomePod keeps the dual-layer route,
+    /// because the picture is on the device anyway. The engine cannot learn this itself, so the value is
+    /// whatever the host knows: the viewer's own choice (a "playing to a TV" control), or a host-owned
+    /// `AVPlayer`'s `isExternalPlaybackActive`. Read at each load. On a URL source, `reloadAtCurrentPosition()`
+    /// decides again; a custom source keeps the route it loaded with until the next `load()`. Has no
+    /// effect off iOS.
+    public func setAirPlayReceiverShowsVideo(_ shows: Bool) {
+        guard airPlayReceiverShowsVideo != shows else { return }
+        airPlayReceiverShowsVideo = shows
+        let effect = shows ? "a FEL source takes the native route" : "a FEL source keeps the dual-layer route"
+        EngineLog.emit("[AirPlay] host reports the receiver \(shows ? "shows" : "does not show") video: \(effect) at the next load",
+            category: .engine)
+    }
+
+    /// Whether the dual-layer decision should yield to a receiver: a wireless AirPlay output holds the
+    /// audio route and the host says it shows video.
+    nonisolated static func airPlayVideoReceiverHoldsRoute(wirelessAirPlayRoute: Bool,
+                                                           receiverShowsVideo: Bool) -> Bool {
+        wirelessAirPlayRoute && receiverShowsVideo
     }
 
     /// Idempotent, and logged on each change, so a report shows when the receiver lost the picture.
     func recomputeAirPlayPictureStaysLocal() {
         let next = Self.airPlayPictureStaysLocal(backend: playbackBackend,
-                                                 wirelessAirPlayRoute: Self.isWirelessAirPlayRoute())
+                                                 wirelessAirPlayRoute: Self.isWirelessAirPlayRoute(),
+                                                 screenMirrored: screenMirrored)
         guard airPlayPictureStaysLocal != next else { return }
         airPlayPictureStaysLocal = next
         EngineLog.emit(
@@ -5271,6 +5319,9 @@ public final class AetherEngine: ObservableObject {
                 frameRate: Self.detectFrameRate(stream: vStream))
         }
         let dualLayerSeekable = probeOpened && probe.videoStreamIndex >= 0 && probe.isSourceSeekable
+        // Read once: the route can change between the pre-probe check and the decision, and the two must agree.
+        let airPlayVideoReceiver = Self.airPlayVideoReceiverHoldsRoute(
+            wirelessAirPlayRoute: Self.isWirelessAirPlayRoute(), receiverShowsVideo: airPlayReceiverShowsVideo)
         if DualLayerRouteDecision.blockingReasonBeforeProbe(
             codecID: detectedCodecID,
             dvProfile: detectedDVProfileNum,
@@ -5279,7 +5330,8 @@ public final class AetherEngine: ObservableObject {
             isLive: options.isLive,
             isSourceSeekable: dualLayerSeekable,
             canHardwareDecode: opensHardwareHEVC,
-            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers) == nil {
+            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers,
+            airPlayVideoReceiver: airPlayVideoReceiver) == nil {
             let vIdx = probe.videoStreamIndex
             elType = await BlockingWork.detached(priority: .userInitiated) { [probe] in
                 let result = DolbyVisionRecordAudit.probeEnhancementLayerType(demuxer: probe, streamIndex: vIdx)
@@ -5302,7 +5354,8 @@ public final class AetherEngine: ObservableObject {
             canHardwareDecode: opensHardwareHEVC,
             elType: elType,
             geometry: dualLayerGeometry,
-            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers)
+            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers,
+            airPlayVideoReceiver: airPlayVideoReceiver)
         if let line = dualLayerDecision.logLine {
             EngineLog.emit(line, category: .engine)
         }
@@ -5588,6 +5641,23 @@ public final class AetherEngine: ObservableObject {
                     activeIndex: softwareHost?.audioStreamIndex ?? -1
                 )
                 presentCurrentLayer()
+                // The play gate the native branch below also runs. The pre-flight above gives up on an HDR
+                // switch at its cap while the panel is still switching and never waits for a rate-only one,
+                // so without this the host starts playing into a dark panel. There is no AVPlayerItem here
+                // for AVKit to read criteria from, so a host that leaves the write to AVKit expects no
+                // inbound write.
+                await displayCriteria.waitForSwitch(
+                    startGrace: Self.playGateGrace(
+                        criteriaUnchanged: criteriaUnchanged,
+                        criteriaWrittenBeforeLoad: !options.awaitsInboundCriteriaWrite,
+                        formatKnown: probeOpened,
+                        effectiveFormat: effectiveFormat,
+                        noWriterExpected: options.sharedOutputRole == .secondary
+                            || options.awaitsInboundCriteriaWrite
+                    ),
+                    settleCap: options.isLive ? .standard : .awaitObservedEnd,
+                    isCurrent: { self.loadGeneration == gen })
+                try checkLoadCurrent(gen)
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
                 if Self.loadPerformsAutostart(options) {
                     softwareHost?.play()
