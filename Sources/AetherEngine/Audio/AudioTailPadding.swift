@@ -106,6 +106,12 @@ enum AudioTailPadding {
         if par.bit_rate > 0, codecID == AV_CODEC_ID_AC3 || codecID == AV_CODEC_ID_EAC3 || codecID == AV_CODEC_ID_AAC {
             enc.pointee.bit_rate = par.bit_rate
         }
+        // ALAC frames are decoded against the track's magic cookie, whose frameLength the fill
+        // must not exceed; FFmpeg's encoder writes 4096, as does nearly every source, but a cookie
+        // that says otherwise is honoured.
+        if codecID == AV_CODEC_ID_ALAC, let frameLength = alacFrameLength(par) {
+            enc.pointee.frame_size = frameLength
+        }
         let openRet = avcodec_open2(enc, codec, nil)
         guard openRet >= 0 else {
             return .unavailable("avcodec_open2 refused the track's parameters (\(openRet))")
@@ -157,6 +163,17 @@ enum AudioTailPadding {
             pkt.pointee.flags |= AV_PKT_FLAG_KEY
         }
         return .packets(encoded, encoder: String(cString: codec.pointee.name))
+    }
+
+    /// `frameLength` from an ALAC magic cookie, with or without the 12-byte atom header movenc
+    /// and Matroska put in front of the ALACSpecificConfig.
+    static func alacFrameLength(_ par: AVCodecParameters) -> Int32? {
+        guard let data = par.extradata else { return nil }
+        let bytes = Array(UnsafeBufferPointer(start: data, count: Int(par.extradata_size)))
+        let offset = bytes.count >= 36 && bytes[4...7] == [0x61, 0x6C, 0x61, 0x63] ? 12 : 0
+        guard bytes.count >= offset + 4 else { return nil }
+        let value = bytes[offset..<offset + 4].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        return value > 0 && value <= 16_384 ? Int32(value) : nil
     }
 
     /// The format to feed the encoder: for the lossless codecs the one that keeps the track's bit

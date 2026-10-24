@@ -90,6 +90,10 @@ struct AudioTailPaddingTests {
         par.pointee.bits_per_raw_sample = bits
         par.pointee.profile = codecID == AV_CODEC_ID_AAC ? AV_PROFILE_AAC_LOW : AV_PROFILE_UNKNOWN
         av_channel_layout_default(&par.pointee.ch_layout, channels)
+        if codecID == AV_CODEC_ID_ALAC {
+            // A real ALAC track carries its magic cookie; take the one FFmpeg's encoder writes.
+            try Self.installEncoderExtradata(on: par)
+        }
 
         let tb = AVRational(num: 1, den: 48_000)
         let start: Int64 = 2_686_080   // 55.96 s
@@ -157,6 +161,35 @@ struct AudioTailPaddingTests {
             return
         }
         #expect(reason.contains("mp3"))
+    }
+
+    @Test("frameLength is read from an ALAC cookie with or without its atom header")
+    func alacCookieFrameLength() throws {
+        var parOpt = avcodec_parameters_alloc()
+        defer { avcodec_parameters_free(&parOpt) }
+        let par = try #require(parOpt)
+        let config: [UInt8] = [0x00, 0x00, 0x10, 0x00] + Array(repeating: 0, count: 20)
+        for bytes in [config, [0x00, 0x00, 0x00, 0x24, 0x61, 0x6C, 0x61, 0x63, 0, 0, 0, 0] + config] {
+            let buffer = try #require(av_mallocz(bytes.count + Int(AV_INPUT_BUFFER_PADDING_SIZE)))
+            bytes.withUnsafeBytes { _ = memcpy(buffer, $0.baseAddress, bytes.count) }
+            av_freep(&par.pointee.extradata)
+            par.pointee.extradata = buffer.assumingMemoryBound(to: UInt8.self)
+            par.pointee.extradata_size = Int32(bytes.count)
+            #expect(AudioTailPadding.alacFrameLength(par.pointee) == 4096)
+        }
+    }
+
+    private static func installEncoderExtradata(on par: UnsafeMutablePointer<AVCodecParameters>) throws {
+        let codec = try #require(avcodec_find_encoder(par.pointee.codec_id))
+        var encOpt = avcodec_alloc_context3(codec)
+        defer { avcodec_free_context(&encOpt) }
+        let enc = try #require(encOpt)
+        enc.pointee.sample_rate = par.pointee.sample_rate
+        enc.pointee.sample_fmt = AV_SAMPLE_FMT_S16P
+        _ = av_channel_layout_copy(&enc.pointee.ch_layout, &par.pointee.ch_layout)
+        try #require(avcodec_open2(enc, codec, nil) >= 0)
+        try #require(avcodec_parameters_from_context(par, enc) >= 0)
+        par.pointee.bits_per_raw_sample = 16
     }
 
     /// Peak absolute sample, as a fraction of full scale.
