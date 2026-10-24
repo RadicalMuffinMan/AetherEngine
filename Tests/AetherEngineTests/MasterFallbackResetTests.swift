@@ -45,4 +45,33 @@ struct MasterFallbackResetTests {
             servingMasterPlaylist: true,
             alreadyFellBack: engine.masterFallbackUsed))
     }
+
+    @Test("stopInternal resets the display-refusal fact with the latch")
+    func stopInternalResetsTheRefusal() throws {
+        let engine = try AetherEngine()
+        engine.loadedURL = URL(string: "http://127.0.0.1:9/source.mkv")
+        engine.masterRefusedByDisplay = true
+
+        engine.stop()
+
+        #expect(engine.masterRefusedByDisplay == false)
+    }
+
+    /// The audio switch keeps the media playlist only when the outgoing session is on it because the
+    /// display refused its HDR master. Still on the master, or on media for another reason (a
+    /// parse failure, an SDR refusal, a route that never served a master), it routes afresh.
+    @Test("An audio switch keeps the media route only after a display refusal",
+          arguments: [
+            (servingMaster: false, refusedByDisplay: true, keeps: true),
+            (servingMaster: false, refusedByDisplay: false, keeps: false),
+            (servingMaster: true, refusedByDisplay: true, keeps: false),
+            (servingMaster: true, refusedByDisplay: false, keeps: false),
+          ])
+    func audioSwitchKeepsMediaRoute(
+        _ c: (servingMaster: Bool, refusedByDisplay: Bool, keeps: Bool)
+    ) {
+        #expect(MasterFallbackDecision.audioSwitchKeepsMediaRoute(
+            outgoingServingMaster: c.servingMaster,
+            outgoingMasterRefusedByDisplay: c.refusedByDisplay) == c.keeps)
+    }
 }

@@ -2697,6 +2697,10 @@ public final class AetherEngine: ObservableObject {
     /// stopInternal, so a session-preserving rebuild gets its own (#849).
     var masterFallbackUsed = false
 
+    /// AE#849: this session's fallback answered a display refusal of an HDR master, which an audio
+    /// switch does not change. Per session like `masterFallbackUsed`, and reset with it.
+    var masterRefusedByDisplay = false
+
     /// #93 PiP skips: AVKit-side seeks (PiP +-15s buttons) bypass the engine seek API, so a far
     /// playhead jump is detected on $renderedTime and, once settled, the native subtitle readers
     /// re-anchor and the remembered rendition selection replays (its deselect/reselect busts
@@ -2861,6 +2865,8 @@ public final class AetherEngine: ObservableObject {
             return
         }
         masterFallbackUsed = true
+        masterRefusedByDisplay = MasterFallbackDecision.isDisplayRejectionCode(rejection.code)
+            && session.servedSourceIsHDR
         // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
         // AE#535: and only for an HDR master on an HDR-eligible display, or the answer is about the window.
         if MasterFallbackDecision.isDisplayRejectionCode(rejection.code), !Self.panelRefusedHDRMaster {
@@ -7535,7 +7541,8 @@ public final class AetherEngine: ObservableObject {
                 if self.activeAudioTrackIndex == selected { continue }
                 let beforeReload = self.loadGeneration
                 let failure = await self.reloadWithAudioOverride(
-                    url: url, audioStreamIndex: Int32(selected), expectedGeneration: beforeReload)
+                    url: url, audioStreamIndex: Int32(selected), expectedGeneration: beforeReload,
+                    keepsDisplayRefusedMediaRoute: true)
                 // This rebuild owns one stopInternal generation. Background teardown or
                 // another SDK recovery cannot lend its successor to queued audio work.
                 guard !Task.isCancelled, self.audioSelectionEpoch == epoch, failure == nil,
@@ -7819,6 +7826,7 @@ public final class AetherEngine: ObservableObject {
         // leak into the reload's, which then could not recover from its own master rejection and
         // surfaced `.masterPlaylistRejected` instead of falling back (#849).
         masterFallbackUsed = false
+        masterRefusedByDisplay = false
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
         // #356: counterpart to the install line, because a session-preserving reload lands here
         // too. The host sees its stream finish and has to re-install; without this the device log
