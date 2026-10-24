@@ -19,6 +19,19 @@ the public-API contract.
   it was. The level and a `.began` / `.released(.ready | .timedOut | .cancelled)` stream now come from
   each engine instance. See `docs/api.md`.
 
+### Changed
+
+- **TrueHD Atmos is decoded exactly and its objects are rendered again (#731).**
+  Since 7.40.0 the `TrueHDObjectAudio` path built every output out of the stream's 7.1 channel
+  presentation, split by where the objects' energy lay, with the objects decoded without their matrix
+  interpolation and taken as plain points. Against the exact render that left the heights 0.4 to
+  1.1 dB low and at a correlation of 0.91 to 0.96, and could not tell front heights from rear ones
+  once the energy sat between them. The path now decodes the object presentation exactly (LibTrueHD
+  3.1.0, which ships its interpolating decode again) and mixes the objects into the layout, with
+  size, snap, zone masks, screen anchoring and the elevation switch, as before 7.40.0. `BedSplitter`
+  and the `TrueHDReferenceRender` measurement trait are gone. The trait stays opt-in, and the
+  integrator remains responsible for the licensing of what it enables.
+
 ### Fixed
 
 - **A plain-URL live open the origin answers with a status fails with that answer (#796, thanks @cmcpherson274).**
