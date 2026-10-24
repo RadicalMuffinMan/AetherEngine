@@ -420,6 +420,7 @@ Sources/AetherEngine/
 │   ├── AudioDecoder.swift                   SW path: libavcodec → PCM → CMSampleBuffer with channel-layout tagging that names the resampler's own order (#401)
 │   ├── AudioOutput.swift                    SW path: AVSampleBufferAudioRenderer + Synchronizer (master clock)
 │   ├── AudioPlaybackHost.swift              Audio-only path: FFmpeg demux + decode into AVSampleBufferAudioRenderer for codecs off the whitelist
+│   ├── AudioTailPadding.swift               Native path: silence in the delivered codec from where a title's audio ends to where its video does, written into the final segment at end of file, because AVPlayer ends an item when its audio runs out (AE#847)
 │   └── Tap/
 │       ├── AudioTapController.swift         Lifecycle owner for one tap: owns the AsyncStream continuation + (native path) the LoopbackAudioReader; one per engine, re-install replaces it (#95)
 │       ├── AudioTapDecoder.swift            FFmpeg decode of tap packets into mono Float32 48 kHz AVAudioPCMBuffers (lazy resampler, own lock discipline)
