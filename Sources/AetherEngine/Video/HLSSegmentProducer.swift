@@ -4719,6 +4719,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
         }
 
+        // AE#847: after the bridge tail, so the fill starts where the delivered audio really ends.
+        if case .eof = exitReason, !isLive, let audio = audioConfig {
+            padAudioTailToVideoEnd(audio: audio)
+        }
+
         if Self.shouldAdoptTeardownSegment(exitReason: exitReason, isLive: isLive) {
             finalizeSessionMuxerAndAdopt()
         } else {
@@ -4767,6 +4772,49 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// cutter; everything else is routed by the packet's own time against the plan. One helper for the
     /// per-feed and the end-of-file flush, because the flush missing the sequential rule opened a plan
     /// index the cutter never reached and cost the archive its final segment (audit SEG-103).
+    /// AE#847: give the final segment silence from where its audio stops to where its picture
+    /// does, because AVPlayer ends the item at the end of the audio (see `AudioTailPadding`).
+    private func padAudioTailToVideoEnd(audio: AudioConfig) {
+        guard let muxer = currentMuxer,
+              muxer.writtenVideoEndPts != Int64.min,
+              muxer.segmentVideoStartPts != Int64.min else { return }
+        let videoTb = muxer.muxerVideoTimeBase
+        let audioTb = muxer.muxerAudioTimeBase
+        guard videoTb.den > 0, audioTb.den > 0 else { return }
+        let videoEnd = Double(muxer.writtenVideoEndPts) * av_q2d(videoTb)
+        let segmentStart = Double(muxer.segmentVideoStartPts) * av_q2d(videoTb)
+        let audioEnd = muxer.writtenAudioEndPts == Int64.min
+            ? nil : Double(muxer.writtenAudioEndPts) * av_q2d(audioTb)
+        guard let span = AudioTailPadding.span(videoEnd: videoEnd, audioEnd: audioEnd,
+                                               segmentStart: segmentStart) else { return }
+        let describe = "audio ends at \(audioEnd.map { String(format: "%.3f", $0) } ?? "-")s, "
+            + "video at \(String(format: "%.3f", videoEnd))s, segment from \(String(format: "%.3f", segmentStart))s"
+        // A stand-in sample entry (the APAC bed behind ALAC) describes a codec the fill cannot match.
+        if audio.bridge?.soundSampleEntryOverride != nil {
+            EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail not padded (\(describe)): "
+                           + "the track is a stand-in for its real codec", category: .session)
+            return
+        }
+        let startTicks = Int64((span.start / av_q2d(audioTb)).rounded(.up))
+        let endTicks = Int64((span.end / av_q2d(audioTb)).rounded(.down))
+        switch AudioTailPadding.silencePackets(codecpar: audio.codecpar, startTicks: startTicks,
+                                               endTicks: endTicks, timeBase: audioTb) {
+        case .unavailable(let reason):
+            EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail not padded (\(describe)): \(reason)",
+                           category: .session)
+        case .packets(let packets, let encoder):
+            var written = 0
+            for packet in packets {
+                packet.pointee.stream_index = muxer.audioOutputStreamIndex
+                if muxer.writePacket(packet).rc >= 0 { written += 1 }
+                var pkt: UnsafeMutablePointer<AVPacket>? = packet
+                trackedPacketFree(&pkt)
+            }
+            EngineLog.emit("[HLSSegmentProducer] AE#847 audio tail padded with \(written) silent \(encoder) frame(s) "
+                           + "from \(String(format: "%.3f", span.start))s (\(describe))", category: .session)
+        }
+    }
+
     private func bridgedAudioSegmentIndex(_ packet: UnsafeMutablePointer<AVPacket>, audio: AudioConfig) -> Int {
         if isLive { return liveCurrentSegmentIndex }
         if audioFollowsVideoCut { return vodCutter.current }

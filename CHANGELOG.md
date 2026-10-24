@@ -10,7 +10,21 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A title whose audio ends before its video plays the rest of the picture in silence (AE#847, thanks @narenh).**
+  AVPlayer ends a muxed HLS item the moment its audio runs out, so a hybrid remux (a web video track
+  over a disc's audio) stopped at the end of the audio and its credits never played, and a resume
+  inside that tail ended the item at load. A re-seek in place (the AE#287 cure for the opposite case)
+  does not get past it, and neither does disabling the audio track. The final segment now carries
+  silence from where its audio stops to where its video does, encoded in the codec the track is
+  delivered in; AVPlayer bridges any gap in front of it on its own. Covered: AC-3, E-AC-3 and FLAC
+  stream copy, every FLAC / E-AC-3 bridge (TrueHD, DTS, PCM and the rest), and AAC (LC) and ALAC through
+  the encoders FFmpegBuild 3.10.0 adds (now pinned). A codec this build cannot encode (MP3, Opus, an APAC
+  bed) logs `AE#847 audio tail not padded` and ends as before. Tracks that end within half a second
+  of each other are muxed exactly as before. When the source arrives barely faster than its bitrate
+  and the silent tail is longer than the producer's lead, playback waits at the end of the audio until
+  the producer has reached the end of the file, then plays the tail.
 
 ## [7.47.0] - 2026-10-23
 
