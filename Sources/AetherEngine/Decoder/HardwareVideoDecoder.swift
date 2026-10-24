@@ -609,17 +609,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         )
         guard sbStatus == noErr, let sb = sampleBuffer else { return }
 
-        if scansHDR10Plus,
-           let payload = HDR10PlusMetadataScan.coreMediaPayload(
-               packet, codecID: streamCodecID, framing: hdr10PlusFraming) {
-            hdr10PlusLock.lock()
-            if hdr10PlusByPTS.count >= Self.hdr10PlusPendingLimit { hdr10PlusByPTS.removeAll() }
-            hdr10PlusByPTS[HDR10PlusKey(pts)] = payload
-            hdr10PlusLock.unlock()
-            if !seenHDR10Plus {
-                seenHDR10Plus = true
-                onFirstHDR10PlusDetected?()
-            }
+        let hdr10PlusPayload = scansHDR10Plus
+            ? HDR10PlusMetadataScan.coreMediaPayload(packet, codecID: streamCodecID, framing: hdr10PlusFraming)
+            : nil
+        if hdr10PlusPayload != nil, !seenHDR10Plus {
+            seenHDR10Plus = true
+            onFirstHDR10PlusDetected?()
         }
 
         // Tag non-keyframes as DependsOnOthers so VT can drop pre-seek RASL frames after a flush.
@@ -654,6 +649,14 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             awaitingKeyframe = false
             recoveredAfterDropping = droppedAwaitingKeyframe
         }
+        // Stored only for a packet that reaches VT (the drops above never output a frame), and before
+        // the call, since VT may output synchronously.
+        if let hdr10PlusPayload {
+            hdr10PlusLock.lock()
+            if hdr10PlusByPTS.count >= Self.hdr10PlusPendingLimit { hdr10PlusByPTS.removeAll() }
+            hdr10PlusByPTS[HDR10PlusKey(pts)] = hdr10PlusPayload
+            hdr10PlusLock.unlock()
+        }
         // Async decode with temporal queueing; callback fires on VT's internal queue.
         var infoFlags = VTDecodeInfoFlags()
         let decodeStatus = VTDecompressionSessionDecodeFrame(
@@ -665,6 +668,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         )
         // AE#739: permanent for this session. Still under the hold that fed it, so a rebuild cannot
         // land between the call and the verdict and have the new session condemned for the old one.
+        if decodeStatus != noErr, hdr10PlusPayload != nil {
+            hdr10PlusLock.lock(); hdr10PlusByPTS.removeValue(forKey: HDR10PlusKey(pts)); hdr10PlusLock.unlock()
+        }
         let lostNow = decodeStatus == kVTInvalidSessionErr && !sessionLost
         if lostNow { sessionLost = true }
         lock.unlock()

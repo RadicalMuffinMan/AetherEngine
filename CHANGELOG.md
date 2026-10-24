@@ -34,7 +34,7 @@ the public-API contract.
 
 ### Fixed
 
-- **HDR10+ reaches the display on the software path.** The VideoToolbox decoder there never read the
+- **HDR10+ reaches the display on the software path (#814, thanks @williamliu0516).** The VideoToolbox decoder there never read the
   ST 2094-40 SEI, so a PQ HEVC title played as plain HDR10 and `videoFormat` stayed `.hdr10`; it now
   reports `.hdr10Plus` on the first message and hands each frame its payload as
   `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. The libavcodec decoder attached one per frame already,
