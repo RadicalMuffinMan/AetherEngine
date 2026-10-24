@@ -21,6 +21,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A plain-URL live open the origin answers with a status fails with that answer (#796, thanks @cmcpherson274).**
+  7.38.0 typed the refusal in the reader, but the live fail-fast after the probe dropped it, so a 503
+  reached the host as `liveSourceUnavailable` and `load` threw `DemuxerError.openFailed(-5)`. It now
+  publishes `sourceRateLimited` (429/503/509) or `sourceRefused` with the status in `underlyingCode`,
+  and `load` throws `AVIOReaderError.httpStatus`, as the release notes of 7.38.0 said it did. A live
+  open that reaches nothing keeps `liveSourceUnavailable`.
+
 - **4K AV1 in software no longer starts its clock ahead of the picture after a seek (AE#800, thanks @cmcpherson274).**
   The preroll gave up after a fixed 2 s, and libdav1d on an Apple TV 4K (A15) took 2.9 to 3.9 s to
   decode from the keyframe up to a seek target in a 4K AV1 title, so the clock started 0.6 to 1.6 s

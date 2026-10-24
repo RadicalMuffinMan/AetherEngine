@@ -4780,6 +4780,12 @@ public final class AetherEngine: ObservableObject {
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
         // Proceeding would dispatch on codec NONE and grind another ~30 s before erroring.
         if options.isLive, !probeOpened {
+            // #796: a live open the origin answered with a status fails with that answer, as the VOD
+            // path's does. Without this a 503 from a metered panel reached the host as an outage.
+            if let readerError = probeFailure as? AVIOReaderError, case .httpStatus = readerError {
+                publishLoadFailure(readerError)
+                throw readerError
+            }
             publishError(.liveSourceUnavailable, "Live source unavailable")
             throw DemuxerError.openFailed(code: -5)
         }
