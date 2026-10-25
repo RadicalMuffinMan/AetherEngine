@@ -32,6 +32,15 @@ the public-API contract.
   and the `TrueHDReferenceRender` measurement trait are gone. The trait stays opt-in, and the
   integrator remains responsible for the licensing of what it enables.
 
+- **PGS subtitle tracks no longer hold the playback probe to its byte ceiling (#858, thanks @qoli).**
+  `find_stream_info` will not let a PGS track go until a decoded composition segment has given it
+  a width. PGS is sparse, so on a source whose first cue lies past the probe, one such track kept
+  the main open reading to the 50 MiB ceiling (about 14 s on the reported remote Matroska source
+  with four of them). Known PGS tracks now sit out the probe the way undecodable audio does
+  (#466). Every track keeps its index, language and codec. The canvas comes from the decoded
+  composition segment, with the video size as fallback, just as on the subtitle side reader
+  since #87.
+
 ### Fixed
 
 - **A pump that cannot keep up on the efficiency class stops dropping to it (#850, thanks @imbenjamin).**
