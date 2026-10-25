@@ -542,7 +542,7 @@ Sources/AetherEngine/
 │       ├── HLSPlaylistTracker.swift         Pure segment cursor: duration-capped edge join, window-slide rejoin, stall budget
 │       ├── HLSSegmentDecryptor.swift        AES-128-CBC clear-key segment decryption (key fetch + memoise, PKCS7)
 │       ├── PackedAudioSegments.swift        Packed-audio rendition support: LiveSegmentFormat classification + ID3 PRIV timestamp parser (raw ADTS segments)
-│       ├── ByteFIFO.swift                   Bounded blocking byte queue between the fetch loop and the demux thread
+│       ├── ByteFIFO.swift                   Bounded blocking byte queue between the fetch loop and the demux thread; empty writes are no-ops, invalid read lengths return an error, and only a finished, drained queue returns EOF
 │       ├── HLSIngestError.swift             Typed terminal errors (encrypted, fMP4, unreachable, invalid, stalled)
 │       ├── LiveIngestSourceInfo.swift       Internal seam: upstream segment cadence (shapes TARGETDURATION + blocking-reload eligibility) and DualSourceMergeOrder for the dual-source DTS merge
 │       ├── HLSVODIngestReader.swift         Ingest reader for an immutable ENDLIST playlist: seeks restart the source at the segment preceding the requested playlist time, on an elapsed-media-time axis (the EXTINF sum) rather than the container's PTS
