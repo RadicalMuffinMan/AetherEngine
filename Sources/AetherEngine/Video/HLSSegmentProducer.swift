@@ -919,11 +919,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     /// Pump-thread-only: the QoS class the pump last requested for itself, the segment index the last
-    /// decision was taken at, and the highest segment index THIS pump has written to the cache. No
-    /// lock; only `runPumpLoop` and its callees touch these.
+    /// decision was taken at, the highest segment index THIS pump has written to the cache, and
+    /// whether the pump has left its read loop. No lock; only `runPumpLoop` and its callees touch these.
     private var pumpQoSCurrent: qos_class_t = QOS_CLASS_USER_INITIATED
     private var pumpQoSLastSeg = Int.min
     private var pumpEpochHighestStored = Int.min
+    private var pumpUnwinding = false
     /// AE#850: a segment boundary is not often enough to decide on. At 0.1x a single segment took
     /// 19 s of wall time on `.utility`, longer than the whole relaxed lead, so the promotion landed
     /// at lead -1 with AVPlayer already waiting. The pump also decides once a second in between.
@@ -2770,7 +2771,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// have changed. VOD only: live production is source-paced and the LL-HLS blocking reload holds
     /// an AVPlayer request open on the very next segment, so live is latency-critical throughout.
     private func retunePumpQoS() {
-        guard !isLive else { return }
+        guard !isLive, !pumpUnwinding else { return }
         let target = cache.targetIndex
         let lead = pumpEpochHighestStored >= 0 ? String(pumpEpochHighestStored - target) : "n/a"
         // A consumer that has fetched has still not necessarily started rendering: AVPlayer keeps
@@ -2812,6 +2813,26 @@ final class HLSSegmentProducer: @unchecked Sendable {
             "[HLSSegmentProducer] pump qos: utility produced at \(String(format: "%.2f", rate))x real time, "
             + "below \(String(format: "%.2f", PumpRelaxationRateProbe.requiredRate))x, "
             + "staying userInitiated for this session (AE#850)",
+            category: .session
+        )
+    }
+
+    /// AE#286: the unwind is latency-critical whatever the pump had relaxed to. A stop is waited on
+    /// (`waitForFinish`, from a seek's restart on the local server's `.userInitiated` queue and from
+    /// the session stop), and every other exit hands the host a verdict it acts on. A condition
+    /// donates no priority to the thread it waits for, so a relaxed pump tore down and broadcast its
+    /// finish at `.utility`, the inversion Xcode's Thread Performance Checker reports at the wait in
+    /// `waitForFinish`. The checker judges the class the signalling thread requested, which a QoS
+    /// override from the waiter does not change, so the pump moves itself. The teardown flush can
+    /// still park on backpressure, so the retune is latched off for the rest of the pump.
+    private func restorePumpQoSForUnwind() {
+        pumpUnwinding = true
+        guard pumpQoSCurrent != QOS_CLASS_USER_INITIATED else { return }
+        pumpQoSCurrent = QOS_CLASS_USER_INITIATED
+        pumpRelaxationRate.suspend()
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0)
+        EngineLog.emit(
+            "[HLSSegmentProducer] pump qos -> userInitiated for unwind (now=\(QoSClass.name(qos_class_self())))",
             category: .session
         )
     }
@@ -3412,6 +3433,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         pumpQoSLastSeg = Int.min
         pumpQoSNextCheckNanos = 0
         pumpEpochHighestStored = Int.min
+        pumpUnwinding = false
         pumpRelaxationRate.suspend()
         pthread_set_qos_class_self_np(pumpQoSCurrent, 0)
         EngineLog.emit(
@@ -4657,6 +4679,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session
             )
         }
+
+        restorePumpQoSForUnwind()
 
         // AE#406: the watchdog decides off this thread, so its verdict lands while the loop is
         // parked in a read that has no upper bound of its own. The abort that lets the loop observe
