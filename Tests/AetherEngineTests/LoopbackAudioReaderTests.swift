@@ -153,4 +153,23 @@ final class LoopbackAudioReaderTests: XCTestCase {
         XCTAssertEqual(w.decoded.last, 2)
         XCTAssertTrue(w.emitted.last!.discontinuity)
     }
+
+    /// Review of #864: a forward seek between the reanchor and the anchor decode drops that whole
+    /// segment. Its end still counts, so the next step reanchors instead of walking stale segments.
+    func testForwardSeekBeforeAnchorDecodeReanchors() {
+        let w = World()
+        w.segments = Set(0...100); w.highestStored = 100
+        w.segmentSeconds = 15; w.chunkSeconds = 0.1
+        w.playhead = 95.1
+        let reader = makeReader(w)
+        for _ in 0..<4 { _ = reader.runOnce() }
+        w.playhead = 400.0
+        XCTAssertEqual(reader.runOnce(), .reanchored)    // nextIndex = 26
+        w.playhead = 1000.0                              // seek again before 26 decodes
+        _ = reader.runOnce()                             // decodes 26, all of it behind
+        XCTAssertEqual(reader.runOnce(), .reanchored)
+        XCTAssertEqual(reader.runOnce(), .decoded)
+        XCTAssertEqual(w.decoded.last, 66)
+        XCTAssertTrue(w.emitted.last.map { $0.sourceTime >= 998 } ?? false)
+    }
 }

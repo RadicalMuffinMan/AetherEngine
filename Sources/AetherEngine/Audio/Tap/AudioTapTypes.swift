@@ -77,7 +77,9 @@ struct AudioTapHeldBuffers {
 
     /// Emits, in order, every held buffer that starts before `limit`, dropping the ones that
     /// end before `floor`. A dropped buffer's discontinuity moves to the next one emitted.
-    /// Returns the playlist-axis end of the last buffer emitted, nil when none was.
+    /// Returns the playlist-axis end of the last buffer consumed, emitted or dropped, nil when
+    /// none was due. A dropped one counts: a reader whose whole release fell behind the playhead
+    /// (a forward seek before the anchor decode landed) must see that end to reanchor.
     mutating func release(before limit: Double, droppingEndsBefore floor: Double,
                           emit: (AudioTapBuffer) -> Void) -> Double? {
         var end: Double?
@@ -87,6 +89,7 @@ struct AudioTapHeldBuffers {
             guard item.start < limit else { break }
             consumed += 1
             let itemEnd = item.start + Double(item.buffer.buffer.frameLength) / AudioTapDefaults.sampleRate
+            end = itemEnd
             guard itemEnd >= floor else {
                 carriedDiscontinuity = carriedDiscontinuity || item.buffer.discontinuity
                 continue
@@ -94,7 +97,6 @@ struct AudioTapHeldBuffers {
             emit(AudioTapBuffer(buffer: item.buffer.buffer, sourceTime: item.buffer.sourceTime,
                                 discontinuity: item.buffer.discontinuity || carriedDiscontinuity))
             carriedDiscontinuity = false
-            end = itemEnd
         }
         items.removeFirst(consumed)
         if carriedDiscontinuity, let next = items.first {
