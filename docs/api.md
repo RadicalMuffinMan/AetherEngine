@@ -310,7 +310,7 @@ The call returns a `RequestHeaderUpdateOutcome`:
 | Outcome | When |
 | --- | --- |
 | `.appliedToLiveRequests` | every source request is made by the session's own readers: the `.loopback`, `.software` and FFmpeg `.audio` routes, and a load still opening. |
-| `.installedForNextRebuild` | the requests are made by something that fixed its headers when the session was built: AVFoundation on `.remoteBypass` or an AVPlayer-hosted audio item, a custom `IOReader` the host built, a remote disc image. Call `reloadAtCurrentPosition()` if the set is needed now. |
+| `.installedForNextRebuild` | the requests are made by something that fixed its headers when the session was built: AVFoundation on `.remoteBypass` or an AVPlayer-hosted audio item, a custom `IOReader` the host built, a remote disc image, a DASH manifest. Call `reloadAtCurrentPosition()` if the set is needed now. |
 | `.noActiveSession` | nothing is loaded; nothing was installed. |
 
 **When the credential lapses anyway.** A 401 or 403 mid-session is not treated as a dropped

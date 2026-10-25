@@ -12,6 +12,16 @@ the public-API contract.
 
 ### Added
 
+- **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
+  A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
+  failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH
+  demuxer and no network protocols. The engine now recognizes the manifest (by `.mpd`, or by its
+  body on an extensionless URL), fetches each selected representation's initialization segment and
+  segment index, and lays the video plus one representation per audio adaptation set out as one
+  fragmented MP4 that the normal `mov` path demuxes, so both playback routes, seeks, audio track
+  switching and `probe` work unchanged. Headers ride every request. Live manifests, `SegmentTemplate`
+  / `SegmentList` and encrypted content are refused with the reason. See `docs/formats.md`.
+
 - **`isClockHeld` and `clockHoldEvents` publish the software path's clock hold (AE#800, thanks @cmcpherson274).**
   The clock that waits for the first frames after a start, a seek, an in-place switch or a resume
   stood at rate 0 with nothing but an `[AudioOutput]` log line to say so, so a host judging stalls
@@ -101,6 +111,12 @@ the public-API contract.
   since #87.
 
 ### Fixed
+
+- **A forward seek in a fragmented MP4 no longer lands a fragment or more past its target (AE#859).**
+  libavformat indexes a fragmented file one fragment at a time, and a stream seek whose next sync
+  sample started an unread fragment resolved to whatever later fragment an earlier read had indexed:
+  a session started at 150 s and seeked to 60 s rendered 122 s. The seek now lands on the sync
+  sample before the target when the index has a hole there.
 
 - **A pump that cannot keep up on the efficiency class stops dropping to it (#850, thanks @imbenjamin).**
   The AE#286 relaxation moved the segment pump to `.utility` once it was 16 s ahead, on the
