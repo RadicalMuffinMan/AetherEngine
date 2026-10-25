@@ -1063,6 +1063,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// any positive `fileSize` as settled. Remembered so the frontier connection's own
     /// `Content-Range` can be checked against it, once.
     private var adoptedWarmSize: Int64?
+    /// AE#860: the `Content-Type` of the first 2xx answer this open got (or the warm's), the one
+    /// statement about the source an extensionless URL makes. winCond-guarded, write-once.
+    private var openContentType: String?
     private var headSpanServeLogged = false
     private var headSpanPlaybackServeLogged = false
     private var tailSpanServeLogged = false
@@ -1103,6 +1106,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// True for endless live feeds. Suppresses `position >= fileSize` EOF synthesis;
     /// reports EIO (-5) instead of EOF when the reconnect cap is hit.
     let isLive: Bool
+    /// AE#860: an open whose response declares a disc image throws `.discImageMediaType` instead
+    /// of handing a filesystem to libavformat. Only the demuxer's URL open sets it, because only it
+    /// has the disc adapter to reroute to.
+    let routesDiscMediaType: Bool
 
     /// `LoadOptions.sequentialOrigin` (via `DemuxerOpenProfile.avioSequentialOnly`): the origin
     /// fabricates range answers, so only byte 0 is addressable. `open()` routes straight onto the
@@ -1184,7 +1191,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let probeDrainLock = NSLock()
     private var drainingProbeRequest = false
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget, routesDiscMediaType: Bool = false) {
+        self.routesDiscMediaType = routesDiscMediaType
         self.sourceOpenPolicy = sourceOpenPolicy
         self.probeControl = probeControl
         self.probeRequestSession = probeControl == nil ? nil : probeRequestSession
@@ -1407,6 +1415,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 close()
                 throw AVIOReaderError.dashManifest
             }
+            if !isLive, routesDiscMediaType, gotData,
+               DiscImageMediaType.isDiscImage(contentType: openResponseContentType) {
+                EngineLog.emit("[AVIOReader] \(label) the source declares a disc image type (AE#860); handing it to the disc adapter.", category: .demux)
+                markClosed()
+                close()
+                if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+                throw AVIOReaderError.discImageMediaType
+            }
             var tookFallback = false
             if !isLive {
                 // Atomically decide, under winCond, whether the optimistic connection resolved
@@ -1540,6 +1556,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         markClosed()
                         close()
                         throw AVIOReaderError.dashManifest
+                    }
+                    if routesDiscMediaType, DiscImageMediaType.isDiscImage(contentType: openResponseContentType) {
+                        EngineLog.emit("[AVIOReader] \(label) the source declares a disc image type (AE#860); handing it to the disc adapter.", category: .demux)
+                        markClosed()
+                        close()
+                        throw AVIOReaderError.discImageMediaType
                     }
                 }
             }
@@ -1710,6 +1732,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// usually follows an XML declaration and a generator comment (GPAC writes about 120 bytes of
     /// them), so the classification reads further than a container signature needs (AE#859).
     static let openSniffBytes = 1024
+
+    /// AE#860: the `Content-Type` the open learned, nil until a 2xx answer (or a warm) supplied one.
+    var openResponseContentType: String? {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return openContentType
+    }
 
     private func firstWindowPrefix(max: Int = 16) -> [UInt8] {
         winCond.lock()
@@ -3119,6 +3148,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let tail = warm.tail { tailSpan = tail }
         fileSize = warm.contentLength
         adoptedWarmSize = warm.contentLength
+        if openContentType == nil { openContentType = warm.contentType }
         winCond.unlock()
         SourceContentLengthCache.store(warm.contentLength, for: url)
         // The warm followed the redirect chain and knows where it ended. Pinning that target here
@@ -3910,6 +3940,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             fileSize = 0
             adoptedWarmSize = nil
         }
+        if generation == connGeneration, !isLive, isOK, openContentType == nil {
+            openContentType = http.value(forHTTPHeaderField: "Content-Type")
+        }
         if generation == connGeneration, !isLive, fileSize <= 0, !rangeIgnoredAtOpen,
            let total = Self.sizeFromResponse(http, requestedOffset: requestedOffset) {
             fileSize = total
@@ -4681,6 +4714,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         )
                         return nil
                     }
+                }
+                if !isLive, let http = response as? HTTPURLResponse {
+                    winCond.lock()
+                    if openContentType == nil { openContentType = http.value(forHTTPHeaderField: "Content-Type") }
+                    winCond.unlock()
                 }
                 addBytesFetched(data.count)
                 return data
@@ -5796,6 +5834,9 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
     /// catches it and opens the manifest through `DASHSourceOpener`; it only escapes for a source
     /// the demuxer cannot reopen by URL.
     case dashManifest
+    /// AE#860: the opening response declared a disc image type (`DiscImageMediaType`). Internal
+    /// routing only: `Demuxer.openHTTP` catches it and tries the disc adapter.
+    case discImageMediaType
     /// The origin answered the source request with an HTTP status instead of media: a 401/403
     /// refusal, a 404, a 5xx. Typed so load() publishes the status (`PlaybackErrorKind.sourceRefused`)
     /// instead of the AVERROR_INVALIDDATA FFmpeg reports for an empty or error-page stream, and so the
@@ -5823,6 +5864,7 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
         case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
         case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
         case .dashManifest: return "MPEG-DASH manifest supplied where container bytes belong"
+        case .discImageMediaType: return "Disc image supplied where container bytes belong"
         case .httpStatus(let status): return "Origin answered HTTP \(status) for the source"
         case .transportSecurityFailed(let code):
             return TransportSecurityFailure.sentence(for: code)
