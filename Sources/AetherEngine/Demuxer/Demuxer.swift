@@ -2511,11 +2511,59 @@ public final class Demuxer: @unchecked Sendable {
                 "[Demuxer] Seek to stream \(streamIndex) timestamp \(timestamp) failed: \(ret)",
                 category: .demux
             )
+        } else if let stream = ctx.pointee.streams[Int(streamIndex)],
+                  Self.forwardLandingCrossesUnreadFragment(ctx, stream: stream, timestamp: timestamp) {
+            // AE#859: a fragmented MP4 indexes only the fragments it has read. The forward search
+            // above loaded the fragment holding the target, but not the next one, so the first
+            // sync sample "at or after" the target was whatever fragment an earlier read had left
+            // in the index (measured: start at 150 s, seek to 52 s, landed at 116 s). Landing on
+            // the sync sample before the target costs at most that one fragment, which the
+            // producer's gate drops.
+            let back = avformat_seek_file(ctx, streamIndex, Int64.min, timestamp, timestamp, 0)
+            EngineLog.emit(
+                "[Demuxer] AE#859: forward seek on stream \(streamIndex) to \(timestamp) crossed an "
+                + "unread fragment; landed on the preceding sync sample instead (ret=\(back))",
+                category: .demux
+            )
         }
         avformat_flush(ctx)
         resetSubpictureAssembly()  // #651: libavformat just dropped the parsers this stands in for
         lastReadClipIdx = -1
         return ret >= 0
+    }
+
+    /// AE#859: whether the sync sample a forward seek to `timestamp` chose lies behind a hole in the
+    /// stream's sample index, which in a fragmented MP4 is a fragment nobody has read yet. Only the
+    /// mov demuxer builds its index fragment by fragment; every other container either indexes the
+    /// whole file at open or seeks without an index.
+    private static func forwardLandingCrossesUnreadFragment(
+        _ ctx: UnsafeMutablePointer<AVFormatContext>, stream: UnsafeMutablePointer<AVStream>,
+        timestamp: Int64
+    ) -> Bool {
+        guard let name = ctx.pointee.iformat?.pointee.name,
+              String(cString: name).split(separator: ",").contains("mov") else { return false }
+        let landing = av_index_search_timestamp(stream, timestamp, 0)
+        guard landing >= 0 else { return false }
+        let first = max(0, av_index_search_timestamp(stream, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY))
+        guard landing > first else { return false }
+        var timestamps: [Int64] = []
+        timestamps.reserveCapacity(Int(landing - first) + 1)
+        for i in first...landing {
+            guard let entry = avformat_index_get_entry(stream, i) else { return false }
+            timestamps.append(entry.pointee.timestamp)
+        }
+        let tb = stream.pointee.time_base
+        guard tb.num > 0, tb.den > 0 else { return false }
+        let holeTicks = Int64(Double(tb.den) / Double(tb.num) * indexHoleSeconds)
+        return indexHasHole(timestamps, holeTicks: max(1, holeTicks))
+    }
+
+    /// Consecutive samples further apart than this are not neighbours: no real stream leaves half a
+    /// second between two pictures, while the shortest fragment a packager writes is about that long.
+    static let indexHoleSeconds = 0.5
+
+    static func indexHasHole(_ timestamps: [Int64], holeTicks: Int64) -> Bool {
+        zip(timestamps, timestamps.dropFirst()).contains { $1 &- $0 > holeTicks }
     }
 
     private func resetAfterTimeSeek(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
