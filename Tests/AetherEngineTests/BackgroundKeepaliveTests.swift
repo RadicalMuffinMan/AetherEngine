@@ -103,4 +103,30 @@ struct BackgroundKeepaliveTests {
     func softwareAudioOnlyWithoutPiP() {
         #expect(AetherEngine.backgroundAction(isAudioBackend: false, hasSoftwareHost: true, softwareHostHasAudio: true, keepVideoAlive: true, pipActive: false, state: .playing) == .enterSoftwareAudioOnly)
     }
+    @MainActor
+    @Test("retaining paused pipelines is opt-in")
+    func retentionDefault() throws {
+        #expect(try AetherEngine().retainsVideoPipelineWhenBackgrounded == false)
+    }
+
+    @Test("retention keeps paused native and software sessions, without enabling background playback")
+    func retainedPausedPipelinePolicy() {
+        for software in [false, true] {
+            for audio in [false, true] {
+                #expect(AetherEngine.backgroundAction(
+                    isAudioBackend: false, hasSoftwareHost: software, softwareHostHasAudio: audio,
+                    keepVideoAlive: false, pipActive: false, state: .paused,
+                    retainPausedVideoPipeline: true) == .doNothing)
+                #expect(AetherEngine.backgroundAction(
+                    isAudioBackend: false, hasSoftwareHost: software, softwareHostHasAudio: audio,
+                    keepVideoAlive: false, pipActive: false, state: .playing,
+                    retainPausedVideoPipeline: true) == .teardownVideo)
+            }
+        }
+        #expect(AetherEngine.backgroundAction(
+            isAudioBackend: false, hasSoftwareHost: true, softwareHostHasAudio: true,
+            keepVideoAlive: true, pipActive: false, state: .playing,
+            retainPausedVideoPipeline: true) == .enterSoftwareAudioOnly)
+    }
+
 }

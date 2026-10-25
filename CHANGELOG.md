@@ -12,6 +12,8 @@ the public-API contract.
 
 ### Added
 
+- `retainsVideoPipelineWhenBackgrounded` lets hosts retain a paused video pipeline through suspension. It is off by default and leaves playing-session background policy unchanged. Software playback flushes a failed retained video queue before restarting its feeder.
+
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
   failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH
