@@ -13,15 +13,15 @@ public struct BoundedStillFrame: @unchecked Sendable {
 }
 
 /// Produces still images from a media URL via an isolated FFmpeg decode context,
-/// separate from playback. Two modes share one decode core: `snapshot` (frame-accurate,
-/// full-res) and `thumbnail` (keyframe-snapped, low-res, fast). Lazy: context opens on
+/// separate from playback. Three modes share one decode core: `snapshot` (frame-accurate,
+/// full-res), `preview` (frame-accurate, downscaled) and `thumbnail` (keyframe-snapped, fast). Lazy: context opens on
 /// first use; blocking FFmpeg work runs on a dedicated serial queue, not the cooperative pool.
 /// Create one per URL; for the playing item prefer `AetherEngine.makeFrameExtractor()`.
 public actor FrameExtractor {
     private let context: FrameDecodeContext
     private let cache: FrameCache
     private let decodeQueue: DispatchQueue
-    /// #93 startup: session-coupled extractors yield elective thumbnail decodes while the
+    /// #93 startup: session-coupled extractors yield elective thumbnail/preview decodes while the
     /// playback pipeline is starved (see `shouldYield`). nil = never yield (standalone use).
     private let yieldWhile: (@Sendable () -> Bool)?
 
@@ -137,7 +137,7 @@ public actor FrameExtractor {
                   yieldWhile: nil, residentIdentity: identity)
     }
 
-    /// Yield decision for elective (thumbnail) extraction. The disposable decode's demuxer pulls
+    /// Yield decision for elective thumbnail/preview extraction. The disposable decode's demuxer pulls
     /// megabytes over the same link the segment producer needs; during startup and recovery that
     /// contention tipped the first segment past CoreMedia's ~4 s media timeout and killed the
     /// AVPlayer loader (-15628, #93 startup). Yield while a producer restart is in flight or the
@@ -157,6 +157,12 @@ public actor FrameExtractor {
 
     public func thumbnail(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
         await produce(at: seconds, mode: .thumbnail, targetWidth: maxWidth, maxSize: nil)
+    }
+
+    /// Produce a frame-accurate, downscaled still for interactive scrubbing.
+    /// Like thumbnails, uncached previews yield while the playback pipeline is starved.
+    public func preview(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
+        await produce(at: seconds, mode: .preview, targetWidth: maxWidth, maxSize: nil)
     }
 
     public func snapshot(at seconds: Double, maxSize: CGSize? = nil) async -> CGImage? {
@@ -265,7 +271,7 @@ public actor FrameExtractor {
 
     /// Permanently tear down the decode context and clear the cache. Awaits teardown on
     /// the decode queue, so on return the FFmpeg demuxer/codec/sws are fully released.
-    /// After shutdown() the extractor is dead: thumbnail/snapshot/prewarm return nil/no-op
+    /// After shutdown() the extractor is dead: thumbnail/preview/snapshot/prewarm return nil/no-op
     /// and do NOT reopen; create a new FrameExtractor to extract again.
     public func shutdown() async {
         idleTask?.cancel()
@@ -284,14 +290,14 @@ public actor FrameExtractor {
     private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
         guard !isShutDown, seconds.isFinite, seconds >= 0 else { return nil }
-        if let hit = cache.get(mode: mode, seconds: seconds) {
+        if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth) {
             scheduleIdleClose()
             return hit
         }
-        // Elective thumbnails yield to a starved playback pipeline (snapshots are deliberate
+        // Elective thumbnails/previews yield to a starved playback pipeline (snapshots are deliberate
         // one-shot user actions and stay ungated). Checked after the cache: hits are free.
-        if mode == .thumbnail, yieldWhile?() == true {
-            EngineLog.emit("[FrameExtractor] thumbnail yielded: playback pipeline starved",
+        if mode.isElective, yieldWhile?() == true {
+            EngineLog.emit("[FrameExtractor] \(mode) yielded: playback pipeline starved",
                            category: .swPlayback, level: .verbose)
             return nil
         }
@@ -331,7 +337,7 @@ public actor FrameExtractor {
             return FrameResult(image: image)
         }
         if let image = result.image, !token.isCancelled {
-            cache.set(image, mode: mode, seconds: seconds)
+            cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth)
         }
         scheduleIdleClose()
         return result.image

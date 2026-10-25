@@ -58,6 +58,24 @@ struct FrameCacheTests {
         #expect(cache.get(mode: .snapshot, seconds: 10.88) === b)
     }
 
+    @Test("Preview positions and widths are independent and the preview cache stays bounded")
+    func previewCache() {
+        let cache = FrameCache(thumbnailLimit: 2, snapshotLimit: 2, thumbnailBucketSeconds: 1.0)
+        let small = dummyImage(), large = dummyImage(), next = dummyImage()
+        cache.set(small, mode: .preview, seconds: 1, targetWidth: 160)
+        cache.set(large, mode: .preview, seconds: 1, targetWidth: 320)
+        #expect(cache.get(mode: .preview, seconds: 1, targetWidth: 160) === small)
+        #expect(cache.get(mode: .preview, seconds: 1.0001, targetWidth: 160) == nil)
+        #expect(cache.get(mode: .thumbnail, seconds: 1) == nil)
+        #expect(cache.get(mode: .snapshot, seconds: 1) == nil)
+        cache.set(next, mode: .preview, seconds: 1.0001, targetWidth: 160)
+        #expect(cache.get(mode: .preview, seconds: 1, targetWidth: 320) == nil)
+        #expect(cache.get(mode: .preview, seconds: 1, targetWidth: 160) === small)
+        #expect(cache.get(mode: .preview, seconds: 1.0001, targetWidth: 160) === next)
+        cache.clear()
+        #expect(cache.get(mode: .preview, seconds: 1, targetWidth: 160) == nil)
+    }
+
     @Test("clear empties the cache")
     func clear() {
         let cache = FrameCache(thumbnailLimit: 4, snapshotLimit: 2, thumbnailBucketSeconds: 1.0)

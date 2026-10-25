@@ -12,6 +12,11 @@ the public-API contract.
 
 ### Added
 
+- **Frame-accurate downscaled stills through `FrameExtractor.preview(at:maxWidth:)`.**
+  Previews decode forward to the requested frame while retaining full reconstruction and high-quality
+  scaling. They yield to starved playback and keep a small, separate cache. The CLI exposes the same
+  behavior with `aetherctl extract --preview --width <px>`.
+
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
   failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH

@@ -357,13 +357,6 @@ final class FrameDecodeContext: @unchecked Sendable {
             activeProcessorCount: ProcessInfo.processInfo.activeProcessorCount))
         ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
 
-        // Still extraction needs no deblock or full-rate quality: skip loop filter
-        // and enable the fast/inaccurate path to cut per-frame CPU on big HEVC/AV1 keyframes.
-        // AV_CODEC_FLAG2_FAST is a C #define (1 << 0) that does not bridge to Swift.
-        let AV_CODEC_FLAG2_FAST_VALUE: Int32 = 1 << 0
-        ctx.pointee.skip_loop_filter = AVDISCARD_ALL
-        ctx.pointee.flags2 |= AV_CODEC_FLAG2_FAST_VALUE
-
         var opts: OpaquePointer?
         if !useHardware {
             // Belt-and-suspenders with the software get_format callback above.
@@ -437,6 +430,7 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// Decode one frame at/after `seconds`.
     ///
     /// - thumbnail: first frame after the seek (keyframe), downscaled to `targetWidth`.
+    /// - preview: decode forward until pts >= seconds, downscaled to `targetWidth`.
     /// - snapshot: decode forward until pts >= seconds, return at `maxSize` (aspect-preserved) or native.
     ///
     /// `isCancelled` is polled between packets and before conversion so a superseded scrub
@@ -461,6 +455,16 @@ final class FrameDecodeContext: @unchecked Sendable {
         // Without the reshaping these planes are IPT, which the standard path would read as YCbCr
         // (the green / magenta still of #103): no still at all, and nothing read or decoded for it.
         guard Self.yieldsStill(dolbyVisionNoBaseLayer: isDolbyVisionNoBaseLayer) else { return nil }
+
+        // Full reconstruction matters for previews and snapshots; only coarse keyframe
+        // thumbnails opt into skipped loop filtering and the codec's inaccurate fast path.
+        let codecFastFlag: Int32 = 1 << 0 // AV_CODEC_FLAG2_FAST does not bridge to Swift.
+        ctx.pointee.skip_loop_filter = mode.isFrameAccurate ? AVDISCARD_DEFAULT : AVDISCARD_ALL
+        if mode.isFrameAccurate {
+            ctx.pointee.flags2 &= ~codecFastFlag
+        } else {
+            ctx.pointee.flags2 |= codecFastFlag
+        }
 
         // Bound this decode's HTTP reads so a stalled remote source can't park the
         // serial decode queue and freeze the scrub preview (issue #27). No-op for
@@ -557,7 +561,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                     av_frame_free(&transferredFrame)
                 }
             }
-            let width = mode == .thumbnail
+            let width = mode.usesTargetWidth
                 ? targetWidth
                 : Self.clampedWidth(frame: f, maxSize: maxSize)
             #if DolbyVisionStillReshaping
@@ -577,7 +581,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                 }
                 // tone-map failed: fall through to sws path (degraded but non-nil)
             }
-            return convertToCGImage(frame: f, targetWidth: width)
+            return convertToCGImage(frame: f, targetWidth: width, highQuality: mode.isFrameAccurate)
         }
 
         // Once the demuxer hits EOF, flush the decoder (NULL packet) and keep draining: the
@@ -637,9 +641,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                     targetPTS = f.pointee.pts + ticks
                     offsetTicks = nil
                 }
-                if mode == .snapshot,
-                   f.pointee.pts != Int64.min,
-                   f.pointee.pts < targetPTS {
+                if !mode.accepts(framePTS: f.pointee.pts, targetPTS: targetPTS) {
                     continue
                 }
 
@@ -770,7 +772,7 @@ final class FrameDecodeContext: @unchecked Sendable {
 
     /// sws_scale the frame to RGBA at `targetWidth` (height from source aspect) into an
     /// owned-buffer CGImage. Mirrors the sws tuple-pointer dance in SoftwareVideoDecoder.
-    private func convertToCGImage(frame: UnsafeMutablePointer<AVFrame>, targetWidth: Int) -> CGImage? {
+    private func convertToCGImage(frame: UnsafeMutablePointer<AVFrame>, targetWidth: Int, highQuality: Bool) -> CGImage? {
         let srcW = Int(frame.pointee.width)
         let srcH = Int(frame.pointee.height)
         guard srcW > 0, srcH > 0, targetWidth > 0 else { return nil }
@@ -787,7 +789,7 @@ final class FrameDecodeContext: @unchecked Sendable {
             swsContext,
             Int32(srcW), Int32(srcH), srcFmt,
             Int32(dstW), Int32(dstH), AV_PIX_FMT_RGBA,
-            Int32(SWS_BILINEAR.rawValue), nil, nil, nil
+            Int32((highQuality ? SWS_BICUBIC : SWS_BILINEAR).rawValue), nil, nil, nil
         )
         guard swsContext != nil else { return nil }
         // Without this sws converts every picture with its BT.601 default, which put a 1080p
