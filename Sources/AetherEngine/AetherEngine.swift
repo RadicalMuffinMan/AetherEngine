@@ -1689,13 +1689,7 @@ public final class AetherEngine: ObservableObject {
     /// CONFIGURATION and the user changes that in Settings, which they can only reach by leaving the app.
     /// Nothing reports the change itself, so the return is the one event guaranteed to follow it. See
     /// `clearPanelRefusalOnForegroundReturn`.
-    nonisolated(unsafe) static var panelRefusedHDRMaster = false {
-        didSet {
-            // A display that refused an HDR master no longer vouches for the HDR proof either.
-            guard panelRefusedHDRMaster, !oldValue else { return }
-            Task { @MainActor in DisplayCriteriaController.forgetPanelProof("a refused HDR master") }
-        }
-    }
+    nonisolated(unsafe) static var panelRefusedHDRMaster = false
 
     /// AE#588: forget a refusal on a real return from the background.
     ///
@@ -2891,6 +2885,9 @@ public final class AetherEngine: ObservableObject {
                 displaySwitchInProgress: switching,
                 panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand) {
                 Self.panelRefusedHDRMaster = true
+                // A display that refused an HDR master no longer vouches for the HDR proof either. Cleared
+                // here, before the fallback below reloads, so that session cannot read the proof.
+                DisplayCriteriaController.forgetPanelProof("a refused HDR master")
                 EngineLog.emit(
                     "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
                     + "routes HDR sources media-direct until it returns from the background (#588)",
