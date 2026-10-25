@@ -112,6 +112,16 @@ the public-API contract.
 
 ### Fixed
 
+- **The audio tap no longer re-decodes long segments at a parked playhead (AE#864, thanks @qoli).**
+  A reader decodes whole segments, so a 15 s segment legitimately runs the decode lead past 10 s,
+  and the pacing read that overshoot as a backward seek: it jumped back to the playhead's segment and
+  decoded the same two segments over and over (120 s of PCM from 30 s of content, with a
+  discontinuity every cycle). A backward seek is now read off the playhead's own movement. The same
+  whole-segment decode also yielded a segment in one burst, well past the stream's 64-buffer bound,
+  so a consumer lost audio however fast it drained; decoded buffers are now released along the
+  playhead (at most tolerance + lead, 12 s, in flight) and the stream keeps 256. Loopback and
+  remote-HLS VOD alike.
+
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
   certificate classifications stay specific). A transport failure at open (a reset or a timeout from
