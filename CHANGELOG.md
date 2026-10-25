@@ -112,6 +112,20 @@ the public-API contract.
 
 ### Fixed
 
+- **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
+  URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
+  certificate classifications stay specific). A transport failure at open (a reset or a timeout from
+  an origin still spinning up) is still ridden out by the reconnect ladder; its URL code is recorded
+  and attached to `liveSourceUnavailable` as `underlyingDomain` / `underlyingCode` only when a live
+  start finally gives up. HLS and demux errors retain their existing NSError domains/case codes while
+  exposing bounded diagnostic reasons and the original FFmpeg code separately. Optional
+  `SourceNetworkDiagnostics` events carry a captured playback/attempt context across redirects and
+  internal reloads and AVIO thread crossings, including streamed held HTTP/1 bodies. Immutable
+  events use extensible string-backed roles and phases. Refused AES key requests use the historical
+  `playlistUnreachable(status:)` case to preserve their HTTP status. A held HTTP/1 open that fails
+  after its response head reports the hop that answered and its status. The observer does not alter
+  request policy and requires hosts to redact source URLs.
+
 - **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
   The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
   opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found
