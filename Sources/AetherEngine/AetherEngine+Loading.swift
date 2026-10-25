@@ -2207,6 +2207,30 @@ extension AetherEngine {
                 self?.clock.sourceTime = value
             }
             .store(in: &softwareCancellables)
+        // The pumps pause the synchronizer to refill when the ring runs dry at the live edge (#107) or
+        // the audio lead is exhausted on demand. Folded into `isBuffering` exactly as the audio host's
+        // wait is, so `playbackPhase` reads `.rebuffering` from the moment the clock stops. Before, the
+        // phase stayed `.playing` over a standing picture until the reader's own stall timeout promoted
+        // it to `.stalled`, 20 s later on a live source that merely paused, and a host app watching the
+        // clock reloaded the session in the meantime. Gated on the engine's own `.playing`: a paused
+        // engine refilling stays `.paused`.
+        host.$isRebuffering
+            .sink { [weak self] rebuffering in
+                guard let self else { return }
+                if case .error = self.state { return }
+                self.isBuffering = self.state == .playing && rebuffering
+            }
+            .store(in: &softwareCancellables)
+        // The feeder's catch-up after an edge rebuffer that resumed behind a backlog: the engine's own
+        // rejoin, not a scrub, so it is not bound by the scrubber's contract and lands like the AE#446
+        // outage swap does.
+        host.liveResumeCatchUp
+            .sink { [weak self] target in
+                self?.hop(for: generation) { [weak self] in
+                    await self?.seek(to: target, origin: .liveRejoin)
+                }
+            }
+            .store(in: &softwareCancellables)
         // AE#440: this path publishes no transport status to latch a roll from, and all of its
         // transport flows through the engine's own play()/pause(), so `state` IS its motion signal.
         // Crediting the roll here keeps `playbackPhase` on the software path exactly as it was.
