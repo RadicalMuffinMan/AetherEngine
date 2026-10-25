@@ -61,6 +61,29 @@ struct Issue232InterlaceProbeTests {
         #expect(InterlaceProbe.refutesDeclaredInterlace(verdict))
     }
 
+    @Test("software loads and reloads carry the interlace decision and stop clears it", .timeLimit(.minutes(2)),
+          arguments: [false, true])
+    @MainActor
+    func loadCarriesWarmupDecision(interlaced: Bool) async throws {
+        let fixture = interlaced ? Self.interlacedBase64 : Self.declaredTTProgressiveBase64
+        let bytes = try #require(Data(base64Encoded: fixture, options: .ignoreUnknownCharacters))
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("deinterlace-demand-\(UUID().uuidString).mp4")
+        try bytes.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions()
+        options.autoplay = false
+        options.preferredDecodePath = .software
+        _ = try await engine.load(url: file, options: options)
+        #expect(engine.lastRequiresDeinterlaceWarmup == interlaced)
+        try await engine.reloadAtCurrentPosition()
+        #expect(engine.lastRequiresDeinterlaceWarmup == interlaced)
+        engine.stop()
+        #expect(!engine.lastRequiresDeinterlaceWarmup)
+    }
+
     // MARK: - Probe verdicts
 
     @Test("a flagged frame upholds the declaration and stops the sample at once")

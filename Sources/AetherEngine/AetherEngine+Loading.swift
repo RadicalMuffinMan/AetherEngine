@@ -2049,6 +2049,7 @@ extension AetherEngine {
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer?,
+        requiresDeinterlaceWarmup: Bool,
         generation: UInt64,
         elType: String? = nil
     ) async throws {
@@ -2057,10 +2058,11 @@ extension AetherEngine {
         diagnostics.sessionCacheStatus = .inactive
         let deinterlaceMode = loadedOptions.deinterlaceMode
         let waitStarted = DispatchTime.now()
-        if let outcome = await DeinterlaceHardwareWarmup.shared.waitIfNeeded(
-            for: deinterlaceMode
-        ) {
-            try checkLoadCurrent(generation)
+        let warmupOutcome = await DeinterlaceHardwareWarmup.shared.waitIfNeeded(
+            for: deinterlaceMode, sourceIsInterlaced: requiresDeinterlaceWarmup
+        )
+        try checkLoadCurrent(generation)
+        if let outcome = warmupOutcome {
             let elapsed = Double(
                 DispatchTime.now().uptimeNanoseconds - waitStarted.uptimeNanoseconds
             ) / 1_000_000_000
@@ -2573,6 +2575,7 @@ extension AetherEngine {
         }
         // Preserve codec so the decoder label can be reconstructed without re-probing.
         let preservedVideoCodec = lastDetectedVideoCodec
+        let preservedRequiresDeinterlaceWarmup = lastRequiresDeinterlaceWarmup
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.
@@ -2623,6 +2626,7 @@ extension AetherEngine {
         defer { endLoadInFlight(gen) }
         loadedURL = url
         lastDetectedVideoCodec = preservedVideoCodec
+        lastRequiresDeinterlaceWarmup = preservedRequiresDeinterlaceWarmup
 
         // Custom sources: no URL to reopen; rebuild on the retained reader. Demuxer opens at byte 0; loadSoftware/loadNative seek to startPosition.
         // Preserve the caller's probe budget (#68) across the reopen so an audio/title switch doesn't re-incur the full find_stream_info cost the caller paid to avoid.
@@ -2720,6 +2724,33 @@ extension AetherEngine {
             }
         }
 
+        let reopenedRequiresDeinterlaceWarmup: Bool = if discTitleIDOverride != nil,
+                                                         let pre = customPreopened,
+                                                         let stream = pre.stream(at: pre.videoStreamIndex),
+                                                         let codecpar = stream.pointee.codecpar
+        {
+            if codecpar.pointee.codec_id == AV_CODEC_ID_H264,
+               codecpar.pointee.field_order == AV_FIELD_UNKNOWN,
+               let extradata = codecpar.pointee.extradata,
+               codecpar.pointee.extradata_size > 0
+            {
+                VideoRoutingPolicy.requiresDeinterlaceWarmup(
+                    codecID: codecpar.pointee.codec_id,
+                    fieldOrder: codecpar.pointee.field_order,
+                    spsIndicatesInterlaced: VideoRoutingPolicy.spsIndicatesInterlaced(
+                        extradata: Array(UnsafeBufferPointer(
+                            start: extradata,
+                            count: Int(codecpar.pointee.extradata_size)))))
+            } else {
+                VideoRoutingPolicy.requiresDeinterlaceWarmup(
+                    codecID: codecpar.pointee.codec_id,
+                    fieldOrder: codecpar.pointee.field_order)
+            }
+        } else {
+            preservedRequiresDeinterlaceWarmup
+        }
+
+
         do {
             let loadStart = DispatchTime.now()
             if targetSoftwarePath {
@@ -2733,11 +2764,13 @@ extension AetherEngine {
                     isLive: loadedOptions.isLive,
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
                     preopenedDemuxer: customPreopened,
+                    requiresDeinterlaceWarmup: reopenedRequiresDeinterlaceWarmup,
                     generation: gen,
                     elType: sourceElType
                 )
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
+                lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
                 activeAudioTrackIndex = audioStreamIndex.map { Int($0) }
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: preservedVideoCodec,
@@ -2819,6 +2852,7 @@ extension AetherEngine {
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native
+                lastRequiresDeinterlaceWarmup = reopenedRequiresDeinterlaceWarmup
                 // Publish the session's actual pick (invalid override falls back to auto; demuxed-audio resolves in side-demuxer numbering).
                 syncPublishedAudioStateFromNativeSession()
                 activeVideoDecoder = Self.videoDecoderLabel(

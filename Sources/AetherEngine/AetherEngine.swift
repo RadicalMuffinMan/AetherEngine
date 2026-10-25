@@ -2557,6 +2557,8 @@ public final class AetherEngine: ObservableObject {
     /// Latched at load; reused by audio-track-switch reload to re-derive activeVideoDecoder without re-probing.
     /// Reset to AV_CODEC_ID_NONE in stopInternal.
     var lastDetectedVideoCodec: AVCodecID = AV_CODEC_ID_NONE
+    /// Preserved through same-source reloads; cleared when the session stops.
+    var lastRequiresDeinterlaceWarmup = false
 
     /// In-flight probe demuxer. Registered before the detached open so stopInternal can markClosed() it:
     /// without this, player dismissal/channel zapping left the probe reconnecting through subsequent sessions.
@@ -4021,7 +4023,6 @@ public final class AetherEngine: ObservableObject {
         FFmpegLogBridge.install()
         // Which FFmpeg answers is decided by the host's link, not by the package graph (AE#396).
         FFmpegRuntimeCheck.logOnce()
-        _ = DeinterlaceHardwareWarmup.shared
 
         // The category is declared off-main at the first load, once per process (#114), and the session
         // is never activated here: AVKit owns native playback activation (#24).
@@ -5453,6 +5454,9 @@ public final class AetherEngine: ObservableObject {
             canHardwareDecode: opensHardwareHEVC,
             elType: elType
         )
+        var requiresDeinterlaceWarmup = VideoRoutingPolicy.requiresDeinterlaceWarmup(
+            codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
+            spsIndicatesInterlaced: spsIndicatesInterlaced)
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
         // progressive pictures, and FFmpeg's parser reports TT for them off SEI pic_struct alone while
@@ -5486,6 +5490,7 @@ public final class AetherEngine: ObservableObject {
             }
             if InterlaceProbe.refutesDeclaredInterlace(verdict) {
                 useSoftwarePath = false
+                requiresDeinterlaceWarmup = false
                 EngineLog.emit(
                     "[AetherEngine] declared interlaced (fieldOrder=\(detectedFieldOrder.rawValue)) but "
                     + "\(verdict); the deinterlacer would never engage, routing native for HW decode (#232)",
@@ -5692,10 +5697,12 @@ public final class AetherEngine: ObservableObject {
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil,
+                    requiresDeinterlaceWarmup: requiresDeinterlaceWarmup,
                     generation: gen,
                     elType: elType
                 )
                 playbackBackend = .software
+                lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
                 // AE#550: the one thing a viewer on a receiver needs said out loud. This backend's
                 // picture cannot leave the device, so a wireless route carries the sound alone, and
                 // the report that opened this was someone hearing a film they could not see.
@@ -5783,6 +5790,8 @@ public final class AetherEngine: ObservableObject {
                     }
                 )
                 playbackBackend = .native
+                // Preserve source evidence for a later native-to-software recovery.
+                lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: false
                 )
@@ -8167,6 +8176,7 @@ public final class AetherEngine: ObservableObject {
         activeVideoDecoder = nil
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
+        lastRequiresDeinterlaceWarmup = false
         playlistShiftSeconds = 0
         liveDisplayShiftSeconds = nil
         // AE#105 / AE#270: the display origin belongs to the session that published it. Clearing it here
