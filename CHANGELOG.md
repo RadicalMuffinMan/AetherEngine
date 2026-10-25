@@ -126,6 +126,10 @@ the public-API contract.
   after its response head reports the hop that answered and its status. The observer does not alter
   request policy and requires hosts to redact source URLs.
 
+- **Still extraction respects requested size and precise snapshot position on cache hits.**
+  Reusing one extractor for different thumbnail widths or snapshot bounds no longer returns the
+  first size rendered. Snapshot requests no longer share a coarse time bucket across frame boundaries.
+
 - **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
   The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
   opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found
