@@ -30,12 +30,13 @@ final class DisplayCriteriaController {
     /// which on unobservable-DV panels otherwise burns the full ~3s waitForSwitch cap on every channel change.
     private var lastApplied: AppliedCriteria?
 
-    /// Has a criteria write ever demonstrably driven THIS display into HDR (headroom observed above 1.0)?
+    /// Has this display demonstrably engaged HDR (headroom observed above 1.0, or an HDR master accepted)?
     ///
-    /// Deliberately never cleared, not by `reset()` and not by a switch that ends at headroom 1.0. The
-    /// headroom collapses while HDR video is on the screen (see `panelPresentsHDR`), so its absence at
-    /// exactly the moment a load asks proves nothing, and any invalidation rule built on it would re-arm
-    /// the very false negative this exists to answer. A display change cannot strand it either:
+    /// Never cleared by `reset()` or by a switch that ends at headroom 1.0. The headroom collapses while
+    /// HDR video is on the screen (see `panelPresentsHDR`), so its absence at exactly the moment a load asks
+    /// proves nothing, and any invalidation rule built on it would re-arm the very false negative this
+    /// exists to answer. Only an event that can mean a changed output configuration clears it: leaving for
+    /// the background or a refused HDR master (`forgetPanelProof`). A display change cannot strand it either:
     /// `effectiveVideoFormat` clamps to `displayCapabilities` before `apply()`, so an SDR route writes SDR
     /// criteria and never consults the proof.
     ///
@@ -317,9 +318,10 @@ final class DisplayCriteriaController {
     /// from the same `UIScreen`. That is not a sampling-time problem, it is a property tvOS does not
     /// maintain. There is no mode read-back; do not go looking for one here again (Sodalite#49).
     ///
-    /// The residual risk is the reverse: Match Dynamic Range switched off in Settings after a proven session,
-    /// without the app being killed. That offers one master to an SDR panel, which the reactive master-to-media
-    /// fallback (#98) and the startup-readiness gate (#35) already recover from. Trading a rare, self-healing
+    /// The residual risk is the reverse: the output configuration changed after a proven session without the
+    /// app leaving the foreground (Settings itself is only reachable by leaving, which clears the proof). That
+    /// offers one master to an SDR panel, which the reactive master-to-media fallback (#98) and the
+    /// startup-readiness gate (#35) already recover from, and the refusal clears the proof. Trading a rare, self-healing
     /// fallback for a silent permanent HDR loss on every replay is the point of this function.
     nonisolated static func panelPresentsHDR(
         headroomAboveOne: Bool,
