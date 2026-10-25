@@ -1088,14 +1088,13 @@ extension AetherEngine {
         hostAsserts: Bool,
         criteriaReadoutAtLoad: Bool?,
         attemptWhenUnproven: Bool,
-        isLive: Bool,
         displayEligibleForHDR: Bool,
         panelRefusedHDRMaster: Bool
     ) -> Bool {
         sessionRoutesAsHDRPanel(
             panelPresentsHDR: sessionPanelPresentsHDR(
                 hostAsserts: hostAsserts, criteriaReadout: criteriaReadoutAtLoad),
-            attemptWhenUnproven: attemptWhenUnproven && !isLive,
+            attemptWhenUnproven: attemptWhenUnproven,
             displayEligibleForHDR: displayEligibleForHDR,
             panelRefusedHDRMaster: panelRefusedHDRMaster)
     }

@@ -323,13 +323,21 @@ final class DisplayCriteriaController {
     /// offers one master to an SDR panel, which the reactive master-to-media fallback (#98) and the
     /// startup-readiness gate (#35) already recover from, and the refusal clears the proof. Trading a rare, self-healing
     /// fallback for a silent permanent HDR loss on every replay is the point of this function.
+    ///
+    /// `matchingDisabled` is the one case where the proof counts without an HDR write. With Match Content
+    /// off nobody can switch the panel, neither the engine nor an AVKit sole writer, so it stays in the
+    /// output mode the user parked it in, and the proof (an accepted HDR master, typically) describes
+    /// exactly that mode. Changing it goes through Settings, which means leaving the app, which clears the
+    /// proof. AE#887: without this a live channel after a proven VOD title, both on a box parked in 4K HDR, was
+    /// labelled SDR for its whole length, because the skipped write left the attribution `.hostDriven`.
     nonisolated static func panelPresentsHDR(
         headroomAboveOne: Bool,
         attribution: CriteriaAttribution,
+        matchingDisabled: Bool,
         panelProvenToEngageHDR: Bool
     ) -> Bool {
         if headroomAboveOne { return true }
-        return attribution == .engineHDR && panelProvenToEngageHDR
+        return (attribution == .engineHDR || matchingDisabled) && panelProvenToEngageHDR
     }
 
     nonisolated static func criteriaAttribution(didApply: Bool, lastCriteriaWasHDR: Bool) -> CriteriaAttribution {
@@ -1241,6 +1249,7 @@ final class DisplayCriteriaController {
         return Self.panelPresentsHDR(
             headroomAboveOne: observeHeadroom(window.screen),
             attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
+            matchingDisabled: !window.avDisplayManager.isDisplayCriteriaMatchingEnabled,
             // A proof from an earlier session is about this display's HDR mode; a display that cannot
             // play HDR now (another TV, HDR switched off) has nothing for it to vouch for.
             panelProvenToEngageHDR: panelProvenToEngageHDR && AVPlayer.eligibleForHDRPlayback

@@ -2755,7 +2755,6 @@ extension AetherEngine {
                     hostAsserts: loadedOptions.panelIsInHDRMode,
                     criteriaReadoutAtLoad: sessionPanelHDRReadout,
                     attemptWhenUnproven: loadedOptions.attemptsHDRMasterOnUnprovenPanel,
-                    isLive: loadedOptions.isLive,
                     displayEligibleForHDR: sessionDisplayEligibleForHDR,
                     panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
                 if reloadRoutingPanelHDR != loadedOptions.panelIsInHDRMode {
