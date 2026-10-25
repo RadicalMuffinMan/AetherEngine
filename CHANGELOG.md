@@ -126,6 +126,8 @@ the public-API contract.
   after its response head reports the hop that answered and its status. The observer does not alter
   request policy and requires hosts to redact source URLs.
 
+- Software playback teardown no longer waits on the main actor for asynchronous video-renderer removal. The retiring output and layer remain alive until removal completes, including when the synchronizer is stopped.
+
 - **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
   The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
   opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found
