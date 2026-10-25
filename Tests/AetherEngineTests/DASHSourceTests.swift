@@ -425,25 +425,34 @@ struct DASHOverHTTPTests {
         }
     }
 
+    /// The open runs on its own thread, not in a `Task`: on a CI runner with few cores the parallel
+    /// synchronous tests hold every cooperative thread, and a detached task then did not start for
+    /// 14 s, past a deadline counted from the test's start. Elapsed time is counted from the close.
     @Test("markClosed ends an open that waits on a representation, instead of its request timeout")
-    func closeDuringOpen() async throws {
+    func closeDuringOpen() throws {
         let origin = try Self.origin()
         defer { origin.stop() }
         origin.stall("/a2.mp4")
         let demuxer = Demuxer()
         defer { demuxer.close() }
         let url = URL(string: "\(origin.baseURL)/play")!
-        let started = Date()
-        let open = Task.detached { try demuxer.open(url: url) }
-        while !origin.requests.contains(where: { $0.path == "/a2.mp4" }) {
-            try await Task.sleep(for: .milliseconds(10))
-            if Date().timeIntervalSince(started) > 5 { Issue.record("the stalled request never arrived"); return }
+        let finished = DispatchSemaphore(value: 0)
+        let failed = ProbeTestBox(false)
+        Thread.detachNewThread {
+            do { try demuxer.open(url: url) } catch { failed.update { $0 = true } }
+            finished.signal()
         }
+        let waitStarted = Date()
+        while !origin.requests.contains(where: { $0.path == "/a2.mp4" }) {
+            usleep(10_000)
+            if Date().timeIntervalSince(waitStarted) > 60 { Issue.record("the stalled request never arrived"); return }
+        }
+        let closed = Date()
         demuxer.markClosed()
-        let failed: Bool
-        do { try await open.value; failed = false } catch { failed = true }
-        #expect(failed)
-        #expect(Date().timeIntervalSince(started) < 5)
+        // The opener's request timeout is 10 s; anything well under it was ended by the close.
+        #expect(finished.wait(timeout: .now() + 8) == .success, "the open waited out its request timeout")
+        #expect(failed.value)
+        #expect(Date().timeIntervalSince(closed) < 8)
     }
 
     @Test("the metadata probe reads a DASH source, with and without limits")
