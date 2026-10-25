@@ -83,6 +83,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Color metadata from codecpar, re-applied to every CVPixelBuffer.
     /// VTDecompressionSession should propagate these from SPS+hvcC but has been observed not to;
     /// without them an HDR buffer renders as desaturated SDR on AVSampleBufferDisplayLayer.
+    private let outputMetadataNormalizer = VideoToolboxOutputMetadataNormalizer()
     private var colorPrimaries: CFString?
     private var colorTransfer: CFString?
     private var colorMatrix: CFString?
@@ -734,6 +735,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             box.release()
             refConBox = nil
         }
+        outputMetadataNormalizer.reset()
         onFrame = nil
     }
 
@@ -760,7 +762,8 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Invoked by `hwDecoderOutputCallback`; delivers CVPixelBuffer+PTS, honouring `skipUntilPTS` for seek-pre-roll.
     fileprivate func handleDecodedFrame(
         imageBuffer: CVImageBuffer,
-        pts: CMTime
+        pts: CMTime,
+        infoFlags: VTDecodeInfoFlags
     ) {
         skipLock.lock()
         _framesDecoded &+= 1
@@ -779,32 +782,17 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             clearSkip(ifStillAt: threshold)
         }
 
-        // Attach color metadata; without it HDR PQ content shows as desaturated SDR on AVSampleBufferDisplayLayer.
-        if let primaries = colorPrimaries {
-            CVBufferSetAttachment(imageBuffer, kCVImageBufferColorPrimariesKey, primaries, .shouldPropagate)
-        }
-        if let transfer = colorTransfer {
-            CVBufferSetAttachment(imageBuffer, kCVImageBufferTransferFunctionKey, transfer, .shouldPropagate)
-        }
-        if let matrix = colorMatrix {
-            CVBufferSetAttachment(imageBuffer, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
-        }
-
-        // #354: without this the renderer's format description carries no pixel aspect ratio and
-        // anamorphic content is displayed at its coded dimensions.
-        if let sar = pixelAspectRatio {
-            let aspect: NSDictionary = [
-                kCVImageBufferPixelAspectRatioHorizontalSpacingKey: Int(sar.num),
-                kCVImageBufferPixelAspectRatioVerticalSpacingKey: Int(sar.den),
-            ]
-            CVBufferSetAttachment(imageBuffer, kCVImageBufferPixelAspectRatioKey, aspect, .shouldPropagate)
-        } else {
-            // A recycled pool buffer can carry a stale attachment from an earlier stream.
-            CVBufferRemoveAttachment(imageBuffer, kCVImageBufferPixelAspectRatioKey)
-        }
-
-        reportDecodedFormat(imageBuffer)
-        onFrame?(imageBuffer, pts, hdr10PlusData)
+        // A VT output may remain a reference frame after delivery. Only change its metadata
+        // in place when the decoder explicitly grants permission; otherwise use an owned copy.
+        let outputBuffer = outputMetadataNormalizer.applyingOutputMetadata(
+            to: imageBuffer,
+            isModifiable: infoFlags.contains(.imageBufferModifiable),
+            colorPrimaries: colorPrimaries,
+            transferFunction: colorTransfer,
+            yCbCrMatrix: colorMatrix,
+            pixelAspectRatio: pixelAspectRatio)
+        reportDecodedFormat(outputBuffer)
+        onFrame?(outputBuffer, pts, hdr10PlusData)
     }
 
     /// VideoToolbox decodes straight into the display buffer, so the buffer IS the decoded picture; its
@@ -842,7 +830,8 @@ private func hwDecoderOutputCallback(
         .fromOpaque(refCon).takeUnretainedValue()
     box.decoder?.handleDecodedFrame(
         imageBuffer: imageBuffer,
-        pts: presentationTimeStamp
+        pts: presentationTimeStamp,
+        infoFlags: infoFlags
     )
 }
 

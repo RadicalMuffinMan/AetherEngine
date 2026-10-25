@@ -126,6 +126,10 @@ the public-API contract.
   after its response head reports the hop that answered and its status. The observer does not alter
   request policy and requires hosts to redact source URLs.
 
+- **VideoToolbox output metadata respects immutable reference buffers.** Colour and pixel-aspect
+  attachments are updated in place only when the decode callback marks the buffer modifiable.
+  Otherwise a pooled owned copy receives the attachments; matching output is passed through.
+
 - **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
   The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
   opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found
