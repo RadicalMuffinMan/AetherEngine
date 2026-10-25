@@ -277,6 +277,10 @@ public final class Demuxer: @unchecked Sendable {
     /// `ConcatIOReader.close()` is a no-op and the bridge does not own its reader, so this is the only
     /// owner left to end the reader's `URLSession`. Guarded by `providerLock`.
     private var _ownedSourceReader: IOReader?
+    /// AE#859: the DASH open in flight, so `markClosed()` reaches its manifest fetch and the
+    /// representation readers it has opened before any of them belongs to a provider. Guarded by
+    /// `providerLock`.
+    private var pendingDASHOpener: DASHSourceOpener?
 
     private func adoptOwnedSourceReader(_ reader: IOReader) {
         providerLock.lock()
@@ -299,8 +303,10 @@ public final class Demuxer: @unchecked Sendable {
     private func cancelOwnedSourceReader() {
         providerLock.lock()
         let reader = _ownedSourceReader
+        let dash = pendingDASHOpener
         providerLock.unlock()
         reader?.cancel()
+        dash?.cancel()
     }
 
     /// Audit HLS-2: `markClosed()` before the provider exists used to be a no-op, so a teardown
@@ -759,6 +765,10 @@ public final class Demuxer: @unchecked Sendable {
         // straight to libavformat fails to probe; it is a filesystem, not a media container, #64).
         // Gated on the disc-image extension so normal media URLs skip the range-probe entirely; if
         // the source is not a recognizable disc, fall through to the streaming reader.
+        if !isLive, Self.isDASHManifestURL(url) {
+            try openDASH(manifestURL: url, extraHeaders: extraHeaders)
+            return
+        }
         if !isLive, Self.isDiscImageURL(url) {
             let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
             if let discReader = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
@@ -810,7 +820,48 @@ public final class Demuxer: @unchecked Sendable {
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider
-        try openWithProvider(reader, isLive: isLive)
+        do {
+            try openWithProvider(reader, isLive: isLive)
+        } catch AVIOReaderError.dashManifest {
+            try openDASH(manifestURL: url, extraHeaders: extraHeaders)
+        }
+    }
+
+    /// AE#859: an MPEG-DASH manifest by URL extension, opened as DASH without a first look at the body.
+    static func isDASHManifestURL(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "mpd"
+    }
+
+    /// AE#859: opens an on-demand DASH manifest as the fragmented MP4 `DASHSourceOpener` lays it out.
+    /// The reader is engine-owned the way the remote disc reader is: the bridge does not own it, so it
+    /// is adopted here and closed with the demuxer.
+    private func openDASH(manifestURL url: URL, extraHeaders: [String: String]) throws {
+        let opener = DASHSourceOpener(manifestURL: url, headers: extraHeaders,
+                                      requestTimeout: max(openProfile.avioRequestTimeout, 10))
+        providerLock.lock()
+        pendingDASHOpener = opener
+        providerLock.unlock()
+        defer {
+            providerLock.lock()
+            pendingDASHOpener = nil
+            providerLock.unlock()
+        }
+        if isCloseRequested { throw DemuxerError.openFailed(code: -1) }
+        let reader = try opener.open()
+        adoptOwnedSourceReader(reader)
+        if isCloseRequested {
+            releaseOwnedSourceReader()
+            throw DemuxerError.openFailed(code: -1)
+        }
+        // The Dolby Vision record audit re-reads the source URL as a media file, which an MPD is not.
+        auditSource = nil
+        let bridge = CustomIOReaderBridge(reader: reader)
+        do {
+            try openWithProvider(bridge, inputFormat: av_find_input_format("mp4"), isLive: false)
+        } catch {
+            releaseOwnedSourceReader()
+            throw error
+        }
     }
 
     /// A provider that connected (or tried to) for an open that is not going to finish.

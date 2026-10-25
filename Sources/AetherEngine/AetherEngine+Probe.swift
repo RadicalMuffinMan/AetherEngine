@@ -192,9 +192,26 @@ extension AetherEngine {
                     ownedReader = reader
                     let counted = ProbeIOReader(reader: reader, control: control)
                     try control.check()
-                    if let http = reader as? ProbeHTTPReader { try http.open() }
+                    var isDASHManifest = false
+                    if let http = reader as? ProbeHTTPReader {
+                        do {
+                            try http.open()
+                        } catch AVIOReaderError.dashManifest {
+                            isDASHManifest = true
+                        }
+                    }
                     try control.check()
-                    try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits))
+                    if isDASHManifest {
+                        // AE#859: an MPD is opened by the demuxer's own DASH path, which reads several
+                        // files. Deadline and cancellation are honoured inside libavformat's reads
+                        // through the demuxer's interrupt, but the manifest and head requests run to
+                        // their own timeouts, and the byte budget, which counts one source, does not apply.
+                        reader.close()
+                        ownedReader = nil
+                        try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+                    } else {
+                        try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits))
+                    }
                 } else {
                     try demuxer.open(url: u, extraHeaders: options.httpHeaders)
                 }

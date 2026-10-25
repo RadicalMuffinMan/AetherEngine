@@ -1321,7 +1321,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // The open has its first bytes in hand, so there is nothing to wait for. Waiting
                 // anyway would spend the round trip this whole feature exists to remove.
                 gotData = true
-                openPrefix = Array(warm.head.data.prefix(16))
+                openPrefix = Array(warm.head.data.prefix(Self.openSniffBytes))
             } else {
                 winCond.lock()
                 rangeVerdictPending = !isLive
@@ -1372,7 +1372,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     opened = awaitFirstPersistentData()
                 }
                 gotData = try recoverUnansweredOpenIfNeeded(gotData: opened)
-                openPrefix = firstWindowPrefix()
+                openPrefix = firstWindowPrefix(max: Self.openSniffBytes)
             }
             // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. A live origin serves the
             // finite #EXTM3U body at HTTP 200 and closes the connection; the endless-feed reader then
@@ -1397,6 +1397,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 markClosed()
                 close()
                 throw AVIOReaderError.hlsPlaylistOnVODPath
+            }
+            // AE#859: the same misroute for an MPEG-DASH manifest. FFmpeg ships no DASH demuxer (it
+            // needs libxml2) and could not fetch a representation if it had one; the demuxer lays
+            // the manifest out as one fragmented MP4 instead (`DASHSourceOpener`).
+            if gotData, DASHManifest.bodyBeginsWithManifest(openPrefix) {
+                EngineLog.emit("[AVIOReader] \(label) MPEG-DASH manifest body (AE#859); handing it to the DASH opener.", category: .demux)
+                markClosed()
+                close()
+                throw AVIOReaderError.dashManifest
             }
             var tookFallback = false
             if !isLive {
@@ -1525,6 +1534,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 if let data = fetchChunk(from: 0, size: chunkSize) {
                     currentBuffer = data
                     currentOffset = 0
+                    // AE#859: the bounded probe reader opens here, past the persistent-window check.
+                    if DASHManifest.bodyBeginsWithManifest([UInt8](data.prefix(Self.openSniffBytes))) {
+                        EngineLog.emit("[AVIOReader] \(label) MPEG-DASH manifest body (AE#859); handing it to the DASH opener.", category: .demux)
+                        markClosed()
+                        close()
+                        throw AVIOReaderError.dashManifest
+                    }
                 }
             }
         }
@@ -1533,11 +1549,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // forward-only open (no size, or an origin that ignores Range) leaves that window empty. A
         // playlist endpoint answering 200 without a length lands exactly there, so the same check
         // runs on the stream's first bytes before FFmpeg is handed the m3u8 as container bytes.
-        if isStreaming, Self.bodyBeginsWithHLSPlaylistTag(firstStreamPrefix()) {
+        let streamPrefix = isStreaming ? firstStreamPrefix(max: Self.openSniffBytes) : []
+        if isStreaming, Self.bodyBeginsWithHLSPlaylistTag(streamPrefix) {
             EngineLog.emit("[AVIOReader] \(label) HLS playlist body on the forward-only open (AE#733); rerouting like AE#140/#154.", category: .demux)
             markClosed()
             close()
             throw isLive ? AVIOReaderError.hlsPlaylistOnRawLivePath : AVIOReaderError.hlsPlaylistOnVODPath
+        }
+        if isStreaming, DASHManifest.bodyBeginsWithManifest(streamPrefix) {
+            EngineLog.emit("[AVIOReader] \(label) MPEG-DASH manifest body on the forward-only open (AE#859); handing it to the DASH opener.", category: .demux)
+            markClosed()
+            close()
+            throw AVIOReaderError.dashManifest
         }
 
         // #126: a VOD source that finishes open() without a resolved size runs the forward-only
@@ -1683,6 +1706,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Snapshot up to `max` leading bytes of the first window (open-time, before any read has consumed
     /// it, so `winStart == 0`). winCond-guarded like every other window access. Used only by the AE#140
     /// misroute check; returns [] if no data has arrived.
+    /// How much of the body the open classifies. `#EXTM3U` is in the first bytes, but an MPD root
+    /// usually follows an XML declaration and a generator comment (GPAC writes about 120 bytes of
+    /// them), so the classification reads further than a container signature needs (AE#859).
+    static let openSniffBytes = 1024
+
     private func firstWindowPrefix(max: Int = 16) -> [UInt8] {
         winCond.lock()
         defer { winCond.unlock() }
@@ -5764,6 +5792,10 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
     /// --disable-network) can never demux it; surfaced to load() so it reroutes the source onto the
     /// native remote-HLS bypass instead of dying with a bare AVERROR_INVALIDDATA.
     case hlsPlaylistOnVODPath
+    /// AE#859: an MPEG-DASH manifest body arrived where container bytes belong. `Demuxer.openHTTP`
+    /// catches it and opens the manifest through `DASHSourceOpener`; it only escapes for a source
+    /// the demuxer cannot reopen by URL.
+    case dashManifest
     /// The origin answered the source request with an HTTP status instead of media: a 401/403
     /// refusal, a 404, a 5xx. Typed so load() publishes the status (`PlaybackErrorKind.sourceRefused`)
     /// instead of the AVERROR_INVALIDDATA FFmpeg reports for an empty or error-page stream, and so the
@@ -5790,6 +5822,7 @@ enum AVIOReaderError: Error, Equatable, CustomStringConvertible, LocalizedError 
         case .requestTimeout: return "Request timed out"
         case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
         case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
+        case .dashManifest: return "MPEG-DASH manifest supplied where container bytes belong"
         case .httpStatus(let status): return "Origin answered HTTP \(status) for the source"
         case .transportSecurityFailed(let code):
             return TransportSecurityFailure.sentence(for: code)
