@@ -168,6 +168,13 @@ the public-API contract.
   the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
   and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
 
+- **A software playback clock stays stopped when first-frame arming overlaps a pause.**
+  The feeder's post-arm rate correction could restart the synchronizer after `pause()` stopped it
+  but before the host published its paused intent, leaving the clock running behind parked decode
+  loops and causing video to catch up rapidly on resume. The correction now runs on the main actor
+  with transport changes, ignores retired outputs and seek generations, and yields to newer clock
+  commands, including rebuffer pauses. Pending pauses and end-of-media tail playback are preserved.
+
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
   certificate classifications stay specific). A transport failure at open (a reset or a timeout from
