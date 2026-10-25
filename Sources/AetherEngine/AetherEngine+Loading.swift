@@ -2003,6 +2003,7 @@ extension AetherEngine {
     /// iOS/tvOS 27 flag it as a hang risk on the main thread (AE#538): the same reasoning that moved `setCategory` off-main
     /// in #114 and the teardown deactivation in #215. Only the track lookup, which reads published state, stays here.
     func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
+        guard rendererAudioSessionActivationEnabled else { return }
         #if os(iOS) || os(tvOS)
         // Resolve the active audio track's channel count from the already-published track list.
         // so the HDMI / AirPlay link negotiates at the correct channel count.
@@ -2012,10 +2013,16 @@ extension AetherEngine {
         let sourceChannels = ownSourceChannels(audioSourceStreamIndex: audioSourceStreamIndex)
         SharedOutputCoordinator.shared.noteSourceChannels(sourceChannels, for: ObjectIdentifier(self))
         let preferred = SharedOutputCoordinator.shared.preferredSourceChannels ?? sourceChannels
-        await enqueueAudioSessionTransition {
+        await performRendererAudioSessionActivation {
             AetherEngine.applyRendererAudioSession(sourceChannels: preferred)
-        }.value
+        }
         #endif
+    }
+
+    /// Kept platform-independent so the ownership gate can be exercised without an audio session.
+    func performRendererAudioSessionActivation(_ operation: @escaping @Sendable () async -> Void) async {
+        guard rendererAudioSessionActivationEnabled else { return }
+        await enqueueAudioSessionTransition(operation).value
     }
 
     #if os(iOS) || os(tvOS)

@@ -199,4 +199,56 @@ struct SharedOutputCoordinatorTests {
         c.join(b, role: .secondary, tag: "tile2")
         #expect(c.leave(a, releasesSession: true) == .othersRemain(1))
     }
+    private actor ConfigurationProbe {
+        var calls = 0
+        var waiting = false
+        private var continuation: CheckedContinuation<Void, Never>?
+        func run(hold: Bool = false) async {
+            calls += 1
+            if hold {
+                await withCheckedContinuation { continuation in
+                    self.continuation = continuation
+                    waiting = true
+                }
+            }
+        }
+        func release() {
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    @Test("concurrent category requests share work, and later loads revalidate", .timeLimit(.minutes(1)))
+    func categoryRequestsCoalesceAndRevalidate() async throws {
+        let coordinator = SharedOutputCoordinator()
+        let probe = ConfigurationProbe()
+        let first = Task { await coordinator.configureAudioSessionCategory { await probe.run(hold: true) } }
+        try await waitFor { await probe.waiting }
+        var joined = false
+        let second = Task {
+            joined = true
+            await coordinator.configureAudioSessionCategory { await probe.run() }
+        }
+        try await waitFor { joined }
+        await probe.release()
+        await first.value
+        await second.value
+        #expect(await probe.calls == 1)
+        await coordinator.configureAudioSessionCategory { await probe.run() }
+        #expect(await probe.calls == 2)
+    }
+
+    @Test("renderer activation belongs to the host when disabled", .timeLimit(.minutes(1)))
+    func rendererActivationOwnership() async throws {
+        let engine = try AetherEngine()
+        let probe = ConfigurationProbe()
+        #expect(engine.rendererAudioSessionActivationEnabled)
+        engine.rendererAudioSessionActivationEnabled = false
+        await engine.performRendererAudioSessionActivation { await probe.run() }
+        #expect(await probe.calls == 0)
+        engine.rendererAudioSessionActivationEnabled = true
+        await engine.performRendererAudioSessionActivation { await probe.run() }
+        #expect(await probe.calls == 1)
+    }
+
 }

@@ -12,6 +12,8 @@ the public-API contract.
 
 ### Added
 
+- `rendererAudioSessionActivationEnabled` lets hosts own renderer audio-session activation across multiple players. Concurrent loads now share off-main category setup, which revalidates current session settings on later loads.
+
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
   failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH
