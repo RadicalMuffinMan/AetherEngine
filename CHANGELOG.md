@@ -112,6 +112,17 @@ the public-API contract.
 
 ### Fixed
 
+- **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
+  The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
+  opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found
+  when processing input`, even when the origin declared `application/x-iso9660-image`. The type of the
+  response the open already makes (or of a warm) now sends the source to the disc adapter, with no
+  extra request; `application/x-cd-image`, `application/vnd.efi.iso`, `application/x-udf-image` and
+  `application/x-raw-disk-image` count too, parameters and case ignored. The type is a hint: the
+  ISO 9660 / UDF readers still decide, and a mislabelled body opens as ordinary media. A URL found to
+  be a disc is remembered for the process, so the next open, a controlled `probe` and
+  `updateRequestHeaders` treat it like an `.iso`.
+
 - **A forward seek in a fragmented MP4 no longer lands a fragment or more past its target (AE#859).**
   libavformat indexes a fragmented file one fragment at a time, and a stream seek whose next sync
   sample started an unread fragment resolved to whatever later fragment an earlier read had indexed:

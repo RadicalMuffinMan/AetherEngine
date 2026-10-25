@@ -754,10 +754,12 @@ public final class Demuxer: @unchecked Sendable {
         try openWithProvider(bridge, inputFormat: inputFormat, isLive: isLive)
     }
 
-    /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension. Gates the HTTP disc-adapter
+    /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension, or an extensionless URL this
+    /// process already recognized as one from its `Content-Type` (AE#860). Gates the HTTP disc-adapter
     /// path so a normal media URL keeps the optimized streaming AVIOReader open with no probe cost.
     static func isDiscImageURL(_ url: URL) -> Bool {
         ["iso", "img", "udf"].contains(url.pathExtension.lowercased())
+            || DiscImageMediaType.isKnownDiscImage(url)
     }
 
     private func openHTTP(url: URL, extraHeaders: [String: String], isLive: Bool = false, selectTitleID: Int? = nil) throws {
@@ -769,40 +771,66 @@ public final class Demuxer: @unchecked Sendable {
             try openDASH(manifestURL: url, extraHeaders: extraHeaders)
             return
         }
-        if !isLive, Self.isDiscImageURL(url) {
-            let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
-            if let discReader = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
-                adoptOwnedSourceReader(discReader)
-                if isCloseRequested {
-                    releaseOwnedSourceReader()
-                    throw DemuxerError.openFailed(code: -1)
-                }
-                let discInfo: DiscInfo?
+        let triedDisc = !isLive && Self.isDiscImageURL(url)
+        if triedDisc {
+            if try openHTTPDiscImage(url: url, extraHeaders: extraHeaders, selectTitleID: selectTitleID) { return }
+            DiscImageMediaType.forgetDiscImage(url)
+        }
+        do {
+            try openHTTPStream(url: url, extraHeaders: extraHeaders, isLive: isLive,
+                               routesDiscMediaType: !isLive && !triedDisc)
+        } catch AVIOReaderError.discImageMediaType {
+            // AE#860: an extensionless URL whose opening response declared a disc image. The type is
+            // only a hint; the disc readers confirm it, and a mislabelled body streams as before.
+            EngineLog.emit("[Demuxer] AE#860: the source declared a disc image type; trying the disc adapter", category: .demux)
+            if try openHTTPDiscImage(url: url, extraHeaders: extraHeaders, selectTitleID: selectTitleID) {
+                DiscImageMediaType.noteDiscImage(url)
+                return
+            }
+            EngineLog.emit("[Demuxer] AE#860: no disc structure behind the declared type; opening it as ordinary media", category: .demux)
+            try openHTTPStream(url: url, extraHeaders: extraHeaders, isLive: isLive, routesDiscMediaType: false)
+        }
+    }
+
+    /// Opens `url` through the disc adapter. False when the source is unreachable or is not a
+    /// recognizable disc, in which case any warm is back in the store for the streaming reader.
+    private func openHTTPDiscImage(url: URL, extraHeaders: [String: String], selectTitleID: Int?) throws -> Bool {
+        let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
+        if let discReader = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
+            adoptOwnedSourceReader(discReader)
+            if isCloseRequested {
+                releaseOwnedSourceReader()
+                throw DemuxerError.openFailed(code: -1)
+            }
+            let discInfo: DiscInfo?
+            do {
+                discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString)
+            } catch {
+                releaseOwnedSourceReader()
+                if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+                throw error
+            }
+            if let discInfo {
+                adoptDiscInfo(discInfo)
+                auditSource = nil
+                let bridge = CustomIOReaderBridge(reader: discInfo.reader)
+                let inputFormat = av_find_input_format(discInfo.formatHint)
                 do {
-                    discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString)
+                    try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
                 } catch {
                     releaseOwnedSourceReader()
-                    if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
                     throw error
                 }
-                if let discInfo {
-                    adoptDiscInfo(discInfo)
-                    auditSource = nil
-                    let bridge = CustomIOReaderBridge(reader: discInfo.reader)
-                    let inputFormat = av_find_input_format(discInfo.formatHint)
-                    do {
-                        try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
-                    } catch {
-                        releaseOwnedSourceReader()
-                        throw error
-                    }
-                    return
-                }
-                releaseOwnedSourceReader()
+                return true
             }
-            // Not a disc: hand the warm back so the streaming reader below adopts it (#647).
-            if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+            releaseOwnedSourceReader()
         }
+        // Not a disc: hand the warm back so the streaming reader adopts it (#647).
+        if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+        return false
+    }
+
+    private func openHTTPStream(url: URL, extraHeaders: [String: String], isLive: Bool, routesDiscMediaType: Bool) throws {
         let reader = AVIOReader(
             url: url,
             extraHeaders: extraHeaders,
@@ -816,7 +844,8 @@ public final class Demuxer: @unchecked Sendable {
             sequentialOnly: openProfile.avioSequentialOnly,
             heldConnection: openProfile.avioHeldConnection,
             sourceOpenPolicy: openProfile.sourceOpenPolicy,
-            requestHeaderStore: openProfile.requestHeaders
+            requestHeaderStore: openProfile.requestHeaders,
+            routesDiscMediaType: routesDiscMediaType
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider
