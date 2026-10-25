@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **VP9 can use VideoToolbox hardware decoding on the software playback host.** WebM streams
+  synthesize the required `vpcC` record from probed parameters. The hardware candidate accepts
+  8-bit profile 0 and 10-bit profile 2 with 4:2:0 chroma, requires a hardware session, and falls
+  back to libavcodec if registration, configuration or session creation fails. Decoder diagnostics
+  report the implementation that actually opened.
+
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
   failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH
