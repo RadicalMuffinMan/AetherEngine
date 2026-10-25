@@ -529,7 +529,7 @@ public struct LoadOptions: Sendable, Equatable {
     public var panelIsInHDRMode: Bool
 
     /// Serve the HDR master to an HDR-eligible display whose panel state is unproven, and let AVFoundation's
-    /// acceptance or refusal be the readout. Default `true`, VOD only.
+    /// acceptance or refusal be the readout. Default `true`, VOD and live.
     ///
     /// AE#459: `UIScreen.currentEDRHeadroom` is the only tvOS property that ever reported the panel's mode,
     /// and it is measurably unreliable. On one Apple TV 4K 3rd gen on tvOS 26.6 it read a flat 1.00
@@ -545,8 +545,9 @@ public struct LoadOptions: Sendable, Equatable {
     /// through the headroom never attempts anything.
     ///
     /// Turn it off for a host that knows its display is SDR and would rather not spend that once. Live
-    /// never attempts regardless of this flag: a live fallback is a rejoin at the edge rather than a
-    /// restored position, and that cost is unmeasured.
+    /// attempts too: the refusal arrives before the first frame, so the live fallback's rejoin at the edge
+    /// (#130) lands where the session was joining anyway. Excluding it left a live session on a panel
+    /// parked in HDR with no proof at all, labelled SDR for its whole length.
     public var attemptsHDRMasterOnUnprovenPanel: Bool
 
     /// Host assertion that this display presents Dolby Vision. Default `false`. Not a capability the engine

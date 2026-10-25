@@ -5153,11 +5153,12 @@ public final class AetherEngine: ObservableObject {
             // AE#459: the ROUTE may assume more than the LABEL may claim. `panelHDRAfterHandshake` stays the
             // label's answer, conservative by design; the route additionally offers an unproven but
             // HDR-eligible display the master and lets AVFoundation's acceptance be the readout `UIScreen`
-            // has been measured getting wrong on a panel that was demonstrably presenting HDR. Live is excluded: its fallback is a rejoin at
-            // the edge rather than a restored position, and that cost has not been measured.
+            // has been measured getting wrong on a panel that was demonstrably presenting HDR. Live attempts
+            // too: a refusal lands before the first frame, so the fallback's rejoin at the edge is where the
+            // session was joining anyway (#130), and without the attempt a live session has no proof at all (#887).
             routingPanelHDR = Self.sessionRoutesAsHDRPanel(
                 panelPresentsHDR: panelHDRAfterHandshake,
-                attemptWhenUnproven: options.attemptsHDRMasterOnUnprovenPanel && !options.isLive,
+                attemptWhenUnproven: options.attemptsHDRMasterOnUnprovenPanel,
                 displayEligibleForHDR: observedDisplayCaps.supportsHDR,
                 panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
             // AE#667: that acceptance only answers once the panel has arrived. See `unprovenMasterAwaitsSwitchEnd`.
@@ -5185,7 +5186,7 @@ public final class AetherEngine: ObservableObject {
                     hostAsserts: options.panelIsInHDRMode, criteriaReadout: criteriaPanelReadout)
                 routingPanelHDR = Self.sessionRoutesAsHDRPanel(
                     panelPresentsHDR: panelHDRAfterHandshake,
-                    attemptWhenUnproven: options.attemptsHDRMasterOnUnprovenPanel && !options.isLive,
+                    attemptWhenUnproven: options.attemptsHDRMasterOnUnprovenPanel,
                     displayEligibleForHDR: observedDisplayCaps.supportsHDR,
                     panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
             }
