@@ -870,8 +870,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return activeTransfer != nil
     }
 
-    /// Audit DMX-107: the typed cause of the read error the streaming path reports, nil while the
-    /// source is healthy and for a plain transport loss (which has no cause of ours to name).
     /// The URL error code the reader's last failed connection ended with, nil once data arrived.
     var lastTransportFailureCode: Int? {
         transportFailureLock.lock()
@@ -892,6 +890,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         transportFailureLock.unlock()
     }
 
+    /// Audit DMX-107: the typed cause of the read error the streaming path reports, nil while the
+    /// source is healthy and for a plain transport loss (which has no cause of ours to name).
     var lastReadFailure: AVIOReaderError? {
         streamLock.lock()
         defer { streamLock.unlock() }
