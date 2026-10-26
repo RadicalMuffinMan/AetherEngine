@@ -704,9 +704,11 @@ final class FrameDecodeContext: @unchecked Sendable {
         }
         let displayHeight = CGFloat(nativeH) * CGFloat(sar.den) / CGFloat(sar.num)
         // Whole output pixels must fit both limits, including fractional CGSize bounds.
-        let scale = min(maxSize.width.rounded(.down) / CGFloat(nativeW),
-                        maxSize.height.rounded(.down) / displayHeight, 1.0)
-        return max(1, Int((CGFloat(nativeW) * scale).rounded(.down)))
+        // Keep the width bound in pixels: dividing by nativeW and multiplying back can
+        // turn an exactly fitting integer into the preceding representable value.
+        let heightLimitedWidth = maxSize.height.rounded(.down) * CGFloat(nativeW) / displayHeight
+        let width = min(CGFloat(nativeW), maxSize.width.rounded(.down), heightLimitedWidth)
+        return max(1, Int(width.rounded(.down)))
     }
 
     /// Copy an RGBA AVFrame (e.g. tone-mapper output) into an owned-buffer CGImage.

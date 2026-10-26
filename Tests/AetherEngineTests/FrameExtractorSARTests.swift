@@ -87,6 +87,25 @@ struct FrameExtractorSARTests {
         await extractor.shutdown()
     }
 
+    @Test("An exactly fitting snapshot width does not lose a pixel to a scale round trip")
+    func exactSnapshotWidth() async throws {
+        let data = try #require(Data(base64Encoded: Self.largeSDRAnamorphic,
+                                    options: .ignoreUnknownCharacters))
+        let extractor = FrameExtractor(reader: DataIOReader(data: data), formatHint: "mp4")
+        // (13.0 / 720) * 720 is one ULP below 13. Flooring that round trip returned 12x9.
+        for (width, height) in [(13, 10), (26, 20)] {
+            let image = try #require(await extractor.snapshot(at: 0,
+                maxSize: CGSize(width: width, height: 1000)))
+            #expect(image.width == width)
+            #expect(image.height == height)
+        }
+        // Retain the existing one-pixel minimum when a positive bound is smaller than a pixel.
+        let minimum = try #require(await extractor.snapshot(at: 0,
+            maxSize: CGSize(width: 0.5, height: 0.5)))
+        #expect(minimum.width == 1 && minimum.height == 1)
+        await extractor.shutdown()
+    }
+
     @Test("HDR tone mapping produces exact square-pixel bounds without falling back")
     func toneMappedDimensions() throws {
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
@@ -169,5 +188,42 @@ struct FrameExtractorSARTests {
         b21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2Nl
         bmVjdXQ9MCBpbnRyYV9yZWZyZXNoPTAgcmM9Y3JmIG1idHJlZT0wIGNyZj0yMC4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02
         OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTAAgAAAABNliIQ6JigAycnJydddddddddde
+        """
+
+    // Same SDR generation command as above, at 720x480.
+    private static let largeSDRAnamorphic = """
+        AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMTbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAA
+        AAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAA
+        Aj50cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAA
+        AAAAAAAAAAAAAABAAAAAAoAAAAHgAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAG2bWRpYQAAACBtZGhk
+        AAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABYW1p
+        bmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASFzdGJsAAAAvXN0c2QA
+        AAAAAAAAAQAAAK1hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAtAB4ABIAAAASAAAAAAAAAABFExhdmM2My4xLjEwMiBsaWJ4
+        MjY0AAAAAAAAAAAAAAAAGP//AAAAM2F2Y0MBQsAW/+EAHGdCwBbaAtD2/8ACAAJEAAADAAQAAAMACDxYuoABAARozgbyAAAAEHBh
+        c3AAAAAIAAAACQAAABRidHJ0AAAAAAAAMxAAAAAAAAAAGHN0dHMAAAAAAAAAAQAAAAEAAEAAAAAAHHN0c2MAAAAAAAAAAQAAAAEA
+        AAABAAAAAQAAABRzdHN6AAAAAAAABmIAAAABAAAAFHN0Y28AAAAAAAAAAQAAA0MAAABhdWR0YQAAAFltZXRhAAAAAAAAACFoZGxy
+        AAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAACxpbHN0AAAAJKl0b28AAAAcZGF0YQAAAAEAAAAATGF2ZjYzLjEuMTAyAAAACGZy
+        ZWUAAAZqbWRhdAAAAlMGBf//T9xF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjUgcjMyMjIgYjM1NjA1YSAtIEguMjY0L01Q
+        RUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMjUgLSBodHRwOi8vd3d3LnZpZGVvbGFuLm9yZy94MjY0Lmh0bWwgLSBv
+        cHRpb25zOiBjYWJhYz0wIHJlZj0xIGRlYmxvY2s9MDowOjAgYW5hbHlzZT0wOjAgbWU9ZGlhIHN1Ym1lPTAgcHN5PTEgcHN5X3Jk
+        PTEuMDA6MC4wMCBtaXhlZF9yZWY9MCBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTAgOHg4ZGN0PTAgY3FtPTAgZGVh
+        ZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9MCB0aHJlYWRzPTEgbG9va2FoZWFkX3RocmVhZHM9MSBz
+        bGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2lu
+        dHJhPTAgYmZyYW1lcz0wIHdlaWdodHA9MCBrZXlpbnQ9MjUwIGtleWludF9taW49MSBzY2VuZWN1dD0wIGludHJhX3JlZnJlc2g9
+        MCByYz1jcmYgbWJ0cmVlPTAgY3JmPTIwLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEu
+        NDAgYXE9MACAAAAEB2WIhDomKADJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeA
         """
 }
