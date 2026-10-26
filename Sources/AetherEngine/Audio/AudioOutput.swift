@@ -138,20 +138,16 @@ final class AudioOutput: @unchecked Sendable {
         }
     }
 
-    /// Add the video display layer to the synchronizer for automatic A/V sync + frame pacing. On iOS18/tvOS18/
-    /// macOS15+ Apple split the queue rendering surface onto displayLayer.sampleBufferRenderer; direct
-    /// addRenderer(layer) still type-checks but on tvOS 26+ fails with FigVideoQueueRemote err=-12080 after the
-    /// first enqueue, so attach the renderer instead.
+    /// Add the video renderer to the synchronizer for automatic A/V sync + frame pacing. The display layer's
+    /// `sampleBufferRenderer`, never the layer: addRenderer(layer) still type-checks but on tvOS 26+ fails with
+    /// FigVideoQueueRemote err=-12080 after the first enqueue. The layer is main-actor isolated in the 27 SDKs,
+    /// hence the isolation here (#351).
     @MainActor
     func attachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
         precondition(videoLayerRemovalTask == nil, "Await video layer removal before attaching again")
         guard attachedVideoLayer !== displayLayer else { return }
         precondition(attachedVideoLayer == nil, "An audio output owns only one video layer")
-        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
-            synchronizer.addRenderer(displayLayer.sampleBufferRenderer)
-        } else {
-            synchronizer.addRenderer(displayLayer)
-        }
+        synchronizer.addRenderer(displayLayer.sampleBufferRenderer)
         attachedVideoLayer = displayLayer
     }
 
@@ -189,14 +185,8 @@ final class AudioOutput: @unchecked Sendable {
             // AVFoundation reports false for an absent renderer or a superseded removal.
             // This is the attachment's only remover and duplicate requests share its task,
             // so no second removal can supersede it; either result finishes retirement.
-            if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
-                synchronizer.removeRenderer(displayLayer.sampleBufferRenderer, at: .invalid) { _ in
-                    continuation.resume()
-                }
-            } else {
-                synchronizer.removeRenderer(displayLayer, at: .invalid) { _ in
-                    continuation.resume()
-                }
+            synchronizer.removeRenderer(displayLayer.sampleBufferRenderer, at: .invalid) { _ in
+                continuation.resume()
             }
         }
     }
