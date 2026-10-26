@@ -159,9 +159,9 @@ the public-API contract.
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
-- **The APAC converter input supports a Sendable callback under Swift 6.** The former mutable supply
-  flag and PCM-buffer captures fail that stricter callback contract. A locked one-shot borrow keeps
-  the explicitly Sendable callback valid while preserving byte-identical output across repeated drains.
+- **The APAC converter input callback is explicitly Sendable.** This is defensive compilation hygiene;
+  no host build or playback failure was reproduced. One-shot input delivery and encoded output remain
+  unchanged.
 
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
