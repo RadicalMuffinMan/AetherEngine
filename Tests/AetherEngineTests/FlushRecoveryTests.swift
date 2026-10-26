@@ -944,11 +944,9 @@ struct FlushRecoveryHostTests {
         host.keyframeLedgerForTesting.noteKeyframeRead(pts: 3)
 
         host.play()
-        let freed = try await waitFor(upTo: .seconds(10)) { host.keyframeLedgerForTesting.nextKeyframe == nil }
+        try await waitFor { host.keyframeLedgerForTesting.nextKeyframe == nil }
         // Judged while the source is held short of its end.
-        #expect(freed)
-        let held = try await waitFor(upTo: .seconds(10)) { reader.blockedReads >= 1 }
-        #expect(held, "the source was not held")
+        try await waitFor { reader.blockedReads >= 1 }
         #expect(decoder.seen == 0)
         host.exitBackgroundAudioOnly()
         #expect(host.flushRecoveryLog.map(\.action) == [.deferToForeground, .reposition])
@@ -961,8 +959,8 @@ struct FlushRecoveryHostTests {
         for i in 0..<frames { try presentFrame(host, at: start + Double(i) * 0.04) }
         try #require(renderer.pendingPresentationCountForTesting > 0)
         host.seekClockForTesting(to: start + 1)
-        let counted = try await waitFor(upTo: .seconds(10)) { renderer.pendingPresentationCountForTesting == 0 }
-        try #require(counted, "the host's tick did not count the frames the clock passed")
+        // The host's tick counts the frames the clock passed; a hang is the suite's time limit.
+        try await waitFor { renderer.pendingPresentationCountForTesting == 0 }
     }
 
     @Test("after a recovery, healthy playback counts as presented: a later notification with the queue needing a flush recovers again, round after round")
@@ -1039,8 +1037,7 @@ struct FlushRecoveryHostTests {
         host.keyframeLedgerForTesting.requireKeyframe()
         renderer.readyForMoreMediaDataForTesting = nil
 
-        let reached = try await waitFor(upTo: .seconds(10)) { decoder.accepted.count == 6 }
-        #expect(reached, "accepted \(decoder.accepted.map(\.isKey))")
+        try await waitFor { decoder.accepted.count == 6 }
         #expect(decoder.accepted.map(\.isKey) == [true, false, false, true, false, false])
     }
 

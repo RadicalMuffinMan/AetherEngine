@@ -29,15 +29,6 @@ struct SoftwareHostWakeRestoreTests {
         func deactivate() { deactivated = true; handler = nil }
     }
 
-    private func waitUntil(_ seconds: Double = 10, _ condition: @MainActor () -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if condition() { return true }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        return condition()
-    }
-
     @Test("a paused session torn down for the background comes back paused, with Now-Playing and the remote")
     func restoreAfterBackgroundTeardown() async throws {
         let file = try await Self.fixture.value
@@ -59,7 +50,7 @@ struct SoftwareHostWakeRestoreTests {
         engine.play()
         // Past the one-second floor below which a rebuild deliberately restarts at the head
         // (`LiveReloadPolicy.resumePosition`), so the restore has a position to come back to.
-        #expect(await waitUntil { engine.currentTime > 1.5 })
+        try await waitFor { engine.currentTime > 1.5 }
         engine.pause()
         let pausedAt = engine.currentTime
         #expect(engine.softwareNowPlayingActive)
@@ -91,9 +82,8 @@ struct SoftwareHostWakeRestoreTests {
         // A remote Play goes through the rebuilt card's command handler and moves the session again.
         let handler = try #require(restored.handler)
         handler(.play)
-        #expect(await waitUntil { engine.state == .playing })
+        try await waitFor { engine.state == .playing }
         let resumedFrom = engine.currentTime
-        #expect(await waitUntil { engine.currentTime > resumedFrom + 0.3 },
-                "clock stayed at \(engine.currentTime) after the remote Play")
+        try await waitFor { engine.currentTime > resumedFrom + 0.3 }
     }
 }

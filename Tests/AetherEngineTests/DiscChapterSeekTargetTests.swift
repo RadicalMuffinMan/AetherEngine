@@ -132,7 +132,7 @@ struct DiscChapterSeekTargetTests {
 }
 
 /// The engine feeds its own state into the same rule.
-@Suite("Disc chapter seek target engine wiring")
+@Suite("Disc chapter seek target engine wiring", .timeLimit(.minutes(1)))
 @MainActor
 struct DiscChapterSeekTargetEngineTests {
 
@@ -162,7 +162,7 @@ struct DiscChapterSeekTargetEngineTests {
 
         engine.selectChapter(id: 3)
         // The seek runs in a main-actor task; the idle engine rejects it with the target it was given.
-        for _ in 0..<200 where events.isEmpty { try await Task.sleep(nanoseconds: 5_000_000) }
+        try await waitFor { !events.isEmpty }
 
         #expect(events.count == 1)
         #expect(events.first?.outcome == .rejected(.noActiveSession))
