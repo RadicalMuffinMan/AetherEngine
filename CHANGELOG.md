@@ -166,6 +166,8 @@ the public-API contract.
   the cache or reset a newer request's idle timer. Requests with invalid timestamps and already-cancelled
   requests leave an active caller's work alone. Replacement is shared across still modes, including
   cancellation of an in-flight bounded snapshot's caller-supplied token.
+  Cancellation and playback yield still schedule idle cleanup of an opened decode context;
+  only the latest admitted request can reset that timer.
 
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the

@@ -64,12 +64,14 @@ public actor FrameExtractor {
         // before returning it, using the same cross-mode ownership rule as ordinary stills.
         currentToken?.cancel()
         boundedCancellation?.cancel()
+        let token = CancelToken(); currentToken = token
+        defer {
+            if !isShutDown, currentToken === token { scheduleIdleClose() }
+        }
         let width = maxWidth
         if !refined, let cached = residentApproximation, cached.width == width {
-            scheduleIdleClose()
             return cached.frame
         }
-        let token = CancelToken(); currentToken = token
         let context = self.context
         let result: ScrubFrame? = await withTaskCancellationHandler {
             await runOnQueue {
@@ -89,7 +91,6 @@ public actor FrameExtractor {
         if !refined, let result, result.image.bytesPerRow * result.image.height <= 512 * 1_024 {
             residentApproximation = (width, result)
         }
-        scheduleIdleClose()
         return result
     }
 
@@ -296,8 +297,14 @@ public actor FrameExtractor {
         // yields to playback. Retire the preceding decode before either early return.
         currentToken?.cancel()
         boundedCancellation?.cancel()
+        let token = CancelToken()
+        currentToken = token
+        // Every admitted outcome owns idle cleanup, including cache hits, yields and caller
+        // cancellation. A late completion cannot extend the newer request's idle lifetime.
+        defer {
+            if !isShutDown, currentToken === token { scheduleIdleClose() }
+        }
         if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize) {
-            scheduleIdleClose()
             return hit
         }
         // Elective thumbnails/previews yield to a starved playback pipeline (snapshots are deliberate
@@ -307,9 +314,6 @@ public actor FrameExtractor {
                            category: .swPlayback, level: .verbose)
             return nil
         }
-        let token = CancelToken()
-        currentToken = token
-
         let context = self.context
         let result = await withTaskCancellationHandler {
             await runOnQueue { () -> FrameResult in
@@ -350,7 +354,6 @@ public actor FrameExtractor {
         if let image = result.image {
             cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
         }
-        scheduleIdleClose()
         return result.image
     }
 

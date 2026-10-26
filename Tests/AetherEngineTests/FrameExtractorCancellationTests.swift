@@ -6,6 +6,51 @@ import Testing
 
 @Suite("Still request cancellation", .timeLimit(.minutes(1)))
 struct FrameExtractorCancellationTests {
+    @Test("Cancelling the first still request still closes its idle decode context", arguments: [false, true])
+    func cancelledFirstRequestClosesIdleContext(resident: Bool) async throws {
+        let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data())
+        let extractor = resident
+            ? FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-idle")
+            : FrameExtractor(reader: reader, formatHint: "mpegts")
+        reader.arm()
+        let pending = Task { () -> Bool in
+            if resident {
+                return await extractor.residentPreview(
+                    rawTarget: 2, refined: true, maxWidth: 16, isCancelled: { false }) != nil
+            }
+            return await extractor.preview(at: 2, maxWidth: 16) != nil
+        }
+        defer { reader.release(); pending.cancel() }
+        try await waitFor { reader.isBlocked }
+        pending.cancel()
+        reader.release()
+        #expect(await pending.value == false)
+        let cancellations = reader.cancellationCount
+        // Demuxer.close cancels its custom reader. Keep the extractor alive while its real
+        // ten-second idle task releases the context; dropping the extractor would hide the leak.
+        try await waitFor { reader.cancellationCount > cancellations }
+        await extractor.shutdown()
+    }
+
+    @Test("A yielding request still closes the first decode's idle context")
+    func yieldedFirstRequestClosesIdleContext() async throws {
+        let starved = Mutex(false)
+        let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data())
+        let extractor = FrameExtractor(reader: reader, formatHint: "mpegts",
+                                       yieldWhile: { starved.withLock { $0 } })
+        reader.arm()
+        let older = Task { await extractor.preview(at: 2, maxWidth: 16) }
+        defer { reader.release(); older.cancel() }
+        try await waitFor { reader.isBlocked }
+        starved.withLock { $0 = true }
+        #expect(await extractor.preview(at: 25, maxWidth: 16) == nil)
+        reader.release()
+        #expect(await older.value == nil)
+        let cancellations = reader.cancellationCount
+        try await waitFor { reader.cancellationCount > cancellations }
+        await extractor.shutdown()
+    }
+
     @Test("A resident cache hit supersedes an older refined decode")
     func residentCacheHitSupersedesRefinement() async throws {
         let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data(), maxReadSize: 1_024)
@@ -155,6 +200,7 @@ private final class StillGateReader: IOReader, @unchecked Sendable {
     private var armed = false
     private var blocked = false
     private var released = false
+    private var cancellations = 0
 
     init(data: Data, maxReadSize: Int32 = .max) {
         reader = DataIOReader(data: data)
@@ -164,6 +210,10 @@ private final class StillGateReader: IOReader, @unchecked Sendable {
     var isBlocked: Bool {
         condition.lock(); defer { condition.unlock() }
         return blocked
+    }
+    var cancellationCount: Int {
+        condition.lock(); defer { condition.unlock() }
+        return cancellations
     }
     func arm() {
         condition.lock(); defer { condition.unlock() }
@@ -191,6 +241,9 @@ private final class StillGateReader: IOReader, @unchecked Sendable {
         if whence != 65536 { waitAtGate() }
         return reader.seek(offset: offset, whence: whence)
     }
-    func cancel() { release() }
+    func cancel() {
+        condition.lock(); cancellations += 1; condition.unlock()
+        release()
+    }
     func close() { release(); reader.close() }
 }

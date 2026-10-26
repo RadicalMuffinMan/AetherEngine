@@ -1220,6 +1220,8 @@ ordinary or resident preview cancels an in-flight `boundedSnapshot` and its call
 `ProbeCancellation`. Use separate extractors for independent concurrent requests. Cancellation is
 cooperative between decode steps; an in-flight source read still uses its normal timeout.
 Use `boundedSnapshot` for an explicit total deadline.
+Cancellation and playback yield still schedule idle cleanup of an opened context. A superseded
+completion cannot reset the newer request's idle timer.
 
 | Symbol | Notes |
 | --- | --- |
