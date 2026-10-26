@@ -168,9 +168,10 @@ the public-API contract.
   the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
   and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
 
-- **Empty HLS FIFO writes no longer look like EOF.** Zero-byte writes leave readers waiting for
-  real data and do not wait for capacity. Nonpositive read lengths fail without consuming bytes;
-  zero remains reserved for a finished, drained queue.
+- **The internal HLS byte FIFO defensively rejects operations that could look like EOF.**
+  Empty writes complete without occupying capacity, and nonpositive read lengths fail without
+  consuming bytes. Current ingest callers already filter both cases, so this hardens the internal
+  contract for future callers rather than changing existing playback.
 
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
