@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Added
 
+- **AV1 Dolby Vision Profile 10.1 plays as Dolby Vision on the software host.**
+  AVFoundation and VideoToolbox ignore the RPU an AV1 stream carries in its ITU-T T.35 metadata OBU, so every
+  Apple route showed a 10.1 source's HDR10 base layer, and an Apple TV, where AV1 always plays through dav1d,
+  had no Dolby Vision for AV1 at all. Each temporal unit's RPU is now rewrapped by libdovi into the `unspec62`
+  form VideoToolbox attaches to an HEVC 8.1 frame and attached to the decoded frame under `DoviDisplayMetadata`'s
+  keys, which now compile without the `DualLayerDolbyVision` trait. Measured on an Apple TV 4K (3rd generation,
+  tvOS 27) into an LG CX and on macOS 27 (M5 Pro). See `docs/formats.md`.
+
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
   failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH
