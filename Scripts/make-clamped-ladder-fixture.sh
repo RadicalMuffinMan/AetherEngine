@@ -14,6 +14,13 @@
 #   bframes-healthy.mp4  H.264 High 1280x720 29.97 fps, B pyramid, GOP 90, 30 s + AAC (the twin)
 #   clamped-ladder.mp4   the same stream, ctts dropped, ladder clamped as above
 #   pushed-anchors.mp4   the same stream, ctts dropped, anchors pushed too
+#   p-run-healthy.mp4    (x264 CLI only) every GOP opens on twelve P pictures before its first B
+#   p-run-clamped.mp4    the same stream, ctts dropped, clamped as clamped-ladder.mp4
+#
+# The clamp also pushes some keyframes (the 630th picture here, by 1001 ticks), as the reporting
+# files do on most GOP boundaries; the repair continues the sequence before them instead.
+# p-run-healthy.mp4 is written through Matroska, so its timestamps sit on whole milliseconds and the
+# twins agree in display order rather than in value.
 #
 # testsrc2 draws a frame counter and a moving bar, so the order is visible by eye.
 #
@@ -58,6 +65,29 @@ FF=(ffmpeg -hide_banner -loglevel error -y)
   "$OUT/pushed-anchors.mp4"
 
 FIXTURES=(clamped-ladder.mp4 pushed-anchors.mp4)
+
+# A writer that opens each GOP on a run of P pictures leaves the first twelve sampled pictures in
+# order, so the probe has to sample on to the first B picture. ffmpeg's libx264 wrapper cannot force
+# frame types; the x264 CLI does it with a qpfile.
+if command -v x264 >/dev/null 2>&1; then
+  TMP="$(mktemp -d)"
+  { echo "0 I -1"; for i in $(seq 1 12); do echo "$i P -1"; echo "$((i + 90)) P -1"; echo "$((i + 180)) P -1"; done; echo "90 I -1"; echo "180 I -1"; } \
+    | sort -n > "$TMP/qp.txt"
+  "${FF[@]}" -f lavfi -i "testsrc2=size=1280x720:rate=30000/1001:duration=10" -pix_fmt yuv420p \
+    -f yuv4mpegpipe "$TMP/src.y4m"
+  x264 --quiet --preset veryfast --crf 23 --bframes 3 --b-pyramid normal --b-adapt 0 --keyint 90 \
+    --min-keyint 90 --scenecut 0 --qpfile "$TMP/qp.txt" -o "$TMP/p-run.mkv" "$TMP/src.y4m" 2>/dev/null
+  "${FF[@]}" -i "$TMP/p-run.mkv" -c:v copy -video_track_timescale 90000 -movflags +faststart \
+    "$OUT/p-run-healthy.mp4"
+  "${FF[@]}" -i "$OUT/p-run-healthy.mp4" -map 0 -c copy \
+    -bsf:v 'setts=ts=max(PTS\,PREV_OUTDTS+1001)' -video_track_timescale 90000 -movflags +faststart \
+    "$OUT/p-run-clamped.mp4"
+  rm -rf "$TMP"
+  echo "wrote $OUT/p-run-healthy.mp4"
+  FIXTURES+=(p-run-clamped.mp4)
+else
+  echo "x264 not found: skipping p-run-*.mp4"
+fi
 echo "wrote $OUT/bframes-healthy.mp4"
 for name in "${FIXTURES[@]}"; do
   echo "wrote $OUT/$name"

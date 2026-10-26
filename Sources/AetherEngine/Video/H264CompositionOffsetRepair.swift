@@ -174,6 +174,10 @@ enum H264CompositionOffsetRepair {
     /// shows an offset; only the broken shape pays the full window, which has to span at least one
     /// mini-GOP for the picture order to prove reordering at all.
     static let sampleTarget = 12
+    /// How far the sample may grow when the first `sampleTarget` pictures never reorder. A writer can
+    /// open every GOP on a run of P pictures (measured: twelve, then the first B picture), and without
+    /// a regression the head proves nothing either way.
+    static let extendedSampleTarget = 48
     /// Below this the ladder and the reorder evidence are too thin to trust; sampling stops early
     /// only on a healthy verdict or EOF.
     static let minimumSamples = 9
@@ -408,26 +412,27 @@ enum H264CompositionOffsetRepair {
         return Int64(ticks.rounded())
     }
 
-    /// Frame rates a camera, encoder or broadcast chain actually produces.
-    static let standardFrameRates: [(num: Int64, den: Int64)] = [
-        (24000, 1001), (24, 1), (25, 1), (30000, 1001), (30, 1), (48, 1), (50, 1), (60000, 1001), (60, 1),
-    ]
+    /// Frame rates a camera, encoder or broadcast chain actually produces: every whole rate up to 240,
+    /// and the NTSC ones (`n * 1000 / 1001`).
+    static let standardFrameRates: [(num: Int64, den: Int64)] =
+        (1...240).map { (Int64($0), 1) } + [24, 30, 48, 60, 120, 240].map { (Int64($0) * 1000, 1001) }
 
-    /// The whole-tick picture length of the standard frame rate closest to `estimate`, within 1%. 29.97
-    /// and 30 are both that close to either, so the nearer one wins and a tie names neither. nil when no
-    /// standard rate is that close, or when the nearest one is not a whole number of ticks in
-    /// `timeBase` (23.976 at 90 kHz): a neighbouring rate that happens to be whole would drift.
+    /// The picture length, rounded to a tick, of the standard frame rate closest to `estimate`, within 1%.
+    /// 29.97 and 30 are both that close to either, so the nearer one wins and a tie names neither. A
+    /// rate that is not a whole number of ticks (23.976 or 23 at 90 kHz) is rounded: the synthesized
+    /// ladder re-anchors on every keyframe, so the half tick per picture never adds up across a GOP the
+    /// way an estimate's error does (29.80 against 29.97 is 17 ticks per picture). nil when no standard
+    /// rate is that close.
     static func standardFrameStep(near estimate: Int64, timeBase: AVRational) -> Int64? {
         guard estimate >= 2, timeBase.num > 0, timeBase.den > 0 else { return nil }
-        let ranked = standardFrameRates.map { rate -> (num: Int64, den: Int64, distance: Double) in
-            let numerator = Int64(timeBase.den) * rate.den
-            let denominator = Int64(timeBase.num) * rate.num
-            return (numerator, denominator, abs(Double(numerator) / Double(denominator) - Double(estimate)))
+        let ranked = standardFrameRates.map { rate -> (ticks: Double, distance: Double) in
+            let ticks = Double(timeBase.den) * Double(rate.den) / (Double(timeBase.num) * Double(rate.num))
+            return (ticks, abs(ticks - Double(estimate)))
         }.sorted { $0.distance < $1.distance }
         guard let nearest = ranked.first, nearest.distance * 100 <= Double(estimate) else { return nil }
         if ranked.count > 1, ranked[1].distance == nearest.distance { return nil }
-        guard nearest.num % nearest.den == 0 else { return nil }
-        return nearest.num / nearest.den
+        guard nearest.ticks < Double(Int64.max / 4) else { return nil }
+        return Int64(nearest.ticks.rounded())
     }
 
     /// Whether a non-uniform sampled ladder still spans the time its pictures would take at `step`. The
@@ -582,6 +587,9 @@ enum H264CompositionOffsetRepair {
         /// for the seek, so an H.264 open-GOP landing reads its picture order relative to itself (a
         /// non-IDR I picture can come out at -4), and only differences within the sequence mean anything.
         private var anchoredOnLanding = false
+        /// The highest display index placed in the current sequence. A synthesized ladder's next IDR
+        /// is expected right after it.
+        private var sequenceLastDisplayIndex: Int64?
         /// Pictures emitted untouched because no anchor was available or the arithmetic did not
         /// close. Surfaced so a stream this repair does not describe is visible as a number.
         private(set) var unrepairedPictures = 0
@@ -596,6 +604,7 @@ enum H264CompositionOffsetRepair {
             landingLeadingPictures = 0
             decodeOrdinal = 0
             anchoredOnLanding = false
+            sequenceLastDisplayIndex = nil
         }
 
         mutating func noteLanding(leadingPictures: Int64) {
@@ -618,11 +627,12 @@ enum H264CompositionOffsetRepair {
             // point can be placed at all; mid-sequence keyframes must not re-anchor, or every open
             // GOP would restart the display axis under a picture that has not moved.
             if isKeyframe, pictureOrderCount == 0 {
-                sequenceAnchorDTS = dts
+                sequenceAnchorDTS = awaitingReanchor ? dts : continuedSequenceAnchor(keyframeDTS: dts)
                 sequenceBaseOrdinal = plan.presentationOrdinal(ladderTimestamp: dts)
                 awaitingReanchor = false
                 decodeOrdinal = 0
                 anchoredOnLanding = false
+                sequenceLastDisplayIndex = nil
             } else if awaitingReanchor, isKeyframe {
                 guard pictureOrderCount % plan.pocStep == 0 else {
                     unrepairedPictures += 1
@@ -652,6 +662,7 @@ enum H264CompositionOffsetRepair {
                 awaitingReanchor = false
                 decodeOrdinal = anchorSlots
                 anchoredOnLanding = true
+                sequenceLastDisplayIndex = nil
             }
             guard let anchor = sequenceAnchorDTS, !awaitingReanchor else {
                 unrepairedPictures += 1
@@ -665,6 +676,7 @@ enum H264CompositionOffsetRepair {
                 return nil
             }
             let displayIndex = pictureOrderCount / plan.pocStep
+            sequenceLastDisplayIndex = max(sequenceLastDisplayIndex ?? displayIndex, displayIndex)
             // On a lattice the picture is placed by its ordinal, which reproduces the muxer exactly
             // even where the fraction rounds the other way. Without one, or when the sequence could
             // not be read back onto the lattice, the rounded step still describes the stream to
@@ -687,6 +699,30 @@ enum H264CompositionOffsetRepair {
             }
             repairedPictures += 1
             return (pts, newDTS)
+        }
+
+        /// Where the IDR that follows a placed sequence starts. A forced-monotonic writer pushes the
+        /// keyframe too, and only ever later: on both reporting files the keyframes sat 0 to 4 pictures
+        /// after the end of the sequence before them, which left a gap or put the next GOP in front of
+        /// the last pictures of this one. A later keyframe therefore continues the sequence right after
+        /// its last picture. One that comes earlier than that is the better reading, because the chain
+        /// itself started on a pushed keyframe (a seek lands on whatever the writer left there) and
+        /// moves back each time a keyframe was pushed less. Within half a tick per picture of the
+        /// sequence the keyframe keeps its own time too: that is all a rounded step can be off by (23 fps
+        /// is 3913.04 ticks at 90 kHz), so the chain does not drift. One later than the reorder head
+        /// plus two pictures is a real discontinuity.
+        private func continuedSequenceAnchor(keyframeDTS dts: Int64) -> Int64 {
+            guard plan.synthesizesDecodeLadder, let previous = sequenceAnchorDTS,
+                  let last = sequenceLastDisplayIndex, last >= 0 else { return dts }
+            let (pictures, countOverflow) = last.addingReportingOverflow(1)
+            let (length, lengthOverflow) = pictures.multipliedReportingOverflow(by: plan.step)
+            let (expected, expectedOverflow) = previous.addingReportingOverflow(length)
+            let (drift, driftOverflow) = dts.subtractingReportingOverflow(expected)
+            let (limit, limitOverflow) = plan.step.multipliedReportingOverflow(by: 2)
+            guard !countOverflow, !lengthOverflow, !expectedOverflow, !driftOverflow, !limitOverflow
+            else { return dts }
+            guard drift > pictures / 2 + 1, drift <= plan.decodeLead &+ limit else { return dts }
+            return expected
         }
     }
 }
@@ -875,7 +911,7 @@ final class H264CompositionOffsetRepairSession {
             }
             held.append((packet, pictureOrderCount))
             heldBytes += Int(max(0, packet.pointee.size))
-            if samples.count >= H264CompositionOffsetRepair.sampleTarget
+            if (samples.count >= H264CompositionOffsetRepair.sampleTarget && !awaitsReordering)
                 || heldBytes >= H264CompositionOffsetRepair.sampleByteBudget
                 || held.count >= H264CompositionOffsetRepair.heldPacketCeiling
                 || earlyHealthyVerdict {
@@ -935,6 +971,21 @@ final class H264CompositionOffsetRepairSession {
         }
         self.rewriter = rewriter
         landingPictureOrder = nil
+    }
+
+    /// The sample is past `sampleTarget` without a picture-order regression, every picture so far reports
+    /// `PTS == DTS`, and it may still grow: keep sampling until the first regression plus the rest of
+    /// its mini-GOP (the reorder delay and two pictures, which is what the window checks need to see
+    /// it close). A head that already reordered inside `sampleTarget` decides there, as before.
+    private var awaitsReordering: Bool {
+        guard samples.count < H264CompositionOffsetRepair.extendedSampleTarget,
+              samples.allSatisfy({ $0.dts != Int64.min && $0.pts == $0.dts && $0.pictureOrderCount >= 0 })
+        else { return false }
+        guard let regression = samples.indices.dropFirst().first(where: {
+            samples[$0].pictureOrderCount < samples[$0 - 1].pictureOrderCount
+        }) else { return true }
+        guard regression >= H264CompositionOffsetRepair.sampleTarget else { return false }
+        return samples.count - regression < videoDelay + 2
     }
 
     /// A healthy file usually proves itself on its first packet, and paying twelve packets of hold

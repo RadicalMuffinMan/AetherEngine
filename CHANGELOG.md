@@ -47,8 +47,10 @@ the public-API contract.
   showed the B pictures in decode order, as QuickTime and the Files app do. The repair now takes the
   step from the stream's average frame rate, remeasures it on the anchors (or, when the anchors were
   pushed as well, snaps it to the nearest standard frame rate within 1%) and rebuilds DTS from each
-  picture's decode slot, under the same picture-order checks. `Scripts/make-clamped-ladder-fixture.sh`
-  generates a twin pair. See `docs/formats.md`.
+  picture's decode slot, under the same picture-order checks. A keyframe the writer pushed late
+  continues the GOP before it instead of leaving a gap or overlapping it, and a head that opens on a
+  run of P pictures is sampled on to its first B picture (up to 48 pictures).
+  `Scripts/make-clamped-ladder-fixture.sh` generates the twins. See `docs/formats.md`.
 
 - **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told
   to mix, so a stereo track reached the tap as its left channel alone, 2.1 as silence, and 4.0 to 7.1 as the centre

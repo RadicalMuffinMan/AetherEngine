@@ -111,9 +111,19 @@ reorder delay plus two pictures, and every other check above still passes. The s
 remeasured on the anchors when the writer left them on the presentation axis (the average rate is
 only an estimate: a 60-picture 29.97 fps clip reports 29.80). The reporting file pushed its P pictures
 as well (each anchor 1001 ticks past the picture before it), so no two anchors agree; the step is
-then the standard frame rate (23.976, 24, 25, 29.97, 30, 48, 50, 59.94 or 60) nearest the average
-rate, if that is within 1% and a whole number of ticks. A head with neither is left untouched. DTS is rebuilt from each picture's decode slot rather than shifted, since a
-pushed B picture's DTS can sit after its own presentation time. After a seek onto an open-GOP
+then the standard frame rate (any whole rate up to 240, or an NTSC one such as 23.976 or 29.97)
+nearest the average rate, if that is within 1%, rounded to a tick (a second reporting file runs at
+23 fps, 3913.04 ticks). A head with neither is left untouched. DTS is rebuilt from each picture's
+decode slot rather than shifted, since a pushed B picture's DTS can sit after its own presentation
+time. The writer pushes keyframes as well, and only ever later: on both reporting files they sat 0 to
+4 pictures after the end of the GOP before them, which left a gap or put the next GOP in front of the
+last pictures of the previous one. A later IDR therefore continues the sequence before it, unless it
+is later than the reorder delay plus two pictures (a real discontinuity) or within half a tick per
+picture (all a rounded step can be off by); an earlier one keeps its own time, which is how a chain
+started on a pushed keyframe after a seek moves back into place. The second reporting file also opens
+every GOP on twelve P pictures before its first B, so a head that has not reordered after twelve
+pictures, with `PTS == DTS` throughout, is sampled on to its first regression plus a mini-GOP, up to
+**48 pictures**. After a seek onto an open-GOP
 keyframe, which kept its own presentation time, the sequence origin is taken from its display rank
 rather than its decode slot. The shift is what puts the first
 keyframe on the stream's start time, clamped to **16 pictures** because this writer left the keyframe
@@ -121,7 +131,9 @@ four pictures ahead. Measured on a generated twin (`Scripts/make-clamped-ladder-
 pictures at 29.97 fps), the AVPlayer route stepped backwards 169 times before and 0 after, and the
 software route 44 times before and 0 after. Its `pushed-anchors.mp4`, which pushes the anchors as
 well, was left untouched before ("anchors do not agree on a step", 44 backward steps on the software
-route) and is repaired with 0 after.
+route) and is repaired with 0 after; both now demux to the healthy twin's timestamps, including
+the GOP whose keyframe the clamp pushed. Its `p-run-clamped.mp4` (x264 CLI only) opens every GOP on
+twelve P pictures: 99 of 239 backward steps before, 0 after.
 
 ### Matroska with presentation slots in coding order
 
