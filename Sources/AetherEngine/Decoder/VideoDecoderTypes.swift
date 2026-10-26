@@ -9,8 +9,8 @@ import AetherLibavcodec
 /// (kCMSampleAttachmentKey_HDR10PlusPerFrameData format); nil for non-HDR10+ streams.
 typealias DecodedFrameHandler = @Sendable (CVPixelBuffer, CMTime, Data?) -> Void
 
-/// Common video decoder protocol. SoftwareVideoDecoder (libavcodec, AV1/VP9) and
-/// HardwareVideoDecoder (VTDecompressionSession, HEVC) both conform; the host swaps per codec without rewiring the demux loop.
+/// Common video decoder protocol. SoftwareVideoDecoder (libavcodec) and
+/// HardwareVideoDecoder (VTDecompressionSession, HEVC/VP9) both conform; the host swaps per codec without rewiring the demux loop.
 // Sendable: both conformers (SoftwareVideoDecoder, HardwareVideoDecoder) are @unchecked Sendable
 // (internally lock-guarded), so `any VideoDecodingPipeline` is safe to capture in @Sendable closures.
 protocol VideoDecodingPipeline: AnyObject, Sendable {
@@ -58,6 +58,8 @@ enum VideoDecoderError: Error, LocalizedError {
     case noCodecParameters
     case unsupportedCodec(id: UInt32)
     case noExtradata
+    case unsupportedConfiguration(codec: String, detail: String)
+    case hardwareDecoderUnavailable(codec: String)
     case formatDescriptionFailed(status: OSStatus)
     case sessionCreationFailed(status: OSStatus)
     /// `DualLayerVideoDecoder` is single use (dolby-vision-fel.md §5.8): `open` after `close` refuses
@@ -75,6 +77,10 @@ enum VideoDecoderError: Error, LocalizedError {
         case .noCodecParameters: "No codec parameters"
         case .unsupportedCodec(let id): "Unsupported video codec (id: \(id))"
         case .noExtradata: "Missing codec extradata"
+        case .unsupportedConfiguration(let codec, let detail):
+            "Unsupported \(codec) configuration: \(detail)"
+        case .hardwareDecoderUnavailable(let codec):
+            "Hardware \(codec) decoder unavailable"
         case .formatDescriptionFailed(let s): "Format description failed (\(s))"
         case .sessionCreationFailed(let s): "Decoder session failed (\(s))"
         case .decoderClosed: "Decoder is closed (single use)"

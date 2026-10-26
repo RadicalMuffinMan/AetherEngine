@@ -1,4 +1,8 @@
 import Testing
+import Foundation
+import CoreMedia
+import AetherLibavformat
+import AetherLibavutil
 import AetherLibavcodec
 @testable import AetherEngine
 
@@ -144,7 +148,7 @@ struct SoftwareDecoderSelectionTests {
     }
 
     @MainActor
-    @Test("Non-HEVC or unsupported hardware decode falls back to SoftwareVideoDecoder")
+    @Test("AV1 and unsupported hardware decode use SoftwareVideoDecoder")
     func nonHardwareFallback() {
         let host = SoftwarePlaybackHost()
         host.elType = "FEL"
@@ -189,4 +193,130 @@ struct SoftwareDecoderSelectionTests {
             dvProfile: nil, elType: "FEL", preferDualLayerDolbyVision: true, dolbyVisionHandling: .automatic
         ))
     }
+    @MainActor
+    @Test("VP9 tries hardware without changing the software presentation route")
+    func vp9SelectsHardwareCandidate() {
+        let host = SoftwarePlaybackHost()
+        #expect(host.selectVideoDecoder(codecID: AV_CODEC_ID_VP9,
+            canHardwareDecode: true, dvProfile: nil) is HardwareVideoDecoder)
+        #expect(host.selectVideoDecoder(codecID: AV_CODEC_ID_VP9,
+            canHardwareDecode: false, dvProfile: nil) is SoftwareVideoDecoder)
+    }
+
+    private func withVP9Stream(_ body: (UnsafeMutablePointer<AVStream>) throws -> Void) throws {
+        let context = try #require(avformat_alloc_context())
+        defer { avformat_free_context(context) }
+        let stream = try #require(avformat_new_stream(context, nil))
+        let parameters = try #require(stream.pointee.codecpar)
+        parameters.pointee.codec_id = AV_CODEC_ID_VP9
+        parameters.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+        parameters.pointee.width = 1920
+        parameters.pointee.height = 1080
+        parameters.pointee.profile = 0
+        parameters.pointee.format = AV_PIX_FMT_YUV420P.rawValue
+        parameters.pointee.color_primaries = AVCOL_PRI_BT709
+        parameters.pointee.color_trc = AVCOL_TRC_BT709
+        parameters.pointee.color_space = AVCOL_SPC_BT709
+        parameters.pointee.chroma_location = AVCHROMA_LOC_LEFT
+        stream.pointee.avg_frame_rate = AVRational(num: 24, den: 1)
+        stream.pointee.time_base = AVRational(num: 1, den: 1000)
+        try body(stream)
+    }
+
+    @Test("WebM VP9 produces vpcC without codec extradata")
+    func webMVP9Configuration() throws {
+        try withVP9Stream { stream in
+            #expect(stream.pointee.codecpar.pointee.extradata == nil)
+            let configuration = try VideoToolboxVideoFormat.make(stream: stream)
+            #expect(configuration.codecName == "VP9")
+            #expect(configuration.bitDepth == 8)
+            let atoms = try #require(configuration.extensions[
+                kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? NSDictionary)
+            #expect(atoms["vpcC"] as? Data == Data([1, 0, 0, 0, 0, 40, 0x80, 1, 1, 1, 0, 0]))
+        }
+    }
+
+    @Test("VP9 profile 2 preserves ten-bit HDR and full-range signaling")
+    func vp9TenBitConfiguration() throws {
+        try withVP9Stream { stream in
+            let parameters = stream.pointee.codecpar!
+            parameters.pointee.profile = 2
+            parameters.pointee.format = AV_PIX_FMT_YUV420P10LE.rawValue
+            parameters.pointee.color_range = AVCOL_RANGE_JPEG
+            parameters.pointee.color_primaries = AVCOL_PRI_BT2020
+            parameters.pointee.color_trc = AVCOL_TRC_SMPTE2084
+            parameters.pointee.color_space = AVCOL_SPC_BT2020_NCL
+            parameters.pointee.chroma_location = AVCHROMA_LOC_TOPLEFT
+            let configuration = try VideoToolboxVideoFormat.vp9Configuration(
+                codecpar: parameters, frameRate: stream.pointee.avg_frame_rate)
+            #expect(configuration.configurationBoxPayload == Data([1, 0, 0, 0, 2, 40, 0xa3, 9, 16, 9, 0, 0]))
+        }
+    }
+
+    @Test("unsupported VP9 chroma and bit depth refuse the hardware candidate")
+    func vp9UnsupportedConfiguration() throws {
+        try withVP9Stream { stream in
+            let parameters = stream.pointee.codecpar!
+            for (profile, format) in [(Int32(1), AV_PIX_FMT_YUV444P),
+                                      (Int32(2), AV_PIX_FMT_YUV420P12LE),
+                                      (Int32(0), AV_PIX_FMT_YUV422P),
+                                      (Int32(2), AV_PIX_FMT_NONE)] {
+                parameters.pointee.profile = profile
+                parameters.pointee.format = format.rawValue
+                #expect(throws: VideoDecoderError.self) {
+                    try VideoToolboxVideoFormat.make(stream: stream)
+                }
+            }
+        }
+    }
+
+    @Test("VP9 does not relabel chroma siting or RGB as hardware 4:2:0")
+    func vp9UnrepresentableMetadata() throws {
+        try withVP9Stream { stream in
+            let parameters = stream.pointee.codecpar!
+            parameters.pointee.chroma_location = AVCHROMA_LOC_CENTER
+            #expect(throws: VideoDecoderError.self) {
+                try VideoToolboxVideoFormat.make(stream: stream)
+            }
+            parameters.pointee.chroma_location = AVCHROMA_LOC_LEFT
+            parameters.pointee.color_space = AVCOL_SPC_RGB
+            #expect(throws: VideoDecoderError.self) {
+                try VideoToolboxVideoFormat.make(stream: stream)
+            }
+        }
+    }
+
+    @Test("a rejected hardware open closes its state and opens libavcodec before returning")
+    func failedHardwareOpenFallsBack() throws {
+        try withVP9Stream { stream in
+            // Profile 1 is valid VP9, but intentionally outside this hardware route.
+            stream.pointee.codecpar.pointee.profile = 1
+            stream.pointee.codecpar.pointee.format = AV_PIX_FMT_YUV444P.rawValue
+            let preferred = HardwareVideoDecoder()
+            let opened = try VideoDecoderOpener.openPreferredOrFallback(
+                preferred: preferred, makeFallback: { SoftwareVideoDecoder() },
+                stream: stream, onFrame: { _, _, _ in })
+            defer { opened.decoder.close() }
+            #expect(opened.usedFallback)
+            #expect(opened.decoder is SoftwareVideoDecoder)
+            #expect(preferred.onFrame == nil)
+        }
+    }
+
+    @Test("a failed software fallback is closed and its error reaches the caller")
+    func failedFallbackIsClosed() throws {
+        try withVP9Stream { stream in
+            stream.pointee.codecpar.pointee.codec_id = AV_CODEC_ID_NONE
+            let preferred = HardwareVideoDecoder()
+            let fallback = SoftwareVideoDecoder()
+            #expect(throws: VideoDecoderError.self) {
+                try VideoDecoderOpener.openPreferredOrFallback(
+                    preferred: preferred, makeFallback: { fallback },
+                    stream: stream, onFrame: { _, _, _ in })
+            }
+            #expect(preferred.onFrame == nil)
+            #expect(fallback.onFrame == nil)
+        }
+    }
+
 }

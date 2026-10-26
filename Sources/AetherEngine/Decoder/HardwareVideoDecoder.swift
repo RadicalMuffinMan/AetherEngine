@@ -7,7 +7,7 @@ import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
 
-/// VTDecompressionSession-backed HEVC decoder for the SoftwarePlaybackHost pipeline.
+/// VTDecompressionSession-backed HEVC / VP9 decoder for the SoftwarePlaybackHost pipeline.
 /// Owns the decoded-frame pool, IOSurface lifetime, and session teardown explicitly
 /// (AVPlayer's opaque state grows unbounded on long 4K HDR sessions).
 /// Same surface as SoftwareVideoDecoder so the host can swap without rewiring the demux loop.
@@ -100,6 +100,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     private var width: Int32 = 0
     private var height: Int32 = 0
+    private var codecName = "HEVC"
 
     /// Color metadata from codecpar, re-applied to every CVPixelBuffer.
     /// VTDecompressionSession should propagate these from SPS+hvcC but has been observed not to;
@@ -295,47 +296,29 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             )
         }
 
-        let isAV1 = codecpar.pointee.codec_id == AV_CODEC_ID_AV1
-        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC || (isAV1 && Self.canDecodeAV1InHardware) else {
+        if codecpar.pointee.codec_id == AV_CODEC_ID_AV1, !Self.canDecodeAV1InHardware {
             throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
         }
+        let configuration = try VideoToolboxVideoFormat.make(stream: stream)
+        codecName = configuration.codecName
+        if codecpar.pointee.codec_id == AV_CODEC_ID_VP9 {
+            if #available(macOS 11.0, iOS 26.2, tvOS 26.2, visionOS 26.2, *) {
+                VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
+            }
+            guard VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9) else {
+                throw VideoDecoderError.hardwareDecoderUnavailable(codec: "VP9")
+            }
+        }
 
-        // 1. Build CMVideoFormatDescription from the hvcC (HEVC) or av1C (AV1) extradata via
-        //    kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms (same shape AVFoundation uses for .mp4/.mkv).
-        //    Matroska's AV1 CodecPrivate is the av1C record, and its blocks are the low-overhead OBU
-        //    temporal units VideoToolbox takes as samples.
-        guard let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 else {
-            throw VideoDecoderError.noExtradata
-        }
-        let configData = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
+        // 1. The codec's configuration record (hvcC, av1C, or a vpcC synthesized for WebM VP9) via
+        //    kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms; see VideoToolboxVideoFormat.
         var fd: CMVideoFormatDescription?
-        let atomsDict: NSDictionary = [isAV1 ? "av1C" : "hvcC": configData]
-        let extensions = NSMutableDictionary(dictionary: [
-            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atomsDict,
-        ])
-        // AV1: without colour in the description VideoToolbox guesses (`ColorInfoGuessedBy`) and tags its
-        // output BT.709 SDR in the buffer's CGColorSpace and the IOSurface's colour space ID, under the
-        // PQ transfer the frame handler attaches afterwards. A frame that says both is shown as neither:
-        // on the built-in XDR panel a PQ source came out blown out, while a screen capture looked right.
-        // HEVC gets its colour from the VUI in the hvcC's SPS and needs none of this.
-        if isAV1 {
-            if let primaries = ColorAttachments.primaries(codecpar.pointee.color_primaries) {
-                extensions[kCMFormatDescriptionExtension_ColorPrimaries] = primaries
-            }
-            if let transfer = ColorAttachments.transfer(codecpar.pointee.color_trc) {
-                extensions[kCMFormatDescriptionExtension_TransferFunction] = transfer
-            }
-            if let matrix = ColorAttachments.matrix(codecpar.pointee.color_space) {
-                extensions[kCMFormatDescriptionExtension_YCbCrMatrix] = matrix
-            }
-            extensions[kCMFormatDescriptionExtension_FullRangeVideo] = codecpar.pointee.color_range == AVCOL_RANGE_JPEG
-        }
         let fdStatus = CMVideoFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
-            codecType: isAV1 ? kCMVideoCodecType_AV1 : kCMVideoCodecType_HEVC,
+            codecType: configuration.codecType,
             width: width,
             height: height,
-            extensions: extensions,
+            extensions: configuration.extensions,
             formatDescriptionOut: &fd
         )
         guard fdStatus == noErr, let formatDesc = fd else {
@@ -350,16 +333,14 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         ]
 
         // 3. Pixel buffer attributes: 10-bit biplanar for HDR, 8-bit for SDR; IOSurface-backed for Metal rendering.
-        let bitsPerSample = codecpar.pointee.bits_per_raw_sample
-        let isHDRTransfer = ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
-        let use10Bit = bitsPerSample > 8 || isHDRTransfer
+        let use10Bit = configuration.bitDepth > 8
 
         streamColor = ColorDescription(codecpar: codecpar)
         streamCodecID = codecpar.pointee.codec_id
         streamProfile = codecpar.pointee.profile
         scansHDR10Plus = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
         hdr10PlusFraming = .lengthPrefixed(size: NALUnitChain.lengthPrefixSize(
-            codecID: streamCodecID, extradata: extradata,
+            codecID: streamCodecID, extradata: codecpar.pointee.extradata,
             extradataSize: Int(codecpar.pointee.extradata_size)) ?? 4)
         self.colorPrimaries = ColorAttachments.primaries(codecpar.pointee.color_primaries)
         self.colorTransfer = ColorAttachments.transfer(codecpar.pointee.color_trc)
@@ -392,7 +373,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
         attachesAV1DolbyVisionRPU = Self.decodesAV1DolbyVision(stream: stream)
         EngineLog.emit(
-            "[HardwareVideoDecoder] opened \(isAV1 ? "AV1" : "HEVC") \(width)x\(height) "
+            "[HardwareVideoDecoder] opened \(codecName) \(width)x\(height) "
             + (attachesAV1DolbyVisionRPU ? "Dolby Vision 10.1 (RPU attached per frame) " : "")
             + "\(use10Bit ? "10-bit" : "8-bit") "
             + "transfer=\(codecpar.pointee.color_trc.rawValue)",
