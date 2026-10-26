@@ -4,10 +4,11 @@ import AVFoundation
 
 extension AetherEngine {
 
-    /// Evidence that the current local video surface has presented a frame. This is a point read,
-    /// not the load-scoped `hasFirstFrameReadyForDisplay` latch or evidence of continuing motion.
-    /// Software metrics count non-dropped frames cumulatively for the current renderer; unavailable
-    /// metrics (including visionOS 1.0), cancellation and a superseded session return false.
+    /// Reads presentation evidence from the active local video pipeline, without waiting for a frame.
+    /// Native readiness can briefly fall during item swaps. Software metrics count non-dropped frames
+    /// cumulatively and do not prove a picture survived a flush. Hosts may latch a true for startup,
+    /// but must not treat a false as a request to restore a poster or as evidence of lost playback.
+    /// Unavailable metrics (including visionOS 1.0), cancellation and a superseded session return false.
     public func hasRenderedVideoFrame() async -> Bool {
         await hasRenderedVideoFrame(readSoftwareMetrics: { await $0.loadRenderMetrics() })
     }
