@@ -244,6 +244,10 @@ final class NativeAVPlayerHost {
     /// software-path rebuild raised in the window resumed there and replayed the gap. So neither
     /// reading is a landing: only the seek's own completion is, or the item playing, which it cannot
     /// do short of the target. A seek of the host's own takes the clock over from here as well.
+    /// AE#881: a completion that runs before the item is ready is not a landing either. AVPlayer
+    /// answers the mount seek `finished == true` in the same millisecond it was issued, and the
+    /// periodic observer then read 0.00 (the keyframe the start position falls behind) for up to
+    /// 300 ms while `avPlayer.currentTime()` read the target. See `mountSeekCompletionLands`.
     /// Round 5: not only an in-place swap. A VOD mount a host `load()` placed past the head has the
     /// same window, and there the rebuild resumed at 12.00 s once that load had returned. See
     /// `mountHoldsClock`.
@@ -1002,6 +1006,8 @@ final class NativeAVPlayerHost {
                 guard finished else { return }
                 Task { @MainActor in
                     guard let self, self.sessionID == sid else { return }
+                    guard Self.mountSeekCompletionLands(
+                        itemIsReadyToPlay: self.playerItem?.status == .readyToPlay) else { return }
                     self.mountSeekPending = false
                 }
             }
@@ -1540,6 +1546,13 @@ final class NativeAVPlayerHost {
     /// line. An item cannot roll before it is ready, so readiness is what separates the carry from the
     /// roll. The readyToPlay sink asks again, for a carry that never changes status on its way to motion.
     nonisolated static func playingIsThisItemsRoll(itemIsReadyToPlay: Bool) -> Bool {
+        itemIsReadyToPlay
+    }
+
+    /// AE#881: whether a finished mount seek releases the clock hold. Before the item is ready
+    /// AVPlayer completes the seek at once, as a note of where to start, and its clock still reads
+    /// the start of the stretch it decodes up from. The item's first roll releases the hold instead.
+    nonisolated static func mountSeekCompletionLands(itemIsReadyToPlay: Bool) -> Bool {
         itemIsReadyToPlay
     }
 

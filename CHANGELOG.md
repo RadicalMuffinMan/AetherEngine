@@ -152,6 +152,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A native VOD loaded with a start position no longer reports an earlier time once it plays (AE#881, thanks
+  @martijnklomp).** AVPlayer finishes the mount seek the moment it is issued, before the item is ready, and that
+  completion released the clock hold. The periodic observer then published the keyframe or segment start the
+  position falls behind (0.000 for a start at 6 s) for up to 300 ms, so a progress bar flashed to 0:00 and a host
+  saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
+  item's first roll releases the hold.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
