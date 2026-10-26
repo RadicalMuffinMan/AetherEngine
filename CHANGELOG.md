@@ -161,6 +161,10 @@ the public-API contract.
   after its response head reports the hop that answered and its status. The observer does not alter
   request policy and requires hosts to redact source URLs.
 
+- **Still extraction respects requested size and precise snapshot position on cache hits.**
+  Reusing one extractor for different thumbnail widths or snapshot bounds no longer returns the
+  first size rendered. Snapshot requests no longer share a coarse time bucket across frame boundaries.
+
 - **Precise pixel aspect ratios no longer fall back to square pixels.** The sanity gate bounds the
   ratio's magnitude instead of each rational component, preserving values such as 759:712 while
   still rejecting extreme pixel shapes and implausible resulting display aspects.

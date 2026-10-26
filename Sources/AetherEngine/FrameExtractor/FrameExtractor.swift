@@ -54,7 +54,7 @@ public actor FrameExtractor {
     }
 
     /// Only used with a one-segment DataIOReader. No URL or provider fallback.
-    /// Refined results bypass the old 0.1 s snapshot bucket entirely.
+    /// Refined results bypass the rendered-frame cache so they carry the actual decoded PTS.
     func residentPreview(rawTarget: Double, refined: Bool, maxWidth: Int,
                                 isCancelled: @escaping @Sendable () -> Bool) async -> ScrubFrame? {
         guard !isShutDown, rawTarget.isFinite,
@@ -290,7 +290,7 @@ public actor FrameExtractor {
     private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
         guard !isShutDown, seconds.isFinite, seconds >= 0 else { return nil }
-        if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth) {
+        if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize) {
             scheduleIdleClose()
             return hit
         }
@@ -337,7 +337,7 @@ public actor FrameExtractor {
             return FrameResult(image: image)
         }
         if let image = result.image, !token.isCancelled {
-            cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth)
+            cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
         }
         scheduleIdleClose()
         return result.image
