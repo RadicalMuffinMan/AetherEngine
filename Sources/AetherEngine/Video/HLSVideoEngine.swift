@@ -1738,6 +1738,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if !isLiveSession {
             if dem.isSourceSeekable { dem.seek(to: 0) }
             dem.endIndexPass()      // AE#585: the next read that lands outside a span is playback's
+            // The prewarm left the streaming connection mid-file, so playback's first miss past the
+            // retained head was a 4 MB detour block, which on a one-request origin waited its full
+            // 4 s budget for the slot that connection held (first frame 11 s on a 1080p MKV). Playback
+            // starts here: the first miss anchors the connection, as a restart's does (AE#782).
+            if dem.isSourceSeekable { dem.notePlaybackRepositioned() }
         }
         demuxerAtInitialProducerStart = false
 

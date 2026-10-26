@@ -161,6 +161,15 @@ the public-API contract.
 
 ### Fixed
 
+- **Playback's first read after the cue prewarm anchors the connection instead of paying a detour block.**
+  The prewarm (AE#550) leaves the held streaming connection near the middle of the file. Step 6 resets the
+  cursor to 0 and ends the index pass, but playback's first read past the retained head was still served as
+  a 4 MB detour block. On an origin that grants one request at a time (TorBox), that block waited out its 4 s
+  budget for a slot the held connection occupied, then the rescue reconnect anchored at the same offset.
+  Field trace on an Apple TV 4K (tvOS 26), 1080p MKV from TorBox: seg0 arrived 4 s late, and the first
+  frame came at 11.0 s. The engine now calls `notePlaybackRepositioned()` after `endIndexPass()`, so the first
+  miss anchors the connection there, as a producer restart's does (AE#782).
+
 - **A native VOD loaded with a start position no longer reports an earlier time once it plays (AE#881, thanks
   @martijnklomp).** AVPlayer finishes the mount seek the moment it is issued, before the item is ready, and that
   completion released the clock hold. The periodic observer then published the keyframe or segment start the
