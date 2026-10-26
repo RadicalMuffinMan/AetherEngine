@@ -53,7 +53,7 @@ final class DeinterlaceHardwareWarmup: @unchecked Sendable {
 
     func waitIfNeeded(
         for mode: DeinterlaceMode,
-        sourceIsInterlaced: Bool = true
+        sourceIsInterlaced: Bool
     ) async -> Outcome? {
         guard mode == .auto, sourceIsInterlaced else {
             return nil

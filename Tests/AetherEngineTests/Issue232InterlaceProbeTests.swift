@@ -84,6 +84,52 @@ struct Issue232InterlaceProbeTests {
         #expect(!engine.lastRequiresDeinterlaceWarmup)
     }
 
+    @Test("custom-source reload preserves a same-title progressive verdict and rechecks a different title",
+          .timeLimit(.minutes(2)), arguments: [false, true])
+    @MainActor
+    func customReloadUsesTitleIdentity(changesTitle: Bool) async throws {
+        let bytes = try #require(Data(base64Encoded: Self.declaredTTProgressiveBase64,
+                                     options: .ignoreUnknownCharacters))
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions()
+        options.autoplay = false
+        options.preferredDecodePath = .software
+        _ = try await engine.load(source: .custom(DataIOReader(data: bytes), formatHint: "mp4"),
+                                  options: options)
+        #expect(!engine.lastRequiresDeinterlaceWarmup, "decoded frames refute the TT declaration")
+
+        // Exercise the real custom-reader reopen without a large disc image. The title identity is
+        // the only extra state a disc contributes to this decision; the reopened codecpar still
+        // declares TT, so recomputing it wrongly loses the same title's verified progressive result.
+        engine.activeDiscTitleID = 11
+        if changesTitle {
+            let url = try #require(engine.loadedURL)
+            let error = await engine.reloadWithAudioOverride(
+                url: url, audioStreamIndex: nil, expectedGeneration: engine.loadGeneration,
+                discTitleIDOverride: 12)
+            #expect(error == nil)
+        } else {
+            try await engine.reloadAtCurrentPosition()
+        }
+        #expect(engine.lastRequiresDeinterlaceWarmup == changesTitle)
+    }
+
+    @Test("the shared SPS fallback only breaks an unknown H.264 field-order tie")
+    func codecParametersGateSPSTieBreaker() throws {
+        let demuxer = try Self.openFixture(Self.interlacedBase64)
+        defer { demuxer.close() }
+        let stream = try #require(demuxer.stream(at: demuxer.videoStreamIndex))
+        let parameters = try #require(stream.pointee.codecpar)
+        parameters.pointee.field_order = AV_FIELD_UNKNOWN
+        #expect(VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: parameters))
+        parameters.pointee.field_order = AV_FIELD_PROGRESSIVE
+        #expect(!VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: parameters))
+        parameters.pointee.field_order = AV_FIELD_UNKNOWN
+        parameters.pointee.codec_id = AV_CODEC_ID_VP9
+        #expect(!VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: parameters))
+    }
+
     // MARK: - Probe verdicts
 
     @Test("a flagged frame upholds the declaration and stops the sample at once")

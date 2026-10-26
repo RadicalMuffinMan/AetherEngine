@@ -137,6 +137,8 @@ enum VideoRoutingPolicy {
     ) -> Bool {
         // The decoder can deinterlace any codec whose frames carry the interlaced flag.
         // Concrete probe evidence also covers DV, MPEG-1, H.263 and interlaced ProRes.
+        // A progressive declaration skips speculative work. If later mixed-cadence frames are
+        // interlaced, DeinterlaceFilter still builds its graph on demand at that first frame.
         if interlacedFieldOrders.contains(fieldOrder) { return true }
         switch codecID {
         case AV_CODEC_ID_H264:
@@ -149,6 +151,16 @@ enum VideoRoutingPolicy {
         default:
             return false
         }
+    }
+
+    /// The same SPS tie-breaker for the initial probe and a reopened disc title. A concrete field
+    /// order wins; no borrowed codec-parameter storage escapes this synchronous classification.
+    static func spsIndicatesInterlaced(codecParameters: UnsafePointer<AVCodecParameters>) -> Bool {
+        let parameters = codecParameters.pointee
+        guard parameters.codec_id == AV_CODEC_ID_H264, parameters.field_order == AV_FIELD_UNKNOWN,
+              let extradata = parameters.extradata, parameters.extradata_size > 0 else { return false }
+        let bytes = Array(UnsafeBufferPointer(start: extradata, count: Int(parameters.extradata_size)))
+        return spsIndicatesInterlaced(extradata: bytes)
     }
 
     /// #150: pure extradata classifier feeding `spsIndicatesInterlaced`. Accepts Annex-B (MPEG-TS) and

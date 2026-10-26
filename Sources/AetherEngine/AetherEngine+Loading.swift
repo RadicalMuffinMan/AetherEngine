@@ -2496,7 +2496,8 @@ extension AetherEngine {
         }
         // Disc title to reopen with: an explicit override (selectTitle on a custom disc) wins, else the title
         // already playing so an audio switch / background-resume doesn't silently revert to the main title (#67).
-        let titleToReopen = discTitleIDOverride ?? activeDiscTitleID
+        let outgoingDiscTitleID = activeDiscTitleID
+        let titleToReopen = discTitleIDOverride ?? outgoingDiscTitleID
         // resumeOverride 0 restarts a title switch at the new title's head; nil keeps the current playhead.
         // AE#464 round 2: "the current playhead" is not `currentTime` while another load is in flight,
         // which has already zeroed that clock. See `AetherEngine.rebuildPosition`.
@@ -2724,32 +2725,20 @@ extension AetherEngine {
             }
         }
 
-        let reopenedRequiresDeinterlaceWarmup: Bool = if discTitleIDOverride != nil,
+        // A same-title custom reload passes its title ID too. Keep any decoded progressive
+        // verdict for that title; only a different title invalidates the saved probe evidence.
+        let reopenedRequiresDeinterlaceWarmup: Bool = if titleToReopen != outgoingDiscTitleID,
                                                          let pre = customPreopened,
                                                          let stream = pre.stream(at: pre.videoStreamIndex),
                                                          let codecpar = stream.pointee.codecpar
         {
-            if codecpar.pointee.codec_id == AV_CODEC_ID_H264,
-               codecpar.pointee.field_order == AV_FIELD_UNKNOWN,
-               let extradata = codecpar.pointee.extradata,
-               codecpar.pointee.extradata_size > 0
-            {
-                VideoRoutingPolicy.requiresDeinterlaceWarmup(
-                    codecID: codecpar.pointee.codec_id,
-                    fieldOrder: codecpar.pointee.field_order,
-                    spsIndicatesInterlaced: VideoRoutingPolicy.spsIndicatesInterlaced(
-                        extradata: Array(UnsafeBufferPointer(
-                            start: extradata,
-                            count: Int(codecpar.pointee.extradata_size)))))
-            } else {
-                VideoRoutingPolicy.requiresDeinterlaceWarmup(
-                    codecID: codecpar.pointee.codec_id,
-                    fieldOrder: codecpar.pointee.field_order)
-            }
+            VideoRoutingPolicy.requiresDeinterlaceWarmup(
+                codecID: codecpar.pointee.codec_id,
+                fieldOrder: codecpar.pointee.field_order,
+                spsIndicatesInterlaced: VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: codecpar))
         } else {
             preservedRequiresDeinterlaceWarmup
         }
-
 
         do {
             let loadStart = DispatchTime.now()

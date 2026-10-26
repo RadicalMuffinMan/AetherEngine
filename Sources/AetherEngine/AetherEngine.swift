@@ -5309,10 +5309,8 @@ public final class AetherEngine: ObservableObject {
         if detectedCodecID == AV_CODEC_ID_H264, detectedFieldOrder == AV_FIELD_UNKNOWN,
            probeOpened,
            let vStream = probe.stream(at: probe.videoStreamIndex),
-           let codecpar = vStream.pointee.codecpar,
-           let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
-            let bytes = Array(UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
-            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(extradata: bytes)
+           let codecpar = vStream.pointee.codecpar {
+            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: codecpar)
             if spsIndicatesInterlaced {
                 EngineLog.emit(
                     "[AetherEngine] fieldOrder=UNKNOWN but SPS frame_mbs_only_flag=0; "

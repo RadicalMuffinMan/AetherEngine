@@ -82,7 +82,6 @@ struct VideoRoutingPolicyTests {
         #expect(calls == 1)
     }
 
-
     @Test("progressive software codecs do not need hardware deinterlace warm-up")
     func progressiveCodecsSkipDeinterlaceWarmup() {
         for codec in [AV_CODEC_ID_NONE, AV_CODEC_ID_VP8, AV_CODEC_ID_VP9, AV_CODEC_ID_AV1, AV_CODEC_ID_HEVC] {

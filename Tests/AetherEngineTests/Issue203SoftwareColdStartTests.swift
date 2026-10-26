@@ -57,8 +57,8 @@ struct Issue203SoftwareColdStartTests {
             return .ready
         }
 
-        async let first = warmup.waitIfNeeded(for: .auto)
-        async let second = warmup.waitIfNeeded(for: .auto)
+        async let first = warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true)
+        async let second = warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true)
         await started.wait()
         await release.open()
 
@@ -76,7 +76,7 @@ struct Issue203SoftwareColdStartTests {
         }
 
         let started = DispatchTime.now()
-        let result = await warmup.waitIfNeeded(for: .software)
+        let result = await warmup.waitIfNeeded(for: .software, sourceIsInterlaced: true)
         let elapsed = Double(
             DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
         ) / 1_000_000_000
@@ -96,14 +96,14 @@ struct Issue203SoftwareColdStartTests {
             return .ready
         }
         let waiter = Task {
-            await warmup.waitIfNeeded(for: .auto)
+            await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true)
         }
         await started.wait()
         waiter.cancel()
         await release.open()
 
         #expect(await waiter.value == .ready)
-        #expect(await warmup.waitIfNeeded(for: .auto) == .ready)
+        #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true) == .ready)
     }
 
     @Test("hardware unavailability completes the gate without throwing")
@@ -112,7 +112,7 @@ struct Issue203SoftwareColdStartTests {
             .unavailable
         }
 
-        #expect(await warmup.waitIfNeeded(for: .auto) == .unavailable)
+        #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true) == .unavailable)
     }
 
     @Test("progressive and forced-software requests leave warm-up cold until interlaced auto demand")
