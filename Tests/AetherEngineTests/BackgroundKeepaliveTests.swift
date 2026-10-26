@@ -159,15 +159,16 @@ struct BackgroundKeepaliveTests {
         #expect(runs == (retains ? [.playing] : []))
     }
 
-    @Test("a seek from a retained paused session owes background policy until it settles (AE#870)")
-    func retainedSeekOwesPolicy() {
+    @Test("a seek or reload from a retained pause owes background policy until it settles (AE#870)",
+          arguments: [PlaybackState.seeking, .loading])
+    func retainedOperationOwesPolicy(transition: PlaybackState) {
         #expect(AetherEngine.backgroundPolicyIsOwedOnResume(
-            isBackgrounded: true, retainsPausedPipeline: true, from: .paused, to: .seeking))
+            isBackgrounded: true, retainsPausedPipeline: true, from: .paused, to: transition))
         #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
-            isBackgrounded: false, retainsPausedPipeline: true, from: .paused, to: .seeking))
+            isBackgrounded: false, retainsPausedPipeline: true, from: .paused, to: transition))
         #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
-            isBackgrounded: true, retainsPausedPipeline: false, from: .paused, to: .seeking))
-        #expect(!AetherEngine.backgroundDecisionSettles(state: .seeking, loadInFlight: false))
+            isBackgrounded: true, retainsPausedPipeline: false, from: .paused, to: transition))
+        #expect(!AetherEngine.backgroundDecisionSettles(state: transition, loadInFlight: false))
     }
 
     @MainActor
