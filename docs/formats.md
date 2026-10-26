@@ -109,9 +109,11 @@ order. When nothing above takes such a head, it is repaired with the step taken 
 average frame rate, provided the sampled span is the time its pictures take at that rate within the
 reorder delay plus two pictures, and every other check above still passes. The step is then
 remeasured on the anchors, which the writer left on the presentation axis (the average rate is only
-an estimate: a 60-picture 29.97 fps clip reports 29.80), and used only when every anchor agrees to
-within a tick per picture. DTS is rebuilt from each picture's decode slot rather than shifted, since a
-pushed B picture's DTS can sit after its own presentation time. The shift is what puts the first
+an estimate: a 60-picture 29.97 fps clip reports 29.80); a head whose anchors do not agree to
+within a tick per picture is left untouched. DTS is rebuilt from each picture's decode slot rather than shifted, since a
+pushed B picture's DTS can sit after its own presentation time. After a seek onto an open-GOP
+keyframe, which kept its own presentation time, the sequence origin is taken from its display rank
+rather than its decode slot. The shift is what puts the first
 keyframe on the stream's start time, clamped to **16 pictures** because this writer left the keyframe
 four pictures ahead. Measured on a generated twin (`Scripts/make-clamped-ladder-fixture.sh`, 900
 pictures at 29.97 fps), the AVPlayer route stepped backwards 169 times before and 0 after, and the

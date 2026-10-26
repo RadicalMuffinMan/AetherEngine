@@ -319,8 +319,11 @@ enum H264CompositionOffsetRepair {
 
         // The average frame rate is only an estimate (short files, rounded durations: a 60-picture
         // 29.97 clip reports 29.80). The writer's anchors carry their own presentation times untouched,
-        // so when they agree they give the exact step.
-        if synthesizesDecodeLadder, let measured = anchorStep(samples: samples, pocStep: pocStep) {
+        // so when they agree they give the exact step, and when they do not the head is not this shape.
+        if synthesizesDecodeLadder {
+            guard let measured = anchorStep(samples: samples, pocStep: pocStep) else {
+                return .inconclusive("anchors do not agree on a step")
+            }
             step = measured
         }
 
@@ -547,6 +550,10 @@ enum H264CompositionOffsetRepair {
         /// The decode slot of the next picture in the current sequence, counted from its anchor. Only a
         /// synthesized ladder reads it.
         private var decodeOrdinal: Int64 = 0
+        /// The current sequence was anchored on a seek landing rather than an IDR. The parser was reset
+        /// for the seek, so an H.264 open-GOP landing reads its picture order relative to itself (a
+        /// non-IDR I picture can come out at -4), and only differences within the sequence mean anything.
+        private var anchoredOnLanding = false
         /// Pictures emitted untouched because no anchor was available or the arithmetic did not
         /// close. Surfaced so a stream this repair does not describe is visible as a number.
         private(set) var unrepairedPictures = 0
@@ -560,6 +567,7 @@ enum H264CompositionOffsetRepair {
             sequenceBaseOrdinal = nil
             landingLeadingPictures = 0
             decodeOrdinal = 0
+            anchoredOnLanding = false
         }
 
         mutating func noteLanding(leadingPictures: Int64) {
@@ -586,6 +594,7 @@ enum H264CompositionOffsetRepair {
                 sequenceBaseOrdinal = plan.presentationOrdinal(ladderTimestamp: dts)
                 awaitingReanchor = false
                 decodeOrdinal = 0
+                anchoredOnLanding = false
             } else if awaitingReanchor, isKeyframe {
                 guard pictureOrderCount % plan.pocStep == 0 else {
                     unrepairedPictures += 1
@@ -595,9 +604,12 @@ enum H264CompositionOffsetRepair {
                 // The landing is decoded in slot k and displayed in slot k + leading, so the
                 // sequence origin sits `landingIndex - leading` slots before its decode time.
                 let (anchorSlots, slotsOverflow) = landingIndex.subtractingReportingOverflow(landingLeadingPictures)
+                // A synthesized ladder's keyframe kept its own presentation time (the writer only
+                // pushed the B pictures), so its origin is `landingIndex` slots back, not its decode slot.
+                let originSlots = plan.synthesizesDecodeLadder ? landingIndex : anchorSlots
                 // Audit BIT-101: a 64-bit `tfdt` step and a landing order near -2^31 leave Int64.
                 let (landingTicks, productOverflow) = slotsOverflow
-                    ? (0, true) : anchorSlots.multipliedReportingOverflow(by: plan.step)
+                    ? (0, true) : originSlots.multipliedReportingOverflow(by: plan.step)
                 let (anchor, anchorOverflow) = dts.subtractingReportingOverflow(landingTicks)
                 guard !productOverflow, !anchorOverflow else {
                     unrepairedPictures += 1
@@ -606,11 +618,12 @@ enum H264CompositionOffsetRepair {
                 sequenceAnchorDTS = anchor
                 sequenceBaseOrdinal = plan.presentationOrdinal(ladderTimestamp: dts)
                     .flatMap { ordinal -> Int64? in
-                        let (base, overflow) = ordinal.subtractingReportingOverflow(anchorSlots)
+                        let (base, overflow) = ordinal.subtractingReportingOverflow(originSlots)
                         return overflow ? nil : base
                     }
                 awaitingReanchor = false
                 decodeOrdinal = anchorSlots
+                anchoredOnLanding = true
             }
             guard let anchor = sequenceAnchorDTS, !awaitingReanchor else {
                 unrepairedPictures += 1
@@ -618,7 +631,8 @@ enum H264CompositionOffsetRepair {
             }
             let slot = decodeOrdinal
             decodeOrdinal &+= 1
-            guard pictureOrderCount >= 0, pictureOrderCount % plan.pocStep == 0 else {
+            let acceptsRelativeOrder = plan.synthesizesDecodeLadder && anchoredOnLanding
+            guard pictureOrderCount >= 0 || acceptsRelativeOrder, pictureOrderCount % plan.pocStep == 0 else {
                 unrepairedPictures += 1
                 return nil
             }
