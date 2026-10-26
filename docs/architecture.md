@@ -2,10 +2,6 @@
 
 How AetherEngine is put together: the three playback pipelines, the source-file map, and the dependency surface. For the public API and integration, see the [README](../README.md); for format and codec depth, [docs/formats.md](formats.md).
 
-Mobile supplemental AV1/VP9 registration requires the Xcode 26.2 SDKs (bundled Swift 6.2.3)
-or newer. The compile-time guard is separate from runtime OS availability: Xcode 26.0/26.1
-keep capability queries and software fallback, and macOS retains its existing registration path.
-
 ## Playback pipelines
 
 AetherEngine has three playback pipelines, picked once at `load(url:)`: the audio-only path when `LoadOptions.audioOnly` is set, otherwise the native or software video path based on the source's video codec.
