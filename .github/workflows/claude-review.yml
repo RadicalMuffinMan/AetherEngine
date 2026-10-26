@@ -79,6 +79,8 @@ jobs:
             checked out: read the PR's version of a file with `git show <HEAD SHA>:<path>` and list
             its files with `git ls-tree -r --name-only <HEAD SHA> <dir>`. Get the diff with
             `gh pr diff`, the description and discussion with `gh pr view --comments`.
+            Shell commands must follow the "Tools" section of review.md exactly (one command,
+            no pipes, no command substitution). Finish by posting the summary comment.
           claude_args: |
             --model claude-opus-5-5
             --max-turns 80
