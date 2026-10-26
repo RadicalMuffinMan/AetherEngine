@@ -7,7 +7,7 @@ import AetherLibavutil
 @testable import AetherEngine
 
 /// AE#739 follow-up: a rebuild that VideoToolbox refused in the foreground is retried at each following
-/// keyframe, a bounded number of times, and ends in a surfaced failure rather than a frozen picture.
+/// keyframe, a bounded number of times, then waits for the next foreground return instead of retrying for ever.
 @Suite("Video session retry", .serialized, .timeLimit(.minutes(1)))
 struct VideoSessionRetryTests {
 
@@ -50,6 +50,48 @@ struct VideoSessionRetryTests {
         #expect(policy.gaveUp)
         policy.reset()
         #expect(policy.onKeyframe(owed: true, now: 0) == .retry(attempt: 1))
+    }
+
+    // MARK: - Host: background, give-up and the foreground return
+
+    @Test("a keyframe in the background spends no retry, whether audio-only or a retained paused session")
+    func backgroundSpendsNoRetry() {
+        let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
+        defer { host.stop() }
+        host.noteAppInBackground(true)
+        host.setVideoSessionRecoveryOwedForTesting()
+        for _ in 0..<(VideoSessionRetryPolicy.maxAttempts + 2) {
+            host.keyframeWhileSessionLostForTesting()
+        }
+        #expect(host.videoSessionRetryAttemptsForTesting == 0)
+        #expect(!host.videoSessionRetryGaveUpForTesting)
+        #expect(host.failure == nil)
+    }
+
+    @Test("a spent budget gives up without publishing a failure, so the session is not left in the error state")
+    func giveUpPublishesNoFailure() {
+        let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
+        defer { host.stop() }
+        host.spendVideoSessionRetriesForTesting()
+        host.setVideoSessionRecoveryOwedForTesting()
+        host.keyframeWhileSessionLostForTesting()
+        #expect(host.videoSessionRetryGaveUpForTesting)
+        #expect(host.failure == nil)
+    }
+
+    @Test("the foreground return starts a fresh budget after a give-up")
+    func foregroundReturnStartsFreshBudget() {
+        let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
+        defer { host.stop() }
+        host.spendVideoSessionRetriesForTesting()
+        host.setVideoSessionRecoveryOwedForTesting()
+        host.keyframeWhileSessionLostForTesting()
+        #expect(host.videoSessionRetryGaveUpForTesting)
+        host.noteAppInBackground(true)
+        #expect(host.videoSessionRetryGaveUpForTesting)
+        host.noteAppInBackground(false)
+        #expect(!host.videoSessionRetryGaveUpForTesting)
+        #expect(host.videoSessionRetryAttemptsForTesting == 0)
     }
 
     // MARK: - Decoder reports keyframes while lost

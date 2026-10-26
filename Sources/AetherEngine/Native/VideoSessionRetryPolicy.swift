@@ -5,7 +5,7 @@ import Foundation
 /// A refused rebuild leaves the decoder dropping every packet, with audio still playing. The retry is keyed
 /// on the stream, not on a timer: each keyframe fed while the session is still lost is one chance, because
 /// from a keyframe on a new session could show a picture again. The attempts are capped, so a session the
-/// system will not give back ends in an error instead of a frozen picture that retries for ever.
+/// system will not give back stops trying until the next foreground return, instead of retrying for ever.
 struct VideoSessionRetryPolicy: Equatable {
     /// Keyframes at which a rebuild is tried before the session is given up as unrecoverable.
     static let maxAttempts = 4

@@ -572,6 +572,10 @@ struct FlushRecoveryHostTests {
         let generation = host.videoRendererForTesting.flushGeneration
 
         #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .flushVideoOnly)
+        // Synchronous: a flush spawns no seek, so none is pending and none can land later.
+        #expect(!host.recoveryPendingForTesting)
+        #expect(targets.values.isEmpty)
+        #expect(host.flushRecoveriesCompleted == 0)
 
         #expect(host.videoRendererForTesting.flushGeneration > generation)
         // The decoder was flushed, which is what "resumes at the next keyframe" rests on.
@@ -579,9 +583,6 @@ struct FlushRecoveryHostTests {
         #expect(decoder.feedEpoch > 0)
         // The floor restarts at the playhead, not at whatever frame arrives first.
         #expect(decoder.skipUntilPTS.map { abs($0.seconds - 20) < 0.01 } == true)
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(targets.values.isEmpty)
-        #expect(host.flushRecoveriesCompleted == 0)
         #expect(host.flushRecoveryLog.map(\.action) == [.flushVideoOnly])
     }
 
@@ -598,6 +599,7 @@ struct FlushRecoveryHostTests {
         let generation = host.videoRendererForTesting.flushGeneration
 
         #expect(host.handleFlushTrigger(.videoQueueFailed) == .reposition)
+        #expect(host.recoveryPendingForTesting)
         // Further reports of the same event are ignored while it runs.
         #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .ignore)
         try await waitFor { host.flushRecoveriesCompleted == 1 }
@@ -711,7 +713,7 @@ struct FlushRecoveryHostTests {
         host.setLiveForTesting(true)
         try presentFrame(host)
         #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .flushVideoOnly)
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(!host.recoveryPendingForTesting)
         #expect(targets.values.isEmpty)
         #expect(host.flushRecoveriesCompleted == 0)
     }
@@ -741,7 +743,7 @@ struct FlushRecoveryHostTests {
         host.enterBackgroundAudioOnly()
         #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .deferToForeground)
         #expect(host.videoQueueFlushOwedForTesting)
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(!host.recoveryPendingForTesting)
         #expect(host.flushRecoveriesCompleted == 0)
 
         // Back in front with no keyframe read yet: the picture would stay frozen past the audio lead.
@@ -764,7 +766,7 @@ struct FlushRecoveryHostTests {
         host.setAudioFedUntilForTesting(30)
         host.keyframeLedgerForTesting.noteKeyframeRead(pts: 22)
         host.exitBackgroundAudioOnly()
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(!host.recoveryPendingForTesting)
         #expect(targets.values.isEmpty)
         #expect(host.flushRecoveryLog.map(\.action) == [.deferToForeground, .flushVideoOnly])
     }
@@ -780,7 +782,9 @@ struct FlushRecoveryHostTests {
             name: .AVSampleBufferAudioRendererWasFlushedAutomatically, object: renderer,
             userInfo: [AVSampleBufferAudioRendererFlushTimeKey:
                         NSValue(time: CMTime(seconds: 3, preferredTimescale: 48000))])
-        try await Task.sleep(for: .milliseconds(150))
+        // The AudioOutput's count is the witness that the renderer's notification was handled; the host
+        // hears nothing from it, so its log has to stay empty once the witness has landed.
+        try await waitFor { host.audioAutomaticFlushCountForTesting == 1 }
         #expect(host.flushRecoveryLog.isEmpty)
         #expect(targets.values.isEmpty)
     }
@@ -800,7 +804,7 @@ struct FlushRecoveryHostTests {
         host.pollAudioRendererStatus(.failed)
         #expect(host.flushRecoveryLog.map(\.action) == [.flushAudioOnly, .flushAudioOnly])
         #expect(host.flushRecoveryLog.allSatisfy { $0.trigger == .audioRendererFailed })
-        try await Task.sleep(for: .milliseconds(50))
+        #expect(!host.recoveryPendingForTesting)
         #expect(targets.values.isEmpty)
     }
 

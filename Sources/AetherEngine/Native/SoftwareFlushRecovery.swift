@@ -27,7 +27,9 @@ enum FlushRecoveryTrigger: String, Sendable, CaseIterable {
 /// When the keyframe lies beyond it, or none has been read yet, the freeze outlasts the audio lead
 /// and only a reposition puts a picture back at the playhead: both queues and both decoders
 /// flushed, the demuxer put back on the keyframe before the playhead, the skip threshold hiding the
-/// preroll and the clock re-anchored there. That is the one case where the audio is cut.
+/// preroll and the clock re-anchored there. That is the one case where the audio is cut. A DVR session's
+/// live feeder keeps no keyframe ledger, so its gap is always unknown, and the rule reads an unknown gap
+/// as beyond the audio lead: a video recovery there repositions, the conservative choice.
 ///
 /// On the decoupled route (a VOD source with its own audio decoder) the demuxer reads video up to
 /// the audio lead target and parks it, so the keyframe gap is mostly settled by one question: is a

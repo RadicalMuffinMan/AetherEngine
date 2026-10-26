@@ -944,6 +944,10 @@ final class SoftwarePlaybackHost {
     private var videoSessionRecoveryOwed = false
     /// How many keyframes have retried a refused rebuild in the foreground. Main actor only.
     private var videoSessionRetry = VideoSessionRetryPolicy()
+    /// The app is in the background. That includes a retained paused session, which keeps its video
+    /// pipeline without audio-only mode, and where VideoToolbox refuses a rebuild by design. Set by the
+    /// engine's lifecycle observers through `noteAppInBackground(_:)`. Main actor only.
+    private var appInBackground = false
     nonisolated(unsafe) private var _backgroundAudioOnly = false
     nonisolated var backgroundAudioOnly: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _backgroundAudioOnly }
@@ -1878,11 +1882,12 @@ final class SoftwarePlaybackHost {
     }
 
     /// A keyframe was fed while the session is lost. A rebuild that VideoToolbox refused in the foreground
-    /// is retried here, once per keyframe, up to `VideoSessionRetryPolicy.maxAttempts`; after that the
-    /// failure is surfaced instead of leaving a frozen picture beside live audio. Nothing is owed while the
-    /// first rebuild after a loss is still in flight, or in audio-only mode, so those keyframes do nothing.
+    /// is retried here, once per keyframe, up to `VideoSessionRetryPolicy.maxAttempts`. Nothing is spent
+    /// while the app is in the background (audio-only mode, or a retained paused session), where a rebuild
+    /// is refused by design, nor while the first rebuild after a loss is still in flight. Once the budget is
+    /// spent the host waits for the next foreground return, which starts a fresh one.
     private func handleKeyframeWhileSessionLost() {
-        guard !stopRequested, !backgroundAudioOnly else { return }
+        guard !stopRequested, !backgroundAudioOnly, !appInBackground else { return }
         switch videoSessionRetry.onKeyframe(owed: videoSessionRecoveryOwed, now: ProcessInfo.processInfo.systemUptime) {
         case .none:
             break
@@ -1895,16 +1900,21 @@ final class SoftwarePlaybackHost {
         case .giveUp:
             EngineLog.emit(
                 "[SWHost] AE#739 video session could not be rebuilt after \(VideoSessionRetryPolicy.maxAttempts) "
-                + "keyframe retries, giving up",
+                + "keyframe retries, waiting for the next foreground return",
                 category: .swPlayback)
-            // `videoSessionRecoveryOwed` stays set on purpose: the failure is published, but a later
-            // foreground return still gets its own try (and a fresh budget).
-            if failure == nil {
-                failure = PlaybackErrorInfo(
-                    kind: .softwarePipelineFailed,
-                    message: "The video decoder could not be restarted after the system reclaimed it.")
-            }
+            // `videoSessionRecoveryOwed` stays set on purpose: the next foreground return gets its own try
+            // with a fresh budget. No `failure` is published. The engine's `.error` state is terminal until
+            // the next load (its status sinks return early on it), so a rebuild that succeeds later could
+            // not clear a failure published here, and the session would stay errored after it recovered.
         }
+    }
+
+    /// The engine reports the app going to the background or back to the foreground, with or without
+    /// audio-only mode. A foreground return is a new episode for the keyframe retries, as it is for
+    /// `exitBackgroundAudioOnly()`, so the budget spent before it does not count against the next loss.
+    func noteAppInBackground(_ inBackground: Bool) {
+        appInBackground = inBackground
+        if !inBackground { videoSessionRetry.reset() }
     }
 
     /// Rebuild the session, then reposition to the playhead: the demuxer lands on the keyframe before it
@@ -2075,6 +2085,20 @@ final class SoftwarePlaybackHost {
     var audioFedUntilForTesting: Double { demuxDiag.snapshot.lastAudioPts }
     var recoveryPendingForTesting: Bool { flushRecoveryPending }
     func setRepositionBackoffForTesting(_ seconds: Double) { repositionBackoffSeconds = seconds }
+    var audioAutomaticFlushCountForTesting: Int? { audioOutput?.automaticFlushCount }
+    /// A session the system has invalidated and whose rebuild is owed, as `handleVideoSessionLost()` leaves it.
+    func setVideoSessionRecoveryOwedForTesting() { videoSessionRecoveryOwed = true }
+    func keyframeWhileSessionLostForTesting() { handleKeyframeWhileSessionLost() }
+    /// A budget with every foreground retry spent, so the next keyframe gives up.
+    func spendVideoSessionRetriesForTesting() {
+        var policy = VideoSessionRetryPolicy()
+        for i in 0..<VideoSessionRetryPolicy.maxAttempts {
+            _ = policy.onKeyframe(owed: true, now: Double(i) * VideoSessionRetryPolicy.minSpacing)
+        }
+        videoSessionRetry = policy
+    }
+    var videoSessionRetryAttemptsForTesting: Int { videoSessionRetry.attempts }
+    var videoSessionRetryGaveUpForTesting: Bool { videoSessionRetry.gaveUp }
     #endif
 
     @discardableResult

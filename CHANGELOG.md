@@ -21,7 +21,11 @@ the public-API contract.
 
 ### Fixed
 
-- **`selectChapter` on a disc title lands on the chapter, not one container start late.** The software route seeks on the session axis and the host adds the clock's session zero back, so adding the whole container start as well applied it twice whenever the start was past the 2 s anchor tolerance. Only the part of the start the zero did not take is added now, and a native disc title no longer adds the playlist shift on top of `seek(to:)`.
+- **`selectChapter` on a disc title lands on the chapter, not one container start late.** The software route
+  seeks on the session axis and the host adds the clock's session zero back, so adding the whole container
+  start as well applied it twice whenever the start was past the 2 s anchor tolerance. Only the part of the
+  start the zero did not take is added now, and a native disc title no longer adds the playlist shift on top
+  of `seek(to:)`.
 
 - **A 24.000 fps source is programmed as 24 Hz, not 23.976 Hz (AE#884, thanks @akhanwav).** `FrameRateSnap` sent
   the whole 23.5 to 24.05 window to 23.976, so Match Frame Rate ran 24p content one frame in 1001 fast and the
@@ -32,7 +36,9 @@ the public-API contract.
   invalidated the hardware session and VideoToolbox refused the rebuild, the decoder dropped every packet
   and the picture froze beside live audio until the next foreground return. The host now retries at each
   keyframe fed while the session is still lost (at least two seconds apart), up to four times, and then
-  publishes a playback failure.
+  waits for the next foreground return, which starts a fresh budget. Nothing is retried in the background,
+  where VideoToolbox refuses a rebuild by design. The session is not moved to `.error` for this: that state
+  is terminal until the next load, so a rebuild that succeeds later could not clear it.
 
 - **The in-band HEVC parameter-set scan stops at 16 MiB of input.** A stream that carries no parameter sets,
   or one whose packets are very large, could be read far past what the packet budget implies before the
