@@ -452,9 +452,13 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// every frame after it with kVTVideoDecoderBadDataErr, which libavcodec never did. So the key frame
     /// gets a format description and session of its own size, after the old session has delivered
     /// what it still holds. Not an epoch change: the packets that follow belong to the same feed.
-    private func adoptVP9FrameSize(_ size: (width: Int32, height: Int32)) {
+    private func adoptVP9FrameSize(_ size: (width: Int32, height: Int32), epoch: UInt64?) {
         lock.lock()
         defer { lock.unlock() }
+        // A parked keyframe can outlive the seek that retired its feed. Refuse it before even
+        // replacing the session: rejecting its eventual decode cannot restore the references lost
+        // by that replacement. The same lock orders this check and replacement against flush().
+        if let epoch, epoch != currentEpoch { return }
         guard size.width != width || size.height != height,
               let old = session, !sessionLost, let refConBox else { return }
         var fd: CMVideoFormatDescription?
@@ -604,7 +608,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
            let data = packet.pointee.data, packet.pointee.size > 0,
            let size = VideoToolboxVideoFormat.vp9KeyFrameSize(
             UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))) {
-            adoptVP9FrameSize(size)
+            adoptVP9FrameSize(size, epoch: epoch)
         }
         lock.lock()
         // AE#492: see `SoftwareVideoDecoder.decode`. Same rule, same lock as `flush()`.

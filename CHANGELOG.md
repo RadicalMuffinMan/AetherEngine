@@ -18,6 +18,7 @@ the public-API contract.
   back to libavcodec if registration, configuration or session creation fails. Decoder diagnostics
   report the implementation that actually opened. A key frame that changes the coded size rebuilds the
   session at the new size; a session built for the old one rejects every frame after the switch.
+  A packet retired by a seek cannot resize that session and discard the current reference pictures.
 
 - **Hosts can own renderer audio-session activation (AE#872, thanks @jonluca).**
   `rendererAudioSessionActivationEnabled = false` before `load()` stops software and audio-only loads, track
