@@ -139,6 +139,32 @@ final class LoopbackAudioReaderTests: XCTestCase {
         }
     }
 
+    /// #863 (jpsts): 10 s segments played forward for 60 s. Each segment is decoded once, in
+    /// order, without a reanchor, and the released audio is gap-free behind a lead that holds.
+    func testLongSegmentsAreDecodedOnceEachAsThePlayheadMovesOn() {
+        let w = World()
+        w.segments = Set(0...30); w.highestStored = 30
+        w.segmentSeconds = 10; w.chunkSeconds = 1
+        let reader = makeReader(w)
+        var steps: [LoopbackAudioReader.StepResult] = []
+        var playhead = 0.0
+        while playhead < 60 {
+            w.playhead = playhead
+            steps.append(reader.runOnce())
+            playhead += 0.25
+        }
+        XCTAssertFalse(steps.contains(.reanchored))
+        XCTAssertEqual(w.decoded, Array(0..<w.decoded.count))
+        XCTAssertGreaterThanOrEqual(w.decoded.count, 7)
+        XCTAssertEqual(w.emitted.filter(\.discontinuity).count, 1)
+        for (a, b) in zip(w.emitted, w.emitted.dropFirst()) {
+            XCTAssertEqual(b.sourceTime - a.sourceTime, 1, accuracy: 0.0001)
+        }
+        let last = w.emitted.last!.sourceTime
+        XCTAssertGreaterThanOrEqual(last, 59.75)
+        XCTAssertLessThanOrEqual(last, 59.75 + AudioTapDefaults.leadSeconds)
+    }
+
     func testBackwardSeekReanchors() {
         let w = World()
         w.segments = Set(0...100); w.highestStored = 100
