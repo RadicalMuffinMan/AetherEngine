@@ -112,6 +112,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
+  A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
+  process-wide panel refusal, so every later HDR title went media-direct without its subtitle
+  renditions until the app was backgrounded. The refusal no longer latches while the host asserts
+  `panelIsInHDRMode` (the assertion already decides the route), and an HDR headroom reading during
+  playback withdraws a latch taken earlier.
+
 - **The audio tap no longer re-decodes long segments at a parked playhead (AE#864, thanks @qoli).**
   A reader decodes whole segments, so a 15 s segment legitimately runs the decode lead past 10 s,
   and the pacing read that overshoot as a backward seek: it jumped back to the playhead's segment and
