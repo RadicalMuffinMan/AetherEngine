@@ -16,6 +16,8 @@ final class AudioOutput: @unchecked Sendable {
     let timeline = RendererTimeline()
 
     private let lock = NSLock()
+    @MainActor private var attachedVideoLayer: AVSampleBufferDisplayLayer?
+    @MainActor private var videoLayerRemovalTask: Task<Void, Never>?
 
     /// AE#464: the host's audio presentation offset, applied to every buffer on its way into the
     /// renderer. Guarded because the host writes it from the main actor while the demux thread reads
@@ -136,30 +138,67 @@ final class AudioOutput: @unchecked Sendable {
         }
     }
 
-    /// Add the video renderer to the synchronizer for automatic A/V sync + frame pacing. The display layer's
-    /// `sampleBufferRenderer`, never the layer: addRenderer(layer) still type-checks but on tvOS 26+ fails with
-    /// FigVideoQueueRemote err=-12080 after the first enqueue. Taken as the renderer rather than read off the
-    /// layer here, because the layer is main-actor isolated in the 27 SDKs and this runs off it (#351).
-    func attachVideoRenderer(_ videoRenderer: AVSampleBufferVideoRenderer) {
-        synchronizer.addRenderer(videoRenderer)
+    /// Add the video display layer to the synchronizer for automatic A/V sync + frame pacing. On iOS18/tvOS18/
+    /// macOS15+ Apple split the queue rendering surface onto displayLayer.sampleBufferRenderer; direct
+    /// addRenderer(layer) still type-checks but on tvOS 26+ fails with FigVideoQueueRemote err=-12080 after the
+    /// first enqueue, so attach the renderer instead.
+    @MainActor
+    func attachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
+        precondition(videoLayerRemovalTask == nil, "Await video layer removal before attaching again")
+        guard attachedVideoLayer !== displayLayer else { return }
+        precondition(attachedVideoLayer == nil, "An audio output owns only one video layer")
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            synchronizer.addRenderer(displayLayer.sampleBufferRenderer)
+        } else {
+            synchronizer.addRenderer(displayLayer)
+        }
+        attachedVideoLayer = displayLayer
     }
 
-    /// Remove the video renderer and block until removal completes. The synchronizer detaches asynchronously;
-    /// if the caller immediately assigns displayLayer.controlTimebase for a new Atmos session the layer is briefly
-    /// owned by both (Apple-documented UB). Symptom: first PCM->Atmos switch after launch throws FigVideoQueueRemote
-    /// err=-12080 and the display layer stops rendering (audio keeps going). The semaphore wait (sub-100ms) makes
-    /// the handoff deterministic.
-    func detachVideoRenderer(_ videoRenderer: AVSampleBufferVideoRenderer) {
-        let semaphore = DispatchSemaphore(value: 0)
-        synchronizer.removeRenderer(videoRenderer, at: synchronizer.currentTime()) { _ in
-            semaphore.signal()
+    /// Retire the old session's layer without blocking the caller. SoftwarePlaybackHost creates a
+    /// fresh renderer for every new session, so the retired layer is never reused by its successor. The task
+    /// retains this output, its synchronizer, and the layer until AVFoundation finishes removal; cancellation
+    /// must not release them early. A caller that needs to reuse this same layer must await the returned task.
+    /// The injected operation lets tests hold the completion while checking main-actor responsiveness/lifetime.
+    @MainActor
+    @discardableResult
+    func detachVideoLayer(
+        _ displayLayer: AVSampleBufferDisplayLayer,
+        removeRenderer: @escaping @MainActor (AVSampleBufferRenderSynchronizer, AVSampleBufferDisplayLayer) async -> Void = AudioOutput.removeVideoRenderer
+    ) -> Task<Void, Never>? {
+        guard attachedVideoLayer === displayLayer else { return nil }
+        if let videoLayerRemovalTask { return videoLayerRemovalTask }
+        let task = Task { @MainActor [self, displayLayer] in
+            await removeRenderer(synchronizer, displayLayer)
+            attachedVideoLayer = nil
+            videoLayerRemovalTask = nil
+            withExtendedLifetime((self, displayLayer)) {}
         }
-        let result = semaphore.wait(timeout: .now() + .seconds(1))
-        #if DEBUG
-        if result == .timedOut {
-            EngineLog.emit("[AudioOutput] detachVideoRenderer: timed out waiting for synchronizer removal", category: .swPlayback)
+        videoLayerRemovalTask = task
+        return task
+    }
+
+    @MainActor
+    private static func removeVideoRenderer(
+        from synchronizer: AVSampleBufferRenderSynchronizer,
+        displayLayer: AVSampleBufferDisplayLayer
+    ) async {
+        await withCheckedContinuation { continuation in
+            // Invalid time requests immediate removal, independent of a stopped/reset timebase.
+            // Only the continuation crosses into AVFoundation's completion queue.
+            // AVFoundation reports false for an absent renderer or a superseded removal.
+            // This is the attachment's only remover and duplicate requests share its task,
+            // so no second removal can supersede it; either result finishes retirement.
+            if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+                synchronizer.removeRenderer(displayLayer.sampleBufferRenderer, at: .invalid) { _ in
+                    continuation.resume()
+                }
+            } else {
+                synchronizer.removeRenderer(displayLayer, at: .invalid) { _ in
+                    continuation.resume()
+                }
+            }
         }
-        #endif
     }
 
     var volume: Float {

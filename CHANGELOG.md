@@ -194,6 +194,10 @@ the public-API contract.
   attachments are updated in place only when the decode callback marks the buffer modifiable.
   Otherwise a pooled owned copy receives the attachments; matching output is passed through.
 
+- **Software playback teardown no longer blocks the main actor on renderer removal (AE#873, thanks @jonluca).**
+  The video renderer leaves the synchronizer immediately, also when its clock is stopped, and the
+  retiring output and layer stay alive until AVFoundation reports the removal complete.
+
 - **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
   The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
   opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found

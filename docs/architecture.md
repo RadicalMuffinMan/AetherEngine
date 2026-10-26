@@ -757,3 +757,7 @@ be reconstructed by this policy.
 ### Quantized audio packet coverage
 
 `SoftwareAudioPacketCoverage` retains feasible integer sample-clock phases across admitted audio packets rather than bridging every small gap with an epsilon. Codec geometry is limited to fixed MPEG audio/AC-3 frames, declared AAC/E-AC-3 frame sizes, complete non-reservoir WMA v1/v2 blocks and exact PCM sample frames. Unknown, packed or conflicting layouts keep strict positive-duration intervals. Missing timestamps, backwards transitions and arithmetic overflow break clock evidence; a genuine missing packet or accumulated extra tick remains a hole. This changes packet-cache coverage and seek admission, not the decoded audio output clock. Duration-less audio retains the bounded successor-PTS contract, including repeated TrueHD millisecond timestamps.
+
+### Software renderer retirement
+
+Each software playback host owns a fresh display layer. On stop, `AudioOutput` requests immediate synchronizer removal with an invalid time and returns without blocking the main actor. Its shared retirement task retains the output, synchronizer and display layer until AVFoundation calls the completion handler; cancellation does not release those objects early. Repeated detach requests share that task. A caller reusing the same layer must await retirement before attaching it again.
