@@ -163,7 +163,7 @@ _Nothing yet._
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
-- **The Atmos output activator rides through a short pause on HDMI (AE#848, thanks @chrws).**
+- **The Atmos output activator rides through a short pause on HDMI (AE#848, thanks @nulltuple).**
   A host pause stopped the silent Atmos stream at once, so a receiver that needs it dropped its
   Dolby Atmos badge on every pause and scrub and re-locked on resume. It now keeps playing for 60 s
   and pauses only if the host is still paused then. Leaving APAC, leaving an all-HDMI route (AE#834)
