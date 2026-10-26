@@ -21,10 +21,11 @@ on:
     types: [opened, reopened, ready_for_review, synchronize, labeled]
 
 # A push during a review cancels it in favour of a review of the new head. Any other label being
-# added must not cancel a running review, so only the events that start one take part in cancelling.
+# added starts a run that skips the job; it gets a group of its own so it can neither cancel a
+# running review nor take the pending slot of a queued one.
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: ${{ github.event.action != 'labeled' || github.event.label.name == 'claude-review' }}
+  group: claude-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && github.event.label.name != 'claude-review' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
