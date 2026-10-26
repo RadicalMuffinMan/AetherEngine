@@ -136,6 +136,7 @@ struct BackgroundDecisionWaitsForLoadTests {
         #expect(runs.states == [.playing])
         #expect(engine.state == .paused)
     }
+
     @Test("a retained background reload settles policy without a paused readiness waypoint (AE#870)",
           arguments: [true, false], [true, false])
     func retainedReloadSettlesPolicy(autoplay: Bool, settlesBeforeReturn: Bool) async throws {
@@ -161,7 +162,8 @@ struct BackgroundDecisionWaitsForLoadTests {
         engine.beginLoadInFlight(generation)
         engine.state = .loading
         if settlesBeforeReturn { engine.state = autoplay ? .playing : .paused }
-        #expect(actions.isEmpty)
+        let decidedMidLoad = try await waitFor(upTo: .milliseconds(300)) { !actions.isEmpty }
+        #expect(!decidedMidLoad)
         engine.endLoadInFlight(generation)
         if !settlesBeforeReturn { engine.state = autoplay ? .playing : .paused }
         try await waitFor { !actions.isEmpty }
