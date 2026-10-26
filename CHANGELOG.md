@@ -163,6 +163,12 @@ _Nothing yet._
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
+- **The Atmos output activator rides through a short pause on HDMI (AE#848, thanks @chrws).**
+  A host pause stopped the silent Atmos stream at once, so a receiver that needs it dropped its
+  Dolby Atmos badge on every pause and scrub and re-locked on resume. It now keeps playing for 60 s
+  and pauses only if the host is still paused then. Leaving APAC, leaving an all-HDMI route (AE#834)
+  or tearing the session down still releases it immediately.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
