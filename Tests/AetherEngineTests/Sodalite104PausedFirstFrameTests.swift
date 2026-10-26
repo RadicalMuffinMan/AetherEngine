@@ -105,6 +105,9 @@ struct Sodalite104PausedFirstFrameTests {
         host.pause()
         // The feeder had already read the old playback intent before pause() latched it.
         output.seekClock(to: .zero, rate: 1)
+        #expect(output.rate == 0, "the stale arm must never restart an explicitly paused clock")
+        output.setRate(1)
+        #expect(output.rate == 0, "a feeder's stale rebuffer release also yields to explicit pause")
         host.makeClockArmCallback(audioOutput: output)()
         try await drainClockArmCallbacks()
         #expect(output.rate == 0)
