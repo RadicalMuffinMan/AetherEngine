@@ -22,7 +22,14 @@ extension SoftwarePlaybackHost {
             try decoder.open(stream: stream)
             return (decoder, .pcm)
         }
-        guard objectAudioRendering != .off, !isLive else { return try pcm() }
+        guard objectAudioRendering != .off, !isLive else {
+            if let note = Self.eac3PCMRouteNote(
+                codecID: par.pointee.codec_id, rendering: objectAudioRendering, isLive: isLive,
+                dualLayerRoute: decodesDualLayer) {
+                EngineLog.emit(note, category: .swPlayback)
+            }
+            return try pcm()
+        }
 
         // The look at the stream and the DTS:X verdict run off the main actor, and a stop() can land
         // while they do: it closes the demuxer, which frees the streams `stream` and `par` point into.
@@ -92,6 +99,19 @@ extension SoftwarePlaybackHost {
             }
             return try pcm()
         }
+    }
+
+    /// The route line for an E-AC-3 track on the Profile 7 FEL dual-layer route when nothing asks for the
+    /// objects: the track is decoded to PCM, so a JOC (Atmos) track plays as its channel bed. nil for any
+    /// other codec or route, and when the object path ran (it logs its own verdict). `makeAudioProducer`
+    /// runs once per session, which makes this one line per session.
+    nonisolated static func eac3PCMRouteNote(
+        codecID: AVCodecID, rendering: ObjectAudioRendering, isLive: Bool, dualLayerRoute: Bool
+    ) -> String? {
+        guard dualLayerRoute, codecID == AV_CODEC_ID_EAC3, rendering == .off || isLive else { return nil }
+        let why = isLive ? "live source" : "objectAudioRendering off"
+        return "[SWHost] audio: E-AC-3 on the dual-layer route is decoded to PCM (\(why)); "
+            + "a JOC (Atmos) track plays as its channel bed, without the objects"
     }
 
     /// What the APAC route does with `makeAPACProducer`'s answer. A stop() that landed during the

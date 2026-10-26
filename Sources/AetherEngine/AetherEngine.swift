@@ -5413,7 +5413,16 @@ public final class AetherEngine: ObservableObject {
             let vIdx = probe.videoStreamIndex
             elType = await BlockingWork.detached(priority: .userInitiated) { [probe] in
                 let result = DolbyVisionRecordAudit.probeEnhancementLayerType(demuxer: probe, streamIndex: vIdx)
-                probe.seek(to: 0)
+                // The session reuses this demuxer, so a type read from a position that cannot be
+                // restored is worth nothing: a seek that stalls leaves the type unknown, and the
+                // route is not taken.
+                guard probe.seekBounded(to: 0, timeout: Self.probeRewindSeekTimeout) else {
+                    EngineLog.emit(
+                        "[AetherEngine] el_type probe could not rewind the source within "
+                        + "\(Int(Self.probeRewindSeekTimeout)) s; enhancement layer type unknown",
+                        category: .engine)
+                    return nil
+                }
                 return result
             }.value
             if loadGeneration != gen {
