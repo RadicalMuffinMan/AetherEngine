@@ -40,6 +40,15 @@ the public-API contract.
 
 ### Fixed
 
+- **MP4s whose writer dropped `ctts` and forced the decode ladder monotonic play in order.**
+  Such a file reports `PTS == DTS` on every sample, keeps each anchor on its own presentation time
+  and pushes each B picture 1001 ticks past the picture decoded before it, so the ladder has no single
+  step and the #409 probe left the stream untouched ("decode ladder is not uniform"). Both routes then
+  showed the B pictures in decode order, as QuickTime and the Files app do. The repair now takes the
+  step from the stream's average frame rate, remeasures it on the anchors and rebuilds DTS from each
+  picture's decode slot, under the same picture-order checks. `Scripts/make-clamped-ladder-fixture.sh`
+  generates a twin pair. See `docs/formats.md`.
+
 - **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told
   to mix, so a stereo track reached the tap as its left channel alone, 2.1 as silence, and 4.0 to 7.1 as the centre
   alone. The tap's converter now mixes every channel but the LFE. The native and remote-HLS paths were unaffected.

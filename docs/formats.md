@@ -99,6 +99,24 @@ exactly matches the observed reorder head, and a complete, distinct picture-orde
 timestamps pass the slot policy. It assigns existing slots plus that lead rather than fitting a
 frame rate; DTS, audio and the keyframe index remain unchanged. An ambiguous head stays untouched.
 
+Some writers go one step further: after dropping `ctts` they force the decode-order presentation
+times to be monotonic, so each anchor keeps its own presentation time and each B picture decoded
+after it is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before
+it. There is then no ladder to read a step from: the reporting file (H.264 High, 720p, GOP 90)
+stepped 3003 on 87% of its samples and 1001, 2252, 9009 or 12012 on the rest, so the probe skipped it
+as non-uniform and QuickTime, the Files app and both engine routes showed the B pictures out of
+order. When nothing above takes such a head, it is repaired with the step taken from the stream's
+average frame rate, provided the sampled span is the time its pictures take at that rate within the
+reorder delay plus two pictures, and every other check above still passes. The step is then
+remeasured on the anchors, which the writer left on the presentation axis (the average rate is only
+an estimate: a 60-picture 29.97 fps clip reports 29.80), and used only when every anchor agrees to
+within a tick per picture. DTS is rebuilt from each picture's decode slot rather than shifted, since a
+pushed B picture's DTS can sit after its own presentation time. The shift is what puts the first
+keyframe on the stream's start time, clamped to **16 pictures** because this writer left the keyframe
+four pictures ahead. Measured on a generated twin (`Scripts/make-clamped-ladder-fixture.sh`, 900
+pictures at 29.97 fps), the AVPlayer route stepped backwards 169 times before and 0 after, and the
+software route 44 times before and 0 after.
+
 ### Matroska with presentation slots in coding order
 
 Matroska block timestamps are presentation timestamps by specification, and the format has no
