@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`AETHER_FEL_CHROMA` picks the chroma sampling of the composed Dolby Vision frame (`DualLayerDolbyVision`, experimental).**
+  The composition is defined on the 4:2:0 sites, and 4:2:0 stays the default and the output playback
+  uses. `AETHER_FEL_CHROMA=422` or `444` steps that result up to 4:2:2 or 4:4:4 by co-sited means (a copy
+  on a site, the mean of the sites around a sample between them), for an A/B run on a display. 4:4:4 is
+  experimental: the spec has no 4:4:4 reconstruction, so it only steps the 4:2:0 result up. Neither format
+  is checked on a TV yet, and both take the pool path (in-place composition is 4:2:0 only). Any other value
+  keeps 4:2:0. See `docs/dolby-vision-fel.md`.
+
 ### Changed
 
 - **The `DualLayerDolbyVision` composer writes into the decoded base-layer buffer instead of a separate pool.**

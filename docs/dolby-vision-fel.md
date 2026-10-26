@@ -438,6 +438,14 @@ the decoder's lock, and each call is O(K):
   threshold a burst draws on a reserve of 3 more. Only with the reserve spent does the composer wait,
   for at most about 36 ms (a 300 ms wait stalled the VideoToolbox callback and starved audio into
   rebuffers on device), and then the frame bypasses instead of growing the pool.
+- **Chroma sampling (experimental switch).** The composition is defined on the 4:2:0 sites, where the base
+  layer's chroma sits, and 4:2:0 is the output unless `AETHER_FEL_CHROMA` says otherwise. `422` and `444`
+  step that result up by co-sited means: a copy on a site, and the mean of the sites either side between
+  them (the four around a sample in 4:4:4). Each step-up site is composed again from its neighbours, so
+  4:2:2 does about four times the chroma work of 4:2:0 and 4:4:4 about sixteen times; a pass that composes
+  the 4:2:0 sites once into a scratch texture would remove that. Both take the pool path, since in-place
+  composition is 4:2:0 only. 4:4:4 is experimental: the spec has no 4:4:4 reconstruction. Neither format is
+  checked on a TV yet.
 - **In place.** When the decoded base-layer buffer allows it, the result is written into that buffer
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
   (for example a luma MMR curve). It is used when the buffer is

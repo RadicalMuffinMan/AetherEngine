@@ -37,6 +37,7 @@ final class DoviFelComposer: @unchecked Sendable {
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth: Int = 0
     private var poolHeight: Int = 0
+    private var poolFormat: DoviFelChromaFormat = .yuv420
     private var poolBuffers: [WeakPoolBuffer] = []
     private var poolBufferHighWaterMark = 0
     /// Set by ``releaseOutputPool()``. A composition arriving after teardown (a VideoToolbox callback still in
@@ -55,6 +56,9 @@ final class DoviFelComposer: @unchecked Sendable {
     /// started writing into the base-layer buffer. Guarded by `lock`.
     private var inPlaceComposedCount = 0
     private var inPlaceLostCount = 0
+    /// The chroma sampling of composed frames (see ``DoviFelChromaFormat``). Starts from `AETHER_FEL_CHROMA`,
+    /// 4:2:0 when unset; tests set it directly. Guarded by `lock`.
+    private var chromaFormatStorage = DoviFelChromaFormat.fromEnvironment
 
     private final class WeakPoolBuffer {
         weak var value: CVPixelBuffer?
@@ -128,16 +132,31 @@ final class DoviFelComposer: @unchecked Sendable {
     final class SharedPipelines: @unchecked Sendable {
         let lumaPipeline: MTLComputePipelineState
         let chromaPipeline: MTLComputePipelineState
+        let chroma422Pipeline: MTLComputePipelineState
+        let chroma444Pipeline: MTLComputePipelineState
         let layoutProbePipeline: MTLComputePipelineState?
 
         init(
             luma: MTLComputePipelineState,
             chroma: MTLComputePipelineState,
+            chroma422: MTLComputePipelineState,
+            chroma444: MTLComputePipelineState,
             probe: MTLComputePipelineState?
         ) {
             self.lumaPipeline = luma
             self.chromaPipeline = chroma
+            self.chroma422Pipeline = chroma422
+            self.chroma444Pipeline = chroma444
             self.layoutProbePipeline = probe
+        }
+
+        /// The chroma kernel for `format`.
+        func pipeline(for format: DoviFelChromaFormat) -> MTLComputePipelineState {
+            switch format {
+            case .yuv420: return chromaPipeline
+            case .yuv422: return chroma422Pipeline
+            case .yuv444: return chroma444Pipeline
+            }
         }
 
         /// Per-device results, failures included: a shader that does not compile will not compile on the next
@@ -179,11 +198,15 @@ final class DoviFelComposer: @unchecked Sendable {
         static func compile(device: MTLDevice, source: String) throws -> SharedPipelines {
             let library = try device.makeLibrary(source: source, options: nil)
             guard let lumaFn = library.makeFunction(name: "dovi_compose_luma"),
-                  let chromaFn = library.makeFunction(name: "dovi_compose_chroma") else {
+                  let chromaFn = library.makeFunction(name: "dovi_compose_chroma"),
+                  let chroma422Fn = library.makeFunction(name: "dovi_compose_chroma_422"),
+                  let chroma444Fn = library.makeFunction(name: "dovi_compose_chroma_444") else {
                 throw ComposerError.missingKernelFunction
             }
             let luma = try device.makeComputePipelineState(function: lumaFn)
             let chroma = try device.makeComputePipelineState(function: chromaFn)
+            let chroma422 = try device.makeComputePipelineState(function: chroma422Fn)
+            let chroma444 = try device.makeComputePipelineState(function: chroma444Fn)
             let probe: MTLComputePipelineState?
             if let probeFn = library.makeFunction(name: "dovi_layout_probe") {
                 probe = try? device.makeComputePipelineState(function: probeFn)
@@ -191,7 +214,7 @@ final class DoviFelComposer: @unchecked Sendable {
                 probe = nil
             }
 
-            return SharedPipelines(luma: luma, chroma: chroma, probe: probe)
+            return SharedPipelines(luma: luma, chroma: chroma, chroma422: chroma422, chroma444: chroma444, probe: probe)
         }
 
         #if DEBUG
@@ -262,7 +285,7 @@ final class DoviFelComposer: @unchecked Sendable {
 
     // MARK: - Pixel Buffer Pool Management
 
-    private func ensurePool(width: Int, height: Int) -> CVPixelBufferPool? {
+    private func ensurePool(width: Int, height: Int, format: DoviFelChromaFormat) -> CVPixelBufferPool? {
         lock.lock()
         defer { lock.unlock() }
 
@@ -270,7 +293,7 @@ final class DoviFelComposer: @unchecked Sendable {
         // earlier look and this point cannot leave a fresh pool behind that nothing will release.
         guard !tornDown else { return nil }
 
-        if let pool = pixelBufferPool, poolWidth == width, poolHeight == height {
+        if let pool = pixelBufferPool, poolWidth == width, poolHeight == height, poolFormat == format {
             return pool
         }
 
@@ -281,7 +304,7 @@ final class DoviFelComposer: @unchecked Sendable {
         ]
 
         let pixelBufferAttributes: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            kCVPixelBufferPixelFormatTypeKey: format.pixelFormat,
             kCVPixelBufferWidthKey: width,
             kCVPixelBufferHeightKey: height,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any],
@@ -303,6 +326,7 @@ final class DoviFelComposer: @unchecked Sendable {
         self.pixelBufferPool = pool
         self.poolWidth = width
         self.poolHeight = height
+        self.poolFormat = format
         poolBuffers.removeAll()
         poolBufferHighWaterMark = 0
         return pool
@@ -320,8 +344,8 @@ final class DoviFelComposer: @unchecked Sendable {
     }
 
     #if DEBUG
-    func ensurePoolForTesting(width: Int, height: Int) -> CVPixelBufferPool? {
-        ensurePool(width: width, height: height)
+    func ensurePoolForTesting(width: Int, height: Int, format: DoviFelChromaFormat = .yuv420) -> CVPixelBufferPool? {
+        ensurePool(width: width, height: height, format: format)
     }
 
     /// One allocation from the output pool: `reserve: false` stops at the threshold, `true` draws on the reserve
@@ -768,6 +792,11 @@ final class DoviFelComposer: @unchecked Sendable {
         let blCW = (blW + 1) / 2, blCH = (blH + 1) / 2
         let elCW = (elW + 1) / 2, elCH = (elH + 1) / 2
 
+        // The output's chroma sampling. Only the 4:2:0 base layer can be composed into, so in place is 4:2:0 only.
+        let format = chromaFormat
+        if inPlace, format != .yuv420 { return nil }
+        let (outCW, outCH) = format.chromaSize(width: blW, height: blH)
+
         // The destination is either a buffer rented from the output pool, or the base-layer buffer itself.
         // In place the pool is not asked for, so it is not created unless a frame is refused for in-place
         // (for example a luma MMR curve).
@@ -776,7 +805,7 @@ final class DoviFelComposer: @unchecked Sendable {
             guard !isTornDown else { return nil }
             dst = baseBuffer
         } else {
-            guard let pool = ensurePool(width: blW, height: blH) else { return nil }
+            guard let pool = ensurePool(width: blW, height: blH, format: format) else { return nil }
             guard let rented = rentOutputBuffer(from: pool) else { return nil }
             dst = rented
             // Colour attachments are metadata, not pixels: copying them now, on
@@ -807,7 +836,7 @@ final class DoviFelComposer: @unchecked Sendable {
             outUvTex = blUvTex
         } else {
             guard let y = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-                  let uv = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures) else {
+                  let uv = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: outCW, height: outCH, keepAlive: &keepAliveTextures) else {
                 return nil
             }
             outYTex = y
@@ -830,6 +859,7 @@ final class DoviFelComposer: @unchecked Sendable {
         if inPlace, metalParams.flags.contains(.lumaMmr) { return nil }
 
         guard let pipelines = ensurePipelines() else { return nil }
+        let chromaPipeline = pipelines.pipeline(for: format)
 
         guard let paramSlot = takeParamSlot() else { return nil }
         let paramBuffer = paramBuffers[paramSlot]
@@ -879,14 +909,14 @@ final class DoviFelComposer: @unchecked Sendable {
                      threadgroup: threadgroupSize(for: pipelines.lumaPipeline))
         }
         func encodeChroma() {
-            encoder.setComputePipelineState(pipelines.chromaPipeline)
+            encoder.setComputePipelineState(chromaPipeline)
             encoder.setTexture(blYTex, index: 0)
             encoder.setTexture(blUvTex, index: 1)
             encoder.setTexture(elUvTex, index: 2)
             encoder.setTexture(outUvTex, index: 3)
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
-            dispatch(encoder, width: blCW, height: blCH,
-                     threadgroup: threadgroupSize(for: pipelines.chromaPipeline))
+            dispatch(encoder, width: outCW, height: outCH,
+                     threadgroup: threadgroupSize(for: chromaPipeline))
         }
 
         if inPlace {
@@ -937,6 +967,7 @@ final class DoviFelComposer: @unchecked Sendable {
     enum InPlaceRefusal: Equatable, Sendable {
         case switchedOff
         case tornDown
+        case outputChroma
         case notIOSurfaceBacked
         case notX420
         case planeLayout
@@ -956,9 +987,11 @@ final class DoviFelComposer: @unchecked Sendable {
         lock.lock()
         let enabled = inPlaceEnabled
         let torn = tornDown
+        let format = chromaFormatStorage
         lock.unlock()
         if !enabled { return .switchedOff }
         if torn { return .tornDown }
+        if format != .yuv420 { return .outputChroma }
         return Self.inPlaceRefusal(baseBuffer: baseBuffer, params: params)
     }
 
@@ -1073,6 +1106,13 @@ final class DoviFelComposer: @unchecked Sendable {
     var inPlaceComposeEnabled: Bool {
         get { lock.lock(); defer { lock.unlock() }; return inPlaceEnabled }
         set { lock.lock(); inPlaceEnabled = newValue; lock.unlock() }
+    }
+
+    /// The chroma sampling composed frames are written in. Frames already in flight keep the format they
+    /// were started with.
+    var chromaFormat: DoviFelChromaFormat {
+        get { lock.lock(); defer { lock.unlock() }; return chromaFormatStorage }
+        set { lock.lock(); chromaFormatStorage = newValue; lock.unlock() }
     }
 
     /// Whether the output pool exists. In-place playback must leave it absent.

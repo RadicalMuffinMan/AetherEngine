@@ -612,6 +612,7 @@ Sources/AetherEngine/
 │   ├── AetherEngine+FelProbe.swift          `DualLayerDolbyVision` trait: FEL decode probe backing `aetherctl feltest`, and the `--cycle-el` residual switch
 │   ├── AetherEngine+DolbyVisionTest.swift   DEBUG-only, `DualLayerDolbyVision` trait: `@_spi(Diagnostics)` hook (not host API) that arms the pin test from a debug menu or `aetherctl play --dv-pin`
 │   ├── Metal/                               `DualLayerDolbyVision` trait only
+│   │   ├── DoviFelChromaFormat.swift        Chroma sampling of the composed frame: 4:2:0 (the composition), 4:2:2 and 4:4:4 (experimental, `AETHER_FEL_CHROMA`), each format's CoreVideo layout
 │   │   ├── DoviFelComposer.swift            BL + EL + RPU composition: runtime-compiled pipelines, pooled P010 output, `composeAsync` bounded at `maxFramesInFlight` with completions on its own serial queue; RPU → `DoviMetalParams` parsing
 │   │   ├── DoviShaderSource.swift           Luma / chroma compose kernels (reshaping, inverse NLQ, bilinear EL upsampling, ordered dither) and the ABI layout probe, compiled at runtime
 │   │   └── DoviMetalParams.swift            Swift mirror of the kernel parameter structs and their byte-exact serializer
