@@ -493,6 +493,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
     func recoverAfterSuspensionIfNeeded() {
         let status = resumeQueue?.status() ?? queueStatus
         guard status == .failed else { return }
+        EngineLog.emit("[Renderer] AE#870 queue target failed while paused (\(queueError?.localizedDescription ?? "nil")), flushing before the feeder resumes", category: .swPlayback)
         if let resumeQueue {
             resumeQueue.flush()
         } else {

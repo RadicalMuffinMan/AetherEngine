@@ -33,7 +33,12 @@ the public-API contract.
   scaling. They yield to starved playback and keep a small, separate cache. The CLI exposes the same
   behavior with `aetherctl extract --preview --width <px>`.
 
-- `retainsVideoPipelineWhenBackgrounded` lets hosts retain a paused video pipeline through suspension. It is off by default and leaves playing-session background policy unchanged. Software playback flushes a failed retained video queue before restarting its feeder.
+- **Hosts can retain a paused video pipeline through background suspension (AE#870, thanks @jonluca).**
+  `retainsVideoPipelineWhenBackgrounded = true` skips the background teardown of a PAUSED session, so a return
+  that finds the decoder intact pays no rebuild; off by default, because the system may still invalidate it
+  and the host then reloads. A retained session that resumes while still backgrounded (lock screen, Control
+  Center) gets the playing-session policy at that moment. The software host flushes a failed video queue on
+  play before the feeder wakes, and keeps a healthy one's frames.
 
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`

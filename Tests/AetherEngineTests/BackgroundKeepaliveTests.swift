@@ -129,4 +129,34 @@ struct BackgroundKeepaliveTests {
             retainPausedVideoPipeline: true) == .enterSoftwareAudioOnly)
     }
 
+    @Test("a retained paused session that resumes in the background owes the playing-session policy (AE#870)")
+    func resumeOwesPolicyMatrix() {
+        #expect(AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: true, retainsPausedPipeline: true, from: .paused, to: .playing))
+        #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: false, retainsPausedPipeline: true, from: .paused, to: .playing))
+        #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: true, retainsPausedPipeline: false, from: .paused, to: .playing))
+        #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: true, retainsPausedPipeline: true, from: .playing, to: .paused))
+        #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: true, retainsPausedPipeline: true, from: .loading, to: .playing))
+    }
+
+    @MainActor
+    @Test("a background resume of a retained paused session runs the background policy once (AE#870)",
+          arguments: [true, false])
+    func resumeRunsPolicy(retains: Bool) async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var runs: [PlaybackState] = []
+        engine.owedBackgroundPolicyForTesting = { runs.append($0.state) }
+        engine.retainsVideoPipelineWhenBackgrounded = retains
+        engine.state = .paused
+        engine.noteDidEnterBackground()
+        engine.state = .playing
+        for _ in 0..<50 where runs.isEmpty { await Task.yield() }
+        #expect(runs == (retains ? [.playing] : []))
+    }
+
 }

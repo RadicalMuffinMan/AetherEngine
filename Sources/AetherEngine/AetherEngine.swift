@@ -61,6 +61,14 @@ public final class AetherEngine: ObservableObject {
             if case .error = state {} else { errorInfo = nil }
             recomputePlaybackPhase()
             resolveLoadingStashedSeek(from: oldValue)
+            if Self.backgroundPolicyIsOwedOnResume(
+                isBackgrounded: isBackgrounded, retainsPausedPipeline: retainsVideoPipelineWhenBackgrounded,
+                from: oldValue, to: state
+            ) {
+                // AE#870: a retained paused session skipped the background policy, so a resume in the
+                // background (lock screen, Control Center, AVKit) owes the playing-session decision.
+                backgroundActionOwed = true
+            }
             settleOwedBackgroundAction()
             // A renderer path has no player for the Atmos output activator to observe; it follows this.
             atmosOutputActivator?.refresh()
@@ -1319,6 +1327,15 @@ public final class AetherEngine: ObservableObject {
     /// decision is owed until the state settles.
     nonisolated static func backgroundActionIsOwed(state: PlaybackState) -> Bool {
         state == .loading || state == .seeking
+    }
+
+    /// AE#870: `retainsVideoPipelineWhenBackgrounded` answers only for a paused session. One that
+    /// resumes while still backgrounded gets the playing-session policy (teardown with background
+    /// playback off, software audio-only), whichever transport owner started it.
+    nonisolated static func backgroundPolicyIsOwedOnResume(
+        isBackgrounded: Bool, retainsPausedPipeline: Bool, from: PlaybackState, to: PlaybackState
+    ) -> Bool {
+        isBackgrounded && retainsPausedPipeline && from == .paused && to == .playing
     }
 
     /// #127: how to execute a BackgroundAction. A PAUSED teardown on platforms with quick app switches
@@ -8451,8 +8468,9 @@ public final class AetherEngine: ObservableObject {
         backgroundActionOwed = false
         guard isBackgrounded, state == .playing || state == .paused else { return }
         EngineLog.emit(
-            "[AetherEngine] background: the decision owed while a load or seek was in flight settled "
-            + "(state=\(state)); applying the background policy now (audit CORE-2)",
+            "[AetherEngine] background: an owed decision settled (a load or seek in flight, or a "
+            + "retained paused session resuming, AE#870; state=\(state)); applying the background "
+            + "policy now (audit CORE-2)",
             category: .engine)
         Task { @MainActor [weak self] in await self?.runOwedBackgroundPolicy() }
     }
