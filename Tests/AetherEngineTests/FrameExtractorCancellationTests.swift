@@ -6,6 +6,53 @@ import Testing
 
 @Suite("Still request cancellation", .timeLimit(.minutes(1)))
 struct FrameExtractorCancellationTests {
+    @Test("A resident cache hit supersedes an older refined decode")
+    func residentCacheHitSupersedesRefinement() async throws {
+        let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data(), maxReadSize: 1_024)
+        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-cancellation")
+        let cached = try #require(await extractor.residentPreview(
+            rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false }))
+        reader.arm()
+        let older = Task { await extractor.residentPreview(
+            rawTarget: 12, refined: true, maxWidth: 16, isCancelled: { false }) }
+        defer { reader.release(); older.cancel() }
+        try await waitFor { reader.isBlocked }
+        let hit = await extractor.residentPreview(
+            rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false })
+        #expect(hit?.image === cached.image)
+        reader.release()
+        #expect(await older.value == nil, "a cached resident request must retire the previous refinement")
+        await extractor.shutdown()
+    }
+
+    @Test("Rejected resident requests leave another caller's valid refinement alone")
+    func rejectedResidentRequestsDoNotSupersedeRefinement() async throws {
+        let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data(), maxReadSize: 1_024)
+        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-guards")
+        _ = try #require(await extractor.residentPreview(
+            rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false }))
+        reader.arm()
+        let older = Task { await extractor.residentPreview(
+            rawTarget: 12, refined: true, maxWidth: 16, isCancelled: { false }) }
+        defer { reader.release(); older.cancel() }
+        try await waitFor { reader.isBlocked }
+        #expect(await extractor.residentPreview(
+            rawTarget: .nan, refined: false, maxWidth: 16, isCancelled: { false }) == nil)
+        #expect(await extractor.residentPreview(
+            rawTarget: 2, refined: false, maxWidth: 0, isCancelled: { false }) == nil)
+        #expect(await extractor.residentPreview(
+            rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { true }) == nil)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await extractor.residentPreview(
+                rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false })
+        }
+        #expect(await cancelled.value == nil)
+        reader.release()
+        #expect(await older.value != nil)
+        await extractor.shutdown()
+    }
+
     @Test("A cache hit supersedes an older decode", arguments: [FrameMode.thumbnail, .preview, .snapshot])
     func cacheHitSupersedesDecode(mode: FrameMode) async throws {
         let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data())
@@ -102,12 +149,17 @@ struct FrameExtractorCancellationTests {
 /// accept a newer request. The condition protects only this one-shot gate; DataIOReader owns its cursor.
 private final class StillGateReader: IOReader, @unchecked Sendable {
     private let reader: DataIOReader
+    // Short reads let a resident refinement cross the AVIO buffer and reach the real I/O gate.
+    private let maxReadSize: Int32
     private let condition = NSCondition()
     private var armed = false
     private var blocked = false
     private var released = false
 
-    init(data: Data) { reader = DataIOReader(data: data) }
+    init(data: Data, maxReadSize: Int32 = .max) {
+        reader = DataIOReader(data: data)
+        self.maxReadSize = maxReadSize
+    }
     var discImageProbeEnabled: Bool { false }
     var isBlocked: Bool {
         condition.lock(); defer { condition.unlock() }
@@ -133,7 +185,7 @@ private final class StillGateReader: IOReader, @unchecked Sendable {
     }
     func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
         waitAtGate()
-        return reader.read(buffer, size: size)
+        return reader.read(buffer, size: min(size, maxReadSize))
     }
     func seek(offset: Int64, whence: Int32) -> Int64 {
         if whence != 65536 { waitAtGate() }

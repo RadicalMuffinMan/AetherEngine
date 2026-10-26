@@ -1210,12 +1210,16 @@ say so on the tracker rather than working around it.
 
 ## Stills and thumbnails
 
-`FrameExtractor.thumbnail`, `preview` and `snapshot` share one current request per extractor.
+`FrameExtractor.thumbnail`, `preview`, `snapshot`, `boundedSnapshot` and resident previews share
+one current request per extractor.
 A valid request supersedes an older decode even when the newer result is cached or yields to
 playback. Cancelling its awaiting Task cancels that request, and a cancelled or superseded request
-returns nil instead of publishing a late image. An invalid or already-cancelled request does not
-replace another caller's work. Cancellation is cooperative between decode steps; an in-flight
-source read still uses its normal timeout. Use `boundedSnapshot` for an explicit total deadline.
+returns nil instead of publishing a late image. Requests with invalid timestamps and already-cancelled
+requests do not replace another caller's work. Replacement is intentional across modes: even a cached
+ordinary or resident preview cancels an in-flight `boundedSnapshot` and its caller-supplied
+`ProbeCancellation`. Use separate extractors for independent concurrent requests. Cancellation is
+cooperative between decode steps; an in-flight source read still uses its normal timeout.
+Use `boundedSnapshot` for an explicit total deadline.
 
 | Symbol | Notes |
 | --- | --- |

@@ -60,13 +60,15 @@ public actor FrameExtractor {
         guard !isShutDown, rawTarget.isFinite,
               !Task.isCancelled, !isCancelled() else { return nil }
         guard maxWidth > 0 else { return nil }
+        // A cached approximation is still the latest scrub intent; retire an older refinement
+        // before returning it, using the same cross-mode ownership rule as ordinary stills.
+        currentToken?.cancel()
+        boundedCancellation?.cancel()
         let width = maxWidth
         if !refined, let cached = residentApproximation, cached.width == width {
             scheduleIdleClose()
             return cached.frame
         }
-        currentToken?.cancel()
-        boundedCancellation?.cancel()
         let token = CancelToken(); currentToken = token
         let context = self.context
         let result: ScrubFrame? = await withTaskCancellationHandler {

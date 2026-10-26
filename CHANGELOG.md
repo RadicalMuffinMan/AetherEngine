@@ -160,10 +160,12 @@ the public-API contract.
   item's first roll releases the hold.
 
 - **A superseded still decode no longer publishes after a newer cache hit.** Thumbnail, preview
-  and snapshot requests retire older work before returning a cached image or yielding to playback.
+  and snapshot requests retire older work before returning a cached image or yielding to playback;
+  a resident approximation cache hit also retires an older refined decode.
   Cancelling the awaiting Task also cancels its decode; late results return nil and cannot populate
-  the cache or reset a newer request's idle timer. Invalid or already-cancelled requests leave an
-  active caller's work alone.
+  the cache or reset a newer request's idle timer. Requests with invalid timestamps and already-cancelled
+  requests leave an active caller's work alone. Replacement is shared across still modes, including
+  cancellation of an in-flight bounded snapshot's caller-supplied token.
 
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
