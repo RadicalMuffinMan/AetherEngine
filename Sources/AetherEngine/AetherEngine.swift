@@ -5513,23 +5513,25 @@ public final class AetherEngine: ObservableObject {
            let vStream = probe.stream(at: probe.videoStreamIndex),
            let codecpar = vStream.pointee.codecpar {
             let dvProfile = Self.dvProfile(stream: vStream)
-            let forcesSoftware = {
-                VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-                   codecID: detectedCodecID,
-                   // A Profile 5 record served as its base layer plays as plain HEVC, which is what
-                   // the raw-hvcC probe judges; the exemption is for the dvh1 route it is not on.
-                   // AE#532: a record the RPU corrected is not on that route either, and its base layer
-                   // is standard Main10, so the gate judges it the way it judges any Profile 7 / 8.
-                   dvProfile: presentsDolbyVisionBaseLayer ? nil : (correctedDVProfile ?? dvProfile),
-                   canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
-            }
-            var routesSoftware = forcesSoftware()
+            // A Profile 5 record served as its base layer plays as plain HEVC, which is what
+            // the raw-hvcC probe judges; the exemption is for the dvh1 route it is not on.
+            // AE#532: a record the RPU corrected is not on that route either, and its base layer
+            // is standard Main10, so the gate judges it the way it judges any Profile 7 / 8.
+            let gateDVProfile = presentsDolbyVisionBaseLayer ? nil : (correctedDVProfile ?? dvProfile)
+            // AE#883: called in place rather than through a stored closure. Swift 6.2 infers a stored local
+            // closure main-actor and rejects it capturing `codecpar` ("sending risks causing data races");
+            // a non-escaping argument is not sent.
+            var routesSoftware = VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                codecID: detectedCodecID, dvProfile: gateDVProfile,
+                canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
             // AE#348: with the pre-flight gate beside the load, this probe's throwaway session can open while
             // the panel switches, which the serial order never did. Only a refusal changes the route, so a
             // refusal taken then is asked again once the panel has settled, where the serial order asked it.
             if routesSoftware, !panelRoutingSettled {
                 try await settlePanelRouting(ownsProbe: true)
-                routesSoftware = forcesSoftware()
+                routesSoftware = VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                    codecID: detectedCodecID, dvProfile: gateDVProfile,
+                    canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
             }
             if routesSoftware {
                 useSoftwarePath = true
