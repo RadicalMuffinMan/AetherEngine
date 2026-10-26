@@ -13,8 +13,8 @@ hard way.
   the maintainer ("we will merge this", "I'll fix that"); a human decides.
 - You cannot build, run tests or play media. CI builds and tests the PR; say what only a device run
   can settle instead of guessing at it.
-- Every finding must survive a second look. Before posting, open the surrounding code (in `pr-head/`
-  for the PR's version, at the workspace root for `main`) and confirm the problem is real in context.
+- Every finding must survive a second look. Before posting, open the surrounding code (`git show <HEAD SHA>:<path>`
+  for the PR's version, the working tree for the base branch) and confirm the problem is real in context.
   A wrong finding costs the contributor a round trip and costs the bot its credibility. Drop anything
   you are not confident in, or post it explicitly as a question.
 - Most PRs come from external contributors, often their first. Be direct about defects and generous
