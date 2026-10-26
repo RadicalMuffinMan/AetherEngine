@@ -138,6 +138,10 @@ the public-API contract.
   playhead (at most tolerance + lead, 12 s, in flight) and the stream keeps 256. Loopback and
   remote-HLS VOD alike.
 
+- **The HLS fixture reads its redirect port under the lifecycle lock.** A request worker could read
+  the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
+  and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
+
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
   certificate classifications stay specific). A transport failure at open (a reset or a timeout from

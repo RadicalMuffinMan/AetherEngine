@@ -887,6 +887,8 @@ aetherctl play --live --header "User-Agent: Mozilla/5.0 (QtEmbedded; TestSTB)" \
 
 The REQ log then carries the verdict per request (`auth=ok` / `auth=MISSING -> 403`), which is what makes "who lost the header, and on which hop" a measurement. Knobs: `--require-header "Name: Value"`, `--deny-status N` (401 and 403 reach the engine as different `NSURLError` codes), `--deny-segments-only` (refuse after readyToPlay rather than at the master), `--deny-user-agent S` (refuse `AppleCoreMedia` and serve everyone else, the one origin shape that tells the AVPlayer bypass and the engine's own ingest fetcher apart), `--redirect-entry` / `--redirect-host` / `--redirect-port` (portal-to-edge 302, cross-origin by host name and port while staying on loopback), `--media-origin H:P` (master's variants point at a second origin absolutely).
 
+Without `--redirect-port`, a redirect uses the fixture's bound port, read under the same lifecycle lock that updates it on start and stop.
+
 Measured with it before AE#363 was written, and worth knowing before suspecting the engine: `LoadOptions.httpHeaders` survive BOTH shapes on the AVPlayer bypass on macOS, the cross-origin 302 and the absolutely referenced second origin. Every request arrived with the header and the session played through.
 
 `--codecs` / `--resolution` write `CODECS=` / `RESOLUTION=` onto both `EXT-X-STREAM-INF` lines. Without them AVFoundation reports no `videoAttributes` for the variants, so everything that reads master evidence (the #168 watchdog, the #293 probe gate) sees a master advertising no video at all and the fixture quietly stops carrying the case under test.
