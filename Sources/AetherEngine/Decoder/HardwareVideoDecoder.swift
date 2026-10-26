@@ -719,6 +719,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if decodeStatus != noErr, hdr10PlusPayload != nil {
             hdr10PlusLock.lock(); hdr10PlusByPTS.removeValue(forKey: HDR10PlusKey(pts)); hdr10PlusLock.unlock()
         }
+        if decodeStatus != noErr, attachesAV1DolbyVisionRPU { rpuTable.discard(for: pts) }
         let lostNow = decodeStatus == kVTInvalidSessionErr && !sessionLost
         if lostNow { sessionLost = true }
         lock.unlock()

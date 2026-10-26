@@ -65,9 +65,10 @@ enum AV1DolbyVisionRPU {
     }
 
     private static func rewrap(_ t35: UnsafePointer<UInt8>, count: Int) -> Data? {
-        guard count > 0, let rpu = dovi_parse_itu_t35_dovi_metadata_obu(t35, count) else { return nil }
+        guard count > 0, let rpu = DoviRpuGuard.parseAV1(t35, count) else { return nil }
         defer { dovi_rpu_free(rpu) }
-        // A T.35 OBU from another provider (HDR10+ is T.35 too) fails the parse here.
+        // A T.35 OBU from another provider (HDR10+ is T.35 too) fails the parse here, and libdovi
+        // (panic=abort) never sees an RPU that is corrupt or steers it into a panic (DoviRpuGuard).
         guard dovi_rpu_get_error(rpu) == nil, let nal = dovi_write_unspec62_nalu(rpu) else { return nil }
         defer { dovi_data_free(nal) }
         guard dovi_rpu_get_error(rpu) == nil, nal.pointee.len > 2,
@@ -147,6 +148,13 @@ final class AV1DolbyVisionRPUTable: @unchecked Sendable {
             )
         }
         return rpu
+    }
+
+    /// A frame the decoder refused to take leaves no entry behind, and counts as nothing.
+    func discard(for pts: CMTime) {
+        lock.lock()
+        pending.removeValue(forKey: Key(pts))
+        lock.unlock()
     }
 
     /// Frames of a flushed run that never came out leave their RPU behind.

@@ -96,6 +96,41 @@ struct AV1DolbyVisionRPUTests {
         #expect(Self.payload(Self.temporalDelimiter + [0x2A, 0x40, 0x04, 0xB5]) == nil)
     }
 
+    /// The T.35 payload libdovi writes for `profile81NAL`, from `itu_t_t35_country_code` on.
+    private static func t35Payload() throws -> [UInt8] {
+        let nal = profile81NAL
+        let rpu = try #require(dovi_parse_unspec62_nalu(nal, nal.count))
+        defer { dovi_rpu_free(rpu) }
+        let t35 = try #require(dovi_write_av1_rpu_metadata_obu_t35_complete(rpu))
+        defer { dovi_data_free(t35) }
+        return Array(UnsafeBufferPointer(start: t35.pointee.data, count: Int(t35.pointee.len)))
+    }
+
+    @Test("the guard takes the RPU out of its EMDF container as libdovi does, CRC and final byte intact")
+    func guardUnwrapsTheEMDFContainer() throws {
+        let t35 = try Self.t35Payload()
+        let rpu = try #require(t35.withUnsafeBufferPointer { DoviRpuGuard.av1RPU($0.baseAddress!, $0.count) })
+        let unescaped = try #require(Self.profile81NAL.withUnsafeBufferPointer {
+            DoviRpuGuard.verifiedUnescaped($0.baseAddress!, $0.count)
+        })
+        #expect(rpu == Array(unescaped.dropFirst(2)))
+    }
+
+    @Test("a corrupt RPU never reaches libdovi, which is built panic=abort")
+    func refusesACorruptRPU() throws {
+        let t35 = try Self.t35Payload()
+        // One flipped bit in the middle of the RPU body: the CRC32 catches every single-bit error.
+        var corrupt = t35
+        corrupt[t35.count / 2] ^= 0x10
+        #expect(corrupt.withUnsafeBufferPointer { DoviRpuGuard.av1RPU($0.baseAddress!, $0.count) } != nil,
+                "the container still parses")
+        #expect(corrupt.withUnsafeBufferPointer { DoviRpuGuard.parseAV1($0.baseAddress!, $0.count) } == nil)
+        #expect(Self.payload(Self.temporalDelimiter + Self.t35OBU(corrupt)) == nil)
+        // An EMDF payload size that overruns what is left.
+        let truncated = Array(t35.prefix(40))
+        #expect(truncated.withUnsafeBufferPointer { DoviRpuGuard.av1RPU($0.baseAddress!, $0.count) } == nil)
+    }
+
     @Test("an RPU reaches the frame of its presentation time, once, and a flush drops what is left")
     func carriesTheRPUByPresentationTime() throws {
         let (unit, expected) = try Self.temporalUnit()
