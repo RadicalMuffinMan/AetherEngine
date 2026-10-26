@@ -241,6 +241,14 @@ the public-API contract.
   High-tier 3832x1600 PQ master and an audio switch to AC-3 on each were all accepted. The item still
   falls back, later titles are still offered the master, and the log now says so. tvOS is unchanged.
 
+- **A seek no longer waits on a segment pump running at the efficiency class.** A VOD pump far
+  enough ahead of playback relaxes to `.utility` (AE#286), and a seek's restart stops it and waits
+  for it to finish from the loopback server's `.userInitiated` queue. A condition donates no
+  priority to the thread it waits for, so the pump tore down and signalled its finish at `.utility`,
+  which Xcode's Thread Performance Checker reported as a hang risk in
+  `HLSSegmentProducer.waitForFinish`. The pump now returns to `.userInitiated` as it leaves its read
+  loop and stays there until it has finished.
+
 ## [7.47.0] - 2026-10-23
 
 ### Added
