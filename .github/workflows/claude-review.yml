@@ -107,6 +107,16 @@ jobs:
               }
             }
 
+      # The action keeps tool output out of the public log, so a denied command would otherwise be
+      # invisible. This prints only what Claude tried to run, never what anything returned.
+      - name: List denied tool calls
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/claude-execution-output.json"
+          [ -f "$f" ] || exit 0
+          jq -r '(if type == "array" then .[-1] else . end) | .permission_denials[]?
+                 | "\(.tool_name): \((.tool_input.command // .tool_input.file_path // (.tool_input | tostring))[0:300])"' "$f"
+
       - name: Remove the label
         if: always() && github.event.action == 'labeled'
         env:
