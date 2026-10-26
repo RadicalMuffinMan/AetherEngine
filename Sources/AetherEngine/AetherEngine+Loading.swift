@@ -2739,8 +2739,8 @@ extension AetherEngine {
                 // stopInternal zeroed sourceStartSeconds; recapture the software-path chapter-seek base from
                 // the reopened demuxer so a DVD chapter seek after an audio switch / custom reload still lands
                 // (the native base self-heals via onPlaylistShiftChanged, this one does not). (#67)
-                let st = pre.formatStartTime
-                reopenedStartSeconds = st > 0 ? Double(st) / Double(AV_TIME_BASE) : 0
+                // Same resolved origin as the first load (see sourceStartSeconds).
+                reopenedStartSeconds = pre.resolvedSourceStartOrigin
             }
         }
 

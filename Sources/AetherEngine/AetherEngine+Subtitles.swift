@@ -144,22 +144,25 @@ extension AetherEngine {
         )
     }
 
-    /// Apply `LoadOptions.preferredSubtitleLanguages` at the end of a successful load: activate the best-ranked
-    /// subtitle track whose language matches a preference (scanned in order; see `selectSubtitleIndex`), else
-    /// leave subtitles off (the default). Uses the host-overlay path (equivalent to a `selectSubtitleTrack`
-    /// call); `startAnchor` is the
+    /// Apply `LoadOptions.initialSubtitleTrackID`, else `LoadOptions.preferredSubtitleLanguages`, at the end of a
+    /// successful load: activate the track the id names, else the best-ranked subtitle track whose language
+    /// matches a preference (scanned in order; see `selectSubtitleIndex`), else leave subtitles off (the default).
+    /// Uses the host-overlay path (equivalent to a `selectSubtitleTrack` call); `startAnchor` is the
     /// load's resume position so a mid-file resume seeks the side demuxer to the playhead instead of byte 0.
-    /// A no-op when the list is empty, no track matches, or the host already activated a subtitle. The resolved
+    /// A no-op when neither an id nor a language list is set, nothing matches, or the host already activated a subtitle. The resolved
     /// index is published via `activeSubtitleTrackIndex`. Independent of `prepareNativeSubtitles`. (#73)
     func applyPreferredSubtitleSelection(startAnchor: Double?, sourceDuration: Double?) {
-        guard !loadedOptions.preferredSubtitleLanguages.isEmpty, !isSubtitleActive,
-              !hostExplicitSubtitleAction else { return }
-        guard let index = Self.selectSubtitleIndex(
+        guard loadedOptions.initialSubtitleTrackID != nil || !loadedOptions.preferredSubtitleLanguages.isEmpty,
+              !isSubtitleActive, !hostExplicitSubtitleAction else { return }
+        guard let index = Self.resolveInitialSubtitleIndex(
             tracks: subtitleTracks,
+            initialTrackID: loadedOptions.initialSubtitleTrackID,
             preferredLanguages: loadedOptions.preferredSubtitleLanguages
         ) else { return }
         EngineLog.emit(
-            "[AetherEngine] preferred-subtitle auto-select stream=\(index) langs=\(loadedOptions.preferredSubtitleLanguages)",
+            "[AetherEngine] preferred-subtitle auto-select stream=\(index) "
+            + "initialID=\(loadedOptions.initialSubtitleTrackID.map(String.init) ?? "nil") "
+            + "langs=\(loadedOptions.preferredSubtitleLanguages)",
             category: .engine
         )
         // Bound the anchor to the probe duration (synchronously known here; the published `duration` is set
@@ -1393,9 +1396,10 @@ extension AetherEngine {
     /// Register an external subtitle file as a first-class track (AetherEngine#88): it appears in
     /// `subtitleTracks` with a synthetic id and `isExternal == true` and is selectable via
     /// `selectSubtitleTrack(index:)`. Overlay-only (no native WebVTT rendition / PiP); declare via
-    /// `LoadOptions.externalSubtitles` for rendition eligibility. If `preferredSubtitleLanguages`
-    /// is set, nothing is active, and the host made no explicit choice yet, the preference re-runs
-    /// so a late-added matching track auto-activates.
+    /// `LoadOptions.externalSubtitles` for rendition eligibility. If `initialSubtitleTrackID` or
+    /// `preferredSubtitleLanguages` is set, nothing is active, and the host made no explicit choice
+    /// yet, the selection re-runs so a late-added track that matches the id or the preference
+    /// auto-activates.
     @discardableResult
     public func addExternalSubtitleTrack(_ track: ExternalSubtitleTrack) -> TrackInfo {
         let info = registerExternalSubtitleTrack(track)

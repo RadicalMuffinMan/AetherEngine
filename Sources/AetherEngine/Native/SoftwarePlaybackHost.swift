@@ -942,6 +942,8 @@ final class SoftwarePlaybackHost {
     /// AE#739: the hardware decoder lost its session while nothing could act on it, or VT refused the
     /// rebuild. Paid by `exitBackgroundAudioOnly()`. Main actor only.
     private var videoSessionRecoveryOwed = false
+    /// How many keyframes have retried a refused rebuild in the foreground. Main actor only.
+    private var videoSessionRetry = VideoSessionRetryPolicy()
     nonisolated(unsafe) private var _backgroundAudioOnly = false
     nonisolated var backgroundAudioOnly: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _backgroundAudioOnly }
@@ -971,6 +973,7 @@ final class SoftwarePlaybackHost {
         // VT-backed one when the source's video codec is HEVC.
         self.videoDecoder = SoftwareVideoDecoder()
         armDisplaySizeObserver()
+        armQueueFlushObserver()
     }
 
     /// #353: the renderer settles the picture size on the decode thread, where it builds the format
@@ -1401,6 +1404,9 @@ final class SoftwarePlaybackHost {
         (videoDecoder as? any VideoSessionRebuilding)?.onSessionLost = { [weak self] in
             Task { @MainActor [weak self] in self?.handleVideoSessionLost() }
         }
+        (videoDecoder as? any VideoSessionKeyframeReporting)?.onKeyframeWhileLost = { [weak self] in
+            Task { @MainActor [weak self] in self?.handleKeyframeWhileSessionLost() }
+        }
         videoDecoder.onA53Captions = { [weak self] triplets, pts in
             self?.onA53Captions?(triplets, pts)
         }
@@ -1820,18 +1826,28 @@ final class SoftwarePlaybackHost {
     /// return, so a recovery owed from a loss seen outside audio-only mode (a PiP session, a refused
     /// rebuild) is paid here as well.
     func exitBackgroundAudioOnly() {
+        // A foreground return is a new episode: the retries spent before it do not count against this one.
+        videoSessionRetry.reset()
         if backgroundAudioOnly {
-            videoDecoder.flush()
-            renderer.flush()
+            flushVideoForRecovery(removingDisplayedImage: true)
             let rebuilt = (videoDecoder as? any VideoSessionRebuilding)?.rebuildSession()
             if rebuilt == false { videoSessionRecoveryOwed = true }
+            if rebuilt == true { videoSessionRetry.reset() }
             backgroundAudioOnly = false
             EngineLog.emit(
                 "[SWHost] background audio-only left, video resumes at the next keyframe"
                 + (rebuilt.map { ", hardware session rebuilt=\($0)" } ?? ""),
                 category: .swPlayback)
         }
-        if videoSessionRecoveryOwed { recoverVideoSession() }
+        let repositioned = videoSessionRecoveryOwed ? recoverVideoSession() : false
+        // The video queue failed while video was not wanted. It was flushed above and resumes at the
+        // next keyframe; whether that is soon enough is the same question as for a failure in the
+        // foreground, so it goes through the same rule. An ignored answer (a seek already running) drops
+        // the debt on purpose: that seek repositions the session anyway.
+        if videoQueueFlushOwed {
+            videoQueueFlushOwed = false
+            if !repositioned { handleFlushTrigger(.videoQueueRequiresFlush) }
+        }
     }
 
     #if DEBUG
@@ -1861,24 +1877,56 @@ final class SoftwarePlaybackHost {
         recoverVideoSession()
     }
 
+    /// A keyframe was fed while the session is lost. A rebuild that VideoToolbox refused in the foreground
+    /// is retried here, once per keyframe, up to `VideoSessionRetryPolicy.maxAttempts`; after that the
+    /// failure is surfaced instead of leaving a frozen picture beside live audio. Nothing is owed while the
+    /// first rebuild after a loss is still in flight, or in audio-only mode, so those keyframes do nothing.
+    private func handleKeyframeWhileSessionLost() {
+        guard !stopRequested, !backgroundAudioOnly else { return }
+        switch videoSessionRetry.onKeyframe(owed: videoSessionRecoveryOwed, now: ProcessInfo.processInfo.systemUptime) {
+        case .none:
+            break
+        case .retry(let attempt):
+            EngineLog.emit(
+                "[SWHost] AE#739 video session still lost at a keyframe, rebuild retry \(attempt) of "
+                + "\(VideoSessionRetryPolicy.maxAttempts)",
+                category: .swPlayback)
+            recoverVideoSession()
+        case .giveUp:
+            EngineLog.emit(
+                "[SWHost] AE#739 video session could not be rebuilt after \(VideoSessionRetryPolicy.maxAttempts) "
+                + "keyframe retries, giving up",
+                category: .swPlayback)
+            // `videoSessionRecoveryOwed` stays set on purpose: the failure is published, but a later
+            // foreground return still gets its own try (and a fresh budget).
+            if failure == nil {
+                failure = PlaybackErrorInfo(
+                    kind: .softwarePipelineFailed,
+                    message: "The video decoder could not be restarted after the system reclaimed it.")
+            }
+        }
+    }
+
     /// Rebuild the session, then reposition to the playhead: the demuxer lands on the keyframe before it
     /// and the seek's skip threshold hides the preroll, so the picture returns on the frame the audio is
     /// at instead of freezing until the next keyframe. A live source without a rewind ring cannot go
     /// back and picks up at the next keyframe. A refused rebuild stays owed to the next foreground return.
-    private func recoverVideoSession() {
+    @discardableResult
+    private func recoverVideoSession() -> Bool {
         guard !stopRequested, let hw = videoDecoder as? any VideoSessionRebuilding else {
             videoSessionRecoveryOwed = false
-            return
+            return false
         }
         guard hw.rebuildSession() else {
             videoSessionRecoveryOwed = true
-            return
+            return false
         }
         videoSessionRecoveryOwed = false
+        videoSessionRetry.reset()
         if isLive && dvrRing == nil {
             EngineLog.emit("[SWHost] AE#739 video session rebuilt on a live source, resuming at the next keyframe",
                            category: .swPlayback)
-            return
+            return false
         }
         let target = currentTime
         EngineLog.emit(
@@ -1888,6 +1936,212 @@ final class SoftwarePlaybackHost {
         Task { @MainActor [weak self] in
             await self?.seek(to: target)
         }
+        return true
+    }
+
+    // MARK: - Flush recovery
+
+    /// The video queue (or the audio renderer) was flushed or failed by the system and holds none of what
+    /// the demuxer already handed over. See `FlushRecoveryPolicy` for the rules: audio keeps playing and
+    /// the picture resumes at the next keyframe, unless that keyframe is further away than the audio
+    /// lead, in which case the recovery is a seek to the playhead.
+    ///
+    /// Main actor only, like every transport call here. The renderers report from arbitrary threads and
+    /// hop here, so a trigger runs after any seek the user already started has set its in-flight flag.
+    private var flushRecoveryPending = false
+    /// AE#739 sibling: a video recovery the background could not pay. Paid by `exitBackgroundAudioOnly()`.
+    private var videoQueueFlushOwed = false
+    /// Recovery repositions that have finished, whatever they landed on. Diagnostics and tests.
+    private(set) var flushRecoveriesCompleted = 0
+    /// What the last video recovery was, and how many frames the clock had passed on a healthy queue when it ran.
+    private var lastVideoRecovery: (action: FlushRecoveryPolicy.Action, presentedFrames: Int)?
+    /// When the last reposition was started (`ProcessInfo.systemUptime`); the backoff rule's input.
+    private var lastRepositionUptime: Double?
+    /// The shortest time between two repositions; tests shorten it.
+    private var repositionBackoffSeconds = FlushRecoveryPolicy.repositionBackoffSeconds
+    /// The audio renderer's status as the last poll saw it, so a failure is acted on once, when it begins.
+    private var audioRendererWasFailed = false
+    /// When the audio flushes of the last `FlushRecoveryPolicy.audioFlushWindowSeconds` ran (`ProcessInfo.systemUptime`).
+    private var audioFlushUptimes: [Double] = []
+    /// The last few decisions, newest last, for the diagnostic line and the tests.
+    private(set) var flushRecoveryLog: [(trigger: FlushRecoveryTrigger, action: FlushRecoveryPolicy.Action)] = []
+    /// Keyframes read and not yet handed to the decoder; see `SWKeyframeLedger`.
+    private let keyframeLedger = SWKeyframeLedger()
+
+    private func armQueueFlushObserver() {
+        renderer.setQueueFlushObserver { [weak self] reason in
+            Task { @MainActor [weak self] in self?.handleFlushTrigger(reason.trigger) }
+        }
+    }
+
+    /// The audio the synchronizer's clock has still to play: what the feed has queued, less the clock.
+    private func audioLeadSeconds(clock: Double) -> Double {
+        let fedUntil = Self.diagAudioMarker(
+            demuxLoopPts: demuxDiag.snapshot.lastAudioPts,
+            dvrPumpPts: audioLookahead.lastFedAudioPTS,
+            isDVRSession: isLive && dvrRing != nil)
+        guard fedUntil.isFinite, clock.isFinite else { return 0 }
+        return max(0, fedUntil - clock)
+    }
+
+    private func flushRecoveryState() -> FlushRecoveryPolicy.State {
+        var state = FlushRecoveryPolicy.State()
+        state.stopRequested = stopRequested
+        state.hasSource = demuxer != nil && isReady && failure == nil
+        state.seekInFlight = seekInFlight
+        state.recoveryPending = flushRecoveryPending
+        state.backgroundAudioOnly = backgroundAudioOnly
+        let clock = audioOutput?.currentTimeSeconds ?? .nan
+        // Before the first frame, any frame handed to a healthy queue is enough: it holds nothing worth
+        // recovering otherwise. After a recovery the storm rule wants more than an enqueue the queue
+        // may still refuse: a frame the clock has passed while the queue stayed healthy.
+        state.firstFramePresented = renderer.acceptedFrameCount > 0
+        state.canReposition = !(isLive && dvrRing == nil)
+        if let last = lastVideoRecovery {
+            state.framesPresentedSinceLastVideoRecovery =
+                renderer.presentedFrameCount(clockSeconds: clock) - last.presentedFrames
+            state.lastVideoRecovery = last.action
+        }
+        state.repositionBackoffSeconds = repositionBackoffSeconds
+        if let at = lastRepositionUptime {
+            state.secondsSinceLastReposition = ProcessInfo.processInfo.systemUptime - at
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        audioFlushUptimes.removeAll { now - $0 >= FlushRecoveryPolicy.audioFlushWindowSeconds }
+        state.audioFlushesInWindow = audioFlushUptimes.count
+        state.audioLeadSeconds = audioLeadSeconds(clock: clock)
+        if clock.isFinite, let keyframe = keyframeLedger.nextKeyframe {
+            state.videoGapSeconds = max(0, keyframe - clock)
+        }
+        return state
+    }
+
+    /// The position the recovery returns to, on the session axis `seek(to:)` takes. The synchronizer is
+    /// read directly on VOD (the published `currentTime` lags it by up to a tick); a live DVR session
+    /// keeps its own offset and uses the published value.
+    private func recoveryPlayheadSeconds() -> Double {
+        if !isLive, let raw = audioOutput?.currentTimeSeconds, raw.isFinite, raw >= 0 {
+            let zero = clockSessionZero
+            return zero > 0 ? max(0, raw - zero) : raw
+        }
+        return currentTime
+    }
+
+    /// Flushes the video decoder and the video queue, with the audio left alone, and puts the skip
+    /// threshold at the playhead. The decoder restarts on a keyframe that can sit past the playhead,
+    /// and the renderer's floor, restarted from nothing, would start at that
+    /// keyframe: the B-frames that follow it in decode order but precede it in display order would
+    /// then arrive below it. A floor at the playhead is below every frame still to be shown (the start
+    /// a seek gives it too), and frames under it are late by definition.
+    ///
+    /// The demux thread keeps handing packets to the decoder while this runs, and what follows the flush
+    /// is usually delta frames of a group of pictures whose keyframe the flush just discarded. The
+    /// keyframe gate makes the demux thread drop video until the next keyframe; it is raised before the
+    /// flush, so no delta frame is handed over between the two, and again after it, so a keyframe handed
+    /// over in between and discarded by the flush does not end the wait.
+    private func flushVideoForRecovery(removingDisplayedImage: Bool) {
+        keyframeLedger.requireKeyframe()
+        let clock = audioOutput?.currentTimeSeconds
+        let threshold = clock.flatMap { $0.isFinite && $0 >= 0 ? CMTime(seconds: $0, preferredTimescale: 90000) : nil }
+        videoDecoder.flush()
+        renderer.flush(removingDisplayedImage: removingDisplayedImage, skipThreshold: threshold)
+        if let threshold { videoDecoder.skipUntilPTS = threshold }
+        // The second raise covers a keyframe the demux thread handed over after the first raise and
+        // before the flush above: the gate opened for it, the flush discarded it, and the delta frames
+        // behind it must not follow. The cost is that a keyframe decoded under the new epoch in this
+        // short window is gated too, one extra group of pictures with the old picture held, never garbage.
+        keyframeLedger.requireKeyframe()
+    }
+
+    #if DEBUG
+    /// Tests drive the recovery through the same entry the renderers use, without a session that has
+    /// decoded a frame.
+    var videoQueueFlushOwedForTesting: Bool { videoQueueFlushOwed }
+    var audioRendererForTesting: AVSampleBufferAudioRenderer? { audioOutput?.renderer }
+    var videoRendererForTesting: SampleBufferRenderer { renderer }
+    var keyframeLedgerForTesting: SWKeyframeLedger { keyframeLedger }
+    func setLiveForTesting(_ live: Bool) { isLive = live }
+    func setVideoDecoderForTesting(_ decoder: any VideoDecodingPipeline) { videoDecoder = decoder }
+    func seekClockForTesting(to seconds: Double) {
+        audioOutput?.seekClock(to: CMTime(seconds: seconds, preferredTimescale: 90000), rate: 0)
+    }
+    func setAudioFedUntilForTesting(_ pts: Double) {
+        demuxDiag.update(lastAudioPts: pts, parked: 0, rebuffering: false, generation: .max)
+    }
+    /// A feed marker written under the current generation, as the demux loop writes it on every iteration.
+    func setAudioFedUntilUnderCurrentGenerationForTesting(_ pts: Double) {
+        demuxDiag.update(lastAudioPts: pts, parked: 0, rebuffering: false, generation: seekGeneration)
+    }
+    var audioFedUntilForTesting: Double { demuxDiag.snapshot.lastAudioPts }
+    var recoveryPendingForTesting: Bool { flushRecoveryPending }
+    func setRepositionBackoffForTesting(_ seconds: Double) { repositionBackoffSeconds = seconds }
+    #endif
+
+    @discardableResult
+    func handleFlushTrigger(_ trigger: FlushRecoveryTrigger) -> FlushRecoveryPolicy.Action {
+        let state = flushRecoveryState()
+        let action = FlushRecoveryPolicy.decide(trigger, state)
+        guard action != .ignore else { return action }
+        flushRecoveryLog.append((trigger, action))
+        if flushRecoveryLog.count > 16 { flushRecoveryLog.removeFirst(flushRecoveryLog.count - 16) }
+        // A deferral did nothing yet; counting it would turn the recovery it is owed to into a repeat.
+        switch action {
+        case .reposition, .flushVideoOnly:
+            lastVideoRecovery = (action, renderer.presentedFrameCount(clockSeconds: audioOutput?.currentTimeSeconds ?? .nan))
+            if action == .reposition { lastRepositionUptime = ProcessInfo.processInfo.systemUptime }
+        default:
+            break
+        }
+        switch action {
+        case .ignore:
+            break
+        case .deferToForeground:
+            videoQueueFlushOwed = true
+            EngineLog.emit("[SWHost] flush recovery (\(trigger.rawValue)): video not wanted now, paid on the foreground return",
+                           category: .swPlayback)
+        case .flushVideoOnly:
+            flushVideoForRecovery(removingDisplayedImage: false)
+            EngineLog.emit("[SWHost] flush recovery (\(trigger.rawValue)): video queue and decoder flushed, resuming at the next keyframe"
+                           + (state.canReposition ? "" : " (live, no rewind)"),
+                           category: .swPlayback)
+        case .flushAudioOnly:
+            audioFlushUptimes.append(ProcessInfo.processInfo.systemUptime)
+            audioOutput?.flush()
+            // The flush emptied the queue the diagnostic's audio marker describes (as a seek's does), so
+            // the lead read from it would stay overstated until the feed wrote a new one; the demux
+            // loop republishes its own marker every iteration, so the stale value itself is retired.
+            demuxDiag.audioQueueEmptied()
+            EngineLog.emit("[SWHost] flush recovery (\(trigger.rawValue)): audio queue flushed",
+                           category: .swPlayback)
+        case .reposition:
+            let target = recoveryPlayheadSeconds()
+            flushRecoveryPending = true
+            EngineLog.emit(
+                "[SWHost] flush recovery (\(trigger.rawValue)): repositioning to the playhead at "
+                + "\(String(format: "%.3f", target))s (next keyframe "
+                + "\(state.videoGapSeconds.map { String(format: "%.1fs", $0) } ?? "not read") ahead, audio lead "
+                + "\(String(format: "%.1fs", state.audioLeadSeconds)))",
+                category: .swPlayback)
+            Task { @MainActor [weak self] in
+                await self?.seek(to: target)
+                self?.flushRecoveryPending = false
+                self?.flushRecoveriesCompleted += 1
+            }
+        }
+        return action
+    }
+
+    /// The audio renderer's status, read on the time-update cadence: a failed renderer posts nothing,
+    /// so its status is the only witness. Acted on when the failure begins, not on every read of it.
+    func pollAudioRendererStatus(_ status: AVQueuedSampleBufferRenderingStatus) {
+        guard status == .failed else {
+            audioRendererWasFailed = false
+            return
+        }
+        guard !audioRendererWasFailed else { return }
+        // Latched only once the failure was acted on: a trigger the rule ignored (a seek in flight, a
+        // recovery pending, no source yet) is still owed, and the next poll offers it again.
+        if handleFlushTrigger(.audioRendererFailed) != .ignore { audioRendererWasFailed = true }
     }
 
     func setRate(_ newRate: Float) {
@@ -1972,6 +2226,7 @@ final class SoftwarePlaybackHost {
         // AE#479: the flush just emptied the queue the diag marker describes, and the pump learns of
         // this seek only at its next iteration, which a paused landing never reaches until play().
         demuxDiag.audioFlushed(generation: generation)
+        keyframeLedger.reset()
 
         // Live source is forward-only; DVR rewind reseeds decoders from the ring without touching the live demuxer's read position.
         if isLive, let ring = dvrRing {
@@ -2319,6 +2574,7 @@ final class SoftwarePlaybackHost {
         isPlaying = false
         isRebuffering = false
         seekInFlight = false
+        videoQueueFlushOwed = false
         // A teardown inside a seek's window would otherwise leave it open on this instance.
         noteSeekSettled(seekGeneration)
         timeTimer?.cancel()
@@ -2619,6 +2875,7 @@ final class SoftwarePlaybackHost {
         }
 
         let diag = demuxDiag
+        let keyframeLedger = keyframeLedger
         let readAhead = vodPacketReadAhead
         demuxQueue.async {
             Self.runDemuxLoop(
@@ -2661,6 +2918,7 @@ final class SoftwarePlaybackHost {
                 subtitleTapSink: getSubtitleTapSink,
                 recordingTap: recordingTap,
                 playedMedia: playedMediaLedger,
+                keyframeLedger: keyframeLedger,
                 noteRebuffering: noteRebuffering
             )
         }
@@ -3373,8 +3631,35 @@ final class SoftwarePlaybackHost {
         subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
         recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
         playedMedia: PlayedMediaLedger? = nil,
+        keyframeLedger: SWKeyframeLedger? = nil,
         noteRebuffering: @Sendable (Bool) -> Void = { _ in }
     ) {
+        // The video packet's time on the clock's axis and whether it is a keyframe, for `keyframeLedger`.
+        func keyframeTime(of packet: UnsafeMutablePointer<AVPacket>) -> (pts: Double, isKey: Bool)? {
+            let pts = packet.pointee.pts
+            guard pts != Int64.min, videoTimeBaseSeconds > 0 else { return nil }
+            return (Double(pts) * videoTimeBaseSeconds, (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0)
+        }
+        func noteVideoPacketParked(_ packet: UnsafeMutablePointer<AVPacket>) {
+            if let t = keyframeTime(of: packet), t.isKey { keyframeLedger?.noteKeyframeRead(pts: t.pts) }
+        }
+        func noteVideoPacketDecoded(_ packet: UnsafeMutablePointer<AVPacket>) {
+            if let t = keyframeTime(of: packet) { keyframeLedger?.noteHandedToDecoder(pts: t.pts, isKeyframe: t.isKey) }
+        }
+        func noteVideoPacketDropped(_ packet: UnsafeMutablePointer<AVPacket>) {
+            if let t = keyframeTime(of: packet) { keyframeLedger?.noteDropped(pts: t.pts, isKeyframe: t.isKey) }
+        }
+        // A recovery flush leaves the decoder with no reference chain: until a keyframe comes the packets
+        // that follow decode against nothing, so they are dropped here, at the one place both routes hand
+        // video to the decoder. A dropped packet is never a keyframe, so the ledger needs no correction.
+        func recoveryGate(_ packet: UnsafeMutablePointer<AVPacket>) -> SWKeyframeLedger.GateVerdict {
+            keyframeLedger?.gate(isKeyframe: (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0) ?? .pass
+        }
+        // The decoder refuses a packet whose epoch a flush has moved on from. If that was the keyframe
+        // the gate had just let through, the recovery is still waiting for one.
+        func reassertGateIfRefused(_ verdict: SWKeyframeLedger.GateVerdict, epoch: UInt64) {
+            if verdict == .passAndOpen, videoDecoder.feedEpoch != epoch { keyframeLedger?.requireKeyframe() }
+        }
         // Clock arming: one-shot latch (seekClock is not idempotent -- re-calling snaps clock back to initialClockTime). Shared with host so a seek before first audio isn't overridden by a late re-arm.
 
         // PTS-discontinuity fold (SW): accrue (jumpedPts - expectedContinuation) into discontinuityOffset; subtract from all subsequent PTS so the whole pipeline sees one continuous timeline. Threshold 10s (mirrors native producer); flush decoders at the seam.
@@ -3446,6 +3731,7 @@ final class SoftwarePlaybackHost {
                 av_packet_free_safe(p)
             }
             parkedVideo.removeAll()
+            keyframeLedger?.discardPending()
         }
 
         // Decode+enqueue parked video while the renderer will take it. Never blocks.
@@ -3474,15 +3760,26 @@ final class SoftwarePlaybackHost {
 
         func drainParkedVideoNonblocking() {
             if seekGeneration() != parkedSeekGeneration { return }
-            let epoch = videoDecoder.feedEpoch
             while let head = parkedVideo.first, mayDecodeVideoPacket(head),
                   !stopRequested(), !backgroundAudioOnly() {
+                // The epoch is read per packet, before the generation check below. A seek bumps the
+                // generation before it flushes the decoder, so an epoch read ahead of its flush is refused
+                // by the decoder and one read after it is behind a generation check that fails: either
+                // way a pre-seek packet is retired (AE#492). Read once per pass, a flush from a recovery
+                // in the middle of a batch made the decoder refuse the rest of packets that had already
+                // left the FIFO and the ledger, which the recovery's own gate now accounts for instead.
+                let epoch = videoDecoder.feedEpoch
                 // Leave the rest standing: the next iteration of the loop frees the FIFO as a batch
                 // once it has read the new generation.
                 if seekGeneration() != parkedSeekGeneration { return }
                 let p = parkedVideo.removeFirst()
-                setDecodeGeneration(parkedSeekGeneration)
-                videoDecoder.decode(packet: p, epoch: epoch)
+                let verdict = recoveryGate(p)
+                if verdict != .drop {
+                    setDecodeGeneration(parkedSeekGeneration)
+                    noteVideoPacketDecoded(p)
+                    videoDecoder.decode(packet: p, epoch: epoch)
+                    reassertGateIfRefused(verdict, epoch: epoch)
+                }
                 av_packet_unref(p)
                 av_packet_free_safe(p)
             }
@@ -3911,11 +4208,16 @@ final class SoftwarePlaybackHost {
                 if backgroundAudioOnly() {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
+                    // What is parked is behind a hole now: the foreground return flushes the decoder and
+                    // reads on from here. Keeping it would hand the decoder packets that no longer
+                    // follow what it last saw, and leave the ledger describing keyframes that are gone.
+                    freeParkedVideo()
                     return true
                 }
                 if decoupleAudio {
                     // Park; the drains at the iteration top and the bounded-park gate feed the
                     // renderer. Ownership moves to the FIFO - no free here.
+                    noteVideoPacketParked(packet)
                     parkedVideo.append(packet)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
                     // requires a DECLARED audio track, not a producing one). The stream that
@@ -3927,6 +4229,7 @@ final class SoftwarePlaybackHost {
                     drainParkedVideoNonblocking()
                     return true
                 }
+                noteVideoPacketParked(packet)
                 // Back-pressure via SampleBufferRenderer.isReadyForMoreMediaData (not the deprecated layer property). Park on condition while paused to avoid 200 Hz CPU spin.
                 // Queue readiness plus the FEL-only look-ahead cap. Hold the compressed packet here,
                 // rather than letting an asynchronous decode allocate another composed buffer.
@@ -3968,6 +4271,7 @@ final class SoftwarePlaybackHost {
                 }
                 // Entered background while parked on back-pressure: drop this frame.
                 if backgroundAudioOnly() {
+                    noteVideoPacketDropped(packet)
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
                     return true
@@ -3977,14 +4281,30 @@ final class SoftwarePlaybackHost {
                     av_packet_free_safe(packet)
                     return false
                 }
+                // A recovery flush can land during the wait. The packet in hand is still current, and the
+                // epoch read before the read would make the decoder refuse it; if it is the keyframe the
+                // gate waits for, the picture would wait another group of pictures. Read again here, before
+                // the generation check: a seek bumps the generation before it flushes the decoder, so an
+                // epoch read ahead of a seek's flush is refused by the decoder, and one read after it is
+                // behind a generation check that fails.
+                epochBeforeRead = videoDecoder.feedEpoch
                 // Re-check generation after the back-pressure wait (seek can land there; pre-seek packet would clear skip thresholds).
                 if seekGeneration() != genBeforeRead {
+                    noteVideoPacketDropped(packet)
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    return true
+                }
+                let verdict = recoveryGate(packet)
+                if verdict == .drop {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
                     return true
                 }
                 setDecodeGeneration(genBeforeRead)
+                noteVideoPacketDecoded(packet)
                 videoDecoder.decode(packet: packet, epoch: epochBeforeRead)
+                reassertGateIfRefused(verdict, epoch: epochBeforeRead)
                 // Video-only / undecodable audio fallback: arm clock off first video packet (no buffer within the producer's first-buffer budget = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
                    audioDecoder == nil || (audioPacketsSeen >= audioFirstBufferPacketBudget && !audioBuffersProduced) {
@@ -4131,6 +4451,10 @@ final class SoftwarePlaybackHost {
                 self.checkSurfaceVisibilityIfDue()
                 self.sampleResidentRanges()
                 guard let aOut = self.audioOutput else { return }
+                self.pollAudioRendererStatus(aOut.renderer.status)
+                // Counted while the queue is healthy: by the time a recovery trigger arrives the queue
+                // has failed or been flushed, and the frames the clock passed would be uncounted.
+                _ = self.renderer.presentedFrameCount(clockSeconds: aOut.currentTimeSeconds)
                 // #254: a reposition in flight holds `currentTime` at its target; the synchronizer is
                 // still on the pre-seek anchor and would drag the published position backwards.
                 guard !self.seekInFlight, self.failure == nil else { return }
@@ -4327,6 +4651,9 @@ final class SWPlaybackDiagState: @unchecked Sendable {
     private let lock = NSLock()
     private var _lastAudioPts = Double.nan
     private var _audioFlushGeneration: UInt64 = 0
+    /// The newest PTS that described a queue a recovery has since emptied; a write that does not go
+    /// beyond it is that same stale value coming round again, and is refused.
+    private var _emptiedAudioPts = -Double.infinity
     private var _parked = 0
     private var _rebuffering = false
     private var _sourceExhausted = false
@@ -4340,7 +4667,9 @@ final class SWPlaybackDiagState: @unchecked Sendable {
     /// `parked` and `rebuffering` are the pump's own state and stay unconditional.
     func update(lastAudioPts: Double, parked: Int, rebuffering: Bool, generation: UInt64) {
         lock.lock()
-        if generation >= _audioFlushGeneration { _lastAudioPts = lastAudioPts }
+        if generation >= _audioFlushGeneration, !(lastAudioPts.isFinite && lastAudioPts <= _emptiedAudioPts) {
+            _lastAudioPts = lastAudioPts
+        }
         _parked = parked
         _rebuffering = rebuffering
         lock.unlock()
@@ -4353,8 +4682,19 @@ final class SWPlaybackDiagState: @unchecked Sendable {
         if generation >= _audioFlushGeneration {
             _audioFlushGeneration = generation
             _lastAudioPts = .nan
+            _emptiedAudioPts = -.infinity
             _sourceExhausted = false
         }
+        lock.unlock()
+    }
+
+    /// A recovery emptied the audio queue without a new generation: the pump is on the same one and its
+    /// local marker still names the flushed audio, so it is the value rather than the generation that
+    /// is retired. The next audio the pump enqueues goes beyond it and is taken.
+    func audioQueueEmptied() {
+        lock.lock()
+        if _lastAudioPts.isFinite { _emptiedAudioPts = max(_emptiedAudioPts, _lastAudioPts) }
+        _lastAudioPts = .nan
         lock.unlock()
     }
 

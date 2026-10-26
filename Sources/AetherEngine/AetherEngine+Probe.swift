@@ -775,6 +775,22 @@ extension AetherEngine {
         return Int32(tracks[index].id)
     }
 
+    /// The subtitle track to activate at the end of a load: `LoadOptions.initialSubtitleTrackID` when it
+    /// names a track in `tracks`, else the best `preferredSubtitleLanguages` match, else nil (subtitles
+    /// off). The explicit id wins because a host that names a track has already made the choice the
+    /// language ranking approximates; an id that matches nothing is ignored rather than treated as an
+    /// error, so a stale server index cannot fail a load. Pure and nonisolated, like `selectSubtitleIndex`.
+    nonisolated static func resolveInitialSubtitleIndex(
+        tracks: [TrackInfo],
+        initialTrackID: Int?,
+        preferredLanguages: [String]
+    ) -> Int32? {
+        if let initialTrackID, tracks.contains(where: { $0.id == initialTrackID }) {
+            return Int32(initialTrackID)
+        }
+        return selectSubtitleIndex(tracks: tracks, preferredLanguages: preferredLanguages)
+    }
+
     /// Lower rank wins. The descriptor axis (full > SDH > forced > commentary, from container dispositions)
     /// dominates; text-vs-bitmap is a tiebreaker (text preferred, since host styling only applies to text
     /// cues). Sourced from `TrackInfo` disposition flags rather than title strings, so it is locale-robust.

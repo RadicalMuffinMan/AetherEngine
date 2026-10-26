@@ -171,6 +171,20 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
     private var _onSessionLost: (@Sendable () -> Void)?
 
+    /// A keyframe reached `decode` while the session is lost, so the owner can retry a rebuild that was
+    /// refused. That keyframe itself is dropped, not decoded: VOD recovers by seeking back, and live
+    /// with no rewind ring waits one GOP for the next keyframe. Fired on the feed thread, once per
+    /// such keyframe; the owner decides whether a retry is due.
+    var onKeyframeWhileLost: (@Sendable () -> Void)? {
+        get { skipLock.lock(); defer { skipLock.unlock() }; return _onKeyframeWhileLost }
+        set { skipLock.lock(); _onKeyframeWhileLost = newValue; skipLock.unlock() }
+    }
+    private var _onKeyframeWhileLost: (@Sendable () -> Void)?
+
+    /// True from the moment the system invalidates the session (or a rebuild is refused) until a
+    /// rebuild succeeds.
+    var isSessionLost: Bool { lock.lock(); defer { lock.unlock() }; return sessionLost }
+
     /// AE#739, all guarded by `lock`. `sessionLost` drops every packet instead of feeding a dead
     /// session; `awaitingKeyframe` drops packets after a rebuild until one the new session can start
     /// from.
@@ -489,6 +503,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
 
     #if DEBUG
+    /// Marks the session lost without touching VideoToolbox, so a test can feed keyframes to a decoder that
+    /// has no session and see them reported.
+    func markSessionLostForTesting() {
+        lock.lock(); sessionLost = true; lock.unlock()
+    }
+
     /// Invalidate the live session without forgetting it, which is what the system does on an iOS
     /// screen lock: the next decode returns `kVTInvalidSessionErr`. For the aetherctl harness.
     func invalidateSessionForTesting() {
@@ -610,7 +630,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // AE#492: see `SoftwareVideoDecoder.decode`. Same rule, same lock as `flush()`.
         if let epoch, epoch != currentEpoch { lock.unlock(); return }
         guard session != nil, !sessionLost, let formatDesc = formatDescription else {
+            let lost = sessionLost
             lock.unlock()
+            if lost, (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 { onKeyframeWhileLost?() }
             return
         }
         lock.unlock()
@@ -938,4 +960,10 @@ protocol VideoSessionRebuilding: AnyObject {
     @discardableResult func rebuildSession() -> Bool
 }
 
-extension HardwareVideoDecoder: VideoSessionRebuilding {}
+/// A decoder that reports each keyframe fed while its session is lost, which is when a refused rebuild can
+/// be retried. Separate from `VideoSessionRebuilding` so a decoder that cannot report it still rebuilds.
+protocol VideoSessionKeyframeReporting: VideoSessionRebuilding {
+    var onKeyframeWhileLost: (@Sendable () -> Void)? { get set }
+}
+
+extension HardwareVideoDecoder: VideoSessionKeyframeReporting {}

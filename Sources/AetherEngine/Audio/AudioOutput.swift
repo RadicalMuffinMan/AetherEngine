@@ -104,9 +104,12 @@ final class AudioOutput: @unchecked Sendable {
     /// best practice: the notification arrives on an arbitrary thread, so a buffer enqueued
     /// concurrently with it survives, and a survivor sits in the queue stamped far ahead of the
     /// timebase, muting the session for as long as it takes the clock to reach it. Re-feeding from
-    /// the timebase is deliberately NOT attempted: the demuxer stands at the audio lead by then and
-    /// the sources this happens to are exactly the ones that cannot seek backwards, so the honest
-    /// outcome is a gap of up to that lead, and then sync as before.
+    /// the timebase is deliberately NOT attempted, on any source: the demuxer stands at the audio lead
+    /// by then, so it would take a seek, which cuts the audio that is still playing, to put the dropped
+    /// lead back. The outcome is a gap of up to that lead, and then sync as before. The video queue is
+    /// not touched by this flush, so the host does not react to it; it repositions only when its own
+    /// video queue was flushed and the picture would stay frozen for longer than the audio lead
+    /// (`FlushRecoveryPolicy`).
     ///
     /// The line is also the witness the field log lacked. Across an automatic flush the timebase
     /// keeps RUNNING at its rate, so a session that froze did not freeze because of this, and only a

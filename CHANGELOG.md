@@ -10,12 +10,47 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`LoadOptions.initialSubtitleTrackID` names the subtitle track to activate at load.**
+  A host that already knows the track it wants, such as a server's default subtitle index, had to
+  language-match `subtitleTracks` itself or call `selectSubtitleTrack` after the load. The id (an
+  embedded stream index, or `externalSubtitleTrackIDBase` plus the position in `externalSubtitles`)
+  now activates on the same post-load path as `preferredSubtitleLanguages` and wins over it. An id
+  that names no track falls through to the language preference. See `docs/api.md`.
+
 ### Fixed
+
+- **`selectChapter` on a disc title lands on the chapter, not one container start late.** The software route seeks on the session axis and the host adds the clock's session zero back, so adding the whole container start as well applied it twice whenever the start was past the 2 s anchor tolerance. Only the part of the start the zero did not take is added now, and a native disc title no longer adds the playlist shift on top of `seek(to:)`.
 
 - **A 24.000 fps source is programmed as 24 Hz, not 23.976 Hz (AE#884, thanks @akhanwav).** `FrameRateSnap` sent
   the whole 23.5 to 24.05 window to 23.976, so Match Frame Rate ran 24p content one frame in 1001 fast and the
   panel repeated a frame about every 42 s. A probe within 0.005 of 24.000 now snaps to 24; a Matroska track with
   DefaultDuration probes as an exact 24/1 or 24000/1001, so 23.976 sources and noisier probes keep 23.976.
+
+- **A refused video-session rebuild is retried at the next keyframes in the foreground.** When the system
+  invalidated the hardware session and VideoToolbox refused the rebuild, the decoder dropped every packet
+  and the picture froze beside live audio until the next foreground return. The host now retries at each
+  keyframe fed while the session is still lost (at least two seconds apart), up to four times, and then
+  publishes a playback failure.
+
+- **The in-band HEVC parameter-set scan stops at 16 MiB of input.** A stream that carries no parameter sets,
+  or one whose packets are very large, could be read far past what the packet budget implies before the
+  load gave up. The scan now also stops at a byte budget, the same ceiling is armed on the demuxer input so
+  one oversized read cannot overshoot it, and the record is left as it was.
+
+- **The software host recovers when the system flushes or fails its video queue or audio renderer.** The
+  video renderer reports `requiresFlushToResumeDecoding` (the app lost the right to decode, for instance
+  after backgrounding) and either renderer can end up failed; nothing observed any of it, so the picture
+  stayed frozen until the user seeked. The host now flushes the failed queue and the video decoder and the
+  picture resumes at the next keyframe while the audio plays on. Only when that keyframe lies further away
+  than the audio already queued, or none has been read yet, does it seek to the playhead instead. A video
+  failure while only audio plays in the background is paid on the foreground return, a live source with no
+  rewind ring only flushes, and a queue that is still failing after a recovery is flushed once more and then
+  left alone until a frame the clock has passed gets through, with a short pause between two seeks to the
+  playhead. After a flush the video decoder is fed again only from the next keyframe, so no delta frame
+  decodes against nothing. An audio renderer that keeps failing is flushed at most three times in ten
+  seconds, and one that flushes itself on a route change keeps the behaviour it had.
 
 ## [7.48.0] - 2026-10-26
 

@@ -760,9 +760,11 @@ public final class AetherEngine: ObservableObject {
     /// background-resume reopens (a URL-disc reopen with no id would silently revert to the main title).
     var activeDiscTitleID: Int?
 
-    /// Source container start PTS (seconds) from the probe (AVFormatContext.start_time). The software-path
-    /// playback clock begins here (the native path's content base is `playlistShiftSeconds`), so a DVD
-    /// chapter seek adds it to the chapter's title-relative (0-based) target. 0 when unknown (#67).
+    /// Source start PTS (seconds) the software host anchors its clock on: the demuxer's resolved origin
+    /// (`Demuxer.resolvedSourceStartOrigin`: the container start, backed up by the video stream's own
+    /// start when the container states none). `PresentationAxis.discChapterSeekTarget` needs the same
+    /// origin the host derives its session zero from, so the part of it the zero did not take can be
+    /// added to a DVD chapter's title-relative (0-based) target. 0 when unknown (#67).
     var sourceStartSeconds: Double = 0
 
     /// Active playback backend: `.native` (AVPlayer) or `.software` (SoftwarePlaybackHost/dav1d/libavcodec).
@@ -4963,10 +4965,10 @@ public final class AetherEngine: ObservableObject {
         republishMediaChapters()
         activeDiscTitleID = probeOpened ? probe.selectedDiscTitleID : nil
         selectedDiscTitle = activeDiscTitleID.flatMap { id in discTitles.first { $0.id == id } }
-        // Content start PTS for the software-path chapter-seek base (see sourceStartSeconds). start_time is
-        // AV_NOPTS_VALUE (Int64.min) when unknown; only a positive value is a real offset.
-        let probedStartTime = probeOpened ? probe.formatStartTime : 0
-        sourceStartSeconds = probedStartTime > 0 ? Double(probedStartTime) / Double(AV_TIME_BASE) : 0
+        // Source start PTS for the software-path chapter-seek base (see sourceStartSeconds): the same
+        // resolved origin the software host predicts its session zero from, so engine and host agree even
+        // when the container states no start and only the video stream carries one.
+        sourceStartSeconds = probeOpened ? probe.resolvedSourceStartOrigin : 0
         // Assemble SourceProbe now while the demuxer is open; ownership transfers to loadNative/loadSoftware
         // after which streams are gone (AetherEngine#28).
         let sourceProbe: SourceProbe? = probeOpened
@@ -7771,6 +7773,10 @@ public final class AetherEngine: ObservableObject {
 
         EngineLog.emit("[AetherEngine] selectTitle: scheduling switch to title \(id)", category: .engine)
         let gen = loadGeneration
+        // Stream indices are per title, so an initial subtitle track id named for the old title could
+        // activate an unrelated track on the new one. Drop it here (both reload paths read loadedOptions);
+        // the language preference decides on the new title.
+        loadedOptions.initialSubtitleTrackID = nil
         let options = loadedOptions
         let custom = isCustomSource
         Task { @MainActor [weak self] in
@@ -7836,15 +7842,18 @@ public final class AetherEngine: ObservableObject {
             return
         }
         // discChapters are title-relative (0-based: chapter 1 = 0), matching the disc timeline and the
-        // 0-based title duration. The engine clock and seek(to:) run on the source-PTS axis, which begins at
-        // the title's content start; that base differs by backend (native re-times onto a 0-based playlist
-        // shifted by playlistShiftSeconds; the software path's raw clock begins at the container start,
-        // sourceStartSeconds). Add it so the seek lands on the chapter, not the base seconds early.
-        let base = (playbackBackend == .software) ? sourceStartSeconds : playlistShiftSeconds
-        let target = chapter.startSeconds + base
+        // 0-based title duration. `seek(to:)` takes the published axis of the active backend, which differs
+        // by backend (native re-times onto a 0-based playlist shifted by playlistShiftSeconds; the software
+        // path's published axis is the clock's session zero off the raw container start, so only the part of
+        // sourceStartSeconds the zero did not take is added, see `PresentationAxis.discChapterSeekTarget`).
+        let target = PresentationAxis.discChapterSeekTarget(
+            chapterStart: chapter.startSeconds, backend: playbackBackend,
+            sourceStartSeconds: sourceStartSeconds, playlistShiftSeconds: playlistShiftSeconds,
+            softwareClockZero: softwareClockSessionZero)
+        let base = target - chapter.startSeconds
         EngineLog.emit(
             "[AetherEngine] selectChapter: seeking to chapter \(id) @ title-relative "
-            + "\(String(format: "%.2f", chapter.startSeconds))s -> source \(String(format: "%.2f", target))s "
+            + "\(String(format: "%.2f", chapter.startSeconds))s -> seek target \(String(format: "%.2f", target))s "
             + "(base \(String(format: "%.2f", base))s, backend \(playbackBackend))",
             category: .engine
         )
