@@ -920,7 +920,7 @@ public final class AetherEngine: ObservableObject {
 
     /// Whether renderer paths activate the shared audio session during load and interruption recovery.
     /// Disable before loading when the host owns activation across several inline players.
-    /// Category configuration still occurs; pair with `deactivatesAudioSessionOnStop = false`
+    /// The category is still declared once per process; pair with `deactivatesAudioSessionOnStop = false`
     /// when the host also owns final deactivation. Native AVKit activation is unaffected.
     public var rendererAudioSessionActivationEnabled = true
     /// Set by the host from its PiP delegate (iOS: AVKit; tvOS: host-built AVPictureInPictureController);
@@ -3999,14 +3999,16 @@ public final class AetherEngine: ObservableObject {
         FFmpegRuntimeCheck.logOnce()
         _ = DeinterlaceHardwareWarmup.shared
 
-        // Category setup is validated off-main at load, shared by concurrent engines.
-        // Never activate here: AVKit owns native playback activation (#24).
+        // The category is declared off-main at the first load, once per process (#114), and the session
+        // is never activated here: AVKit owns native playback activation (#24).
 
         setupLifecycleObservers()
     }
 
-    /// Validate the process-wide category before a load can activate the session. Concurrent loads
-    /// share the same off-main operation; later loads retry setup after failures or host mutation.
+    /// Declare the process-wide category before a load can activate the session (#114, off-main).
+    /// Concurrent loads share one operation, and once it has succeeded no later load touches the
+    /// category again: a host that switches the mode afterwards (music playback setting `.default`)
+    /// keeps it, as it did when the declaration ran once at init. A failed attempt is retried.
     func awaitAudioSessionCategoryConfigured() async {
         #if os(iOS) || os(tvOS)
         await SharedOutputCoordinator.shared.configureAudioSessionCategory {
@@ -4016,18 +4018,22 @@ public final class AetherEngine: ObservableObject {
     }
 
     #if os(iOS) || os(tvOS)
-    nonisolated private static func configureAudioSessionCategory() {
+    /// A host that already declared `.playback` before the first load owns mode and policy; only a
+    /// session still on the system default gets the engine's declaration.
+    nonisolated private static func configureAudioSessionCategory() -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            if session.category != .playback || session.mode != .moviePlayback
-                || session.routeSharingPolicy != audioSessionRouteSharingPolicy {
+            if session.category != .playback {
                 try session.setCategory(.playback, mode: .moviePlayback, policy: audioSessionRouteSharingPolicy)
             }
             if !session.supportsMultichannelContent {
                 try session.setSupportsMultichannelContent(true)
             }
+            EngineLog.emit("[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) category=\(session.category.rawValue) mode=\(session.mode.rawValue) policy=\(session.routeSharingPolicy.rawValue) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+            return true
         } catch {
             EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
+            return false
         }
     }
     #endif
@@ -4511,7 +4517,7 @@ public final class AetherEngine: ObservableObject {
 
         // #114: guarantee the AVAudioSession category is declared off-main before any branch
         // below can activate the session: AVKit on the native/remote-HLS paths, activateRendererAudioSession()
-        // on the SW and audio paths. Concurrent loads share the category validation.
+        // on the SW and audio paths. Only the first load in the process does any work here.
         await awaitAudioSessionCategoryConfigured()
         // Audit CORE-6: the first suspension point. Two loads issued back to back right after init
         // both wait on the same category task, and the older one must not resume as the current one.

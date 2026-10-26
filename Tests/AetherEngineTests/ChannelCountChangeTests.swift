@@ -58,5 +58,8 @@ struct ChannelCountChangeTests {
         let sw = try engine()
         defer { sw.stop() }
         #expect(sw.ownsChannelPreference)
+        // A host that owns activation owns the route-change preference with it.
+        sw.rendererAudioSessionActivationEnabled = false
+        #expect(!sw.ownsChannelPreference)
     }
 }

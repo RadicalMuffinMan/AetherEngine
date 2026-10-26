@@ -218,23 +218,49 @@ struct SharedOutputCoordinatorTests {
         }
     }
 
-    @Test("concurrent category requests share work, and later loads revalidate", .timeLimit(.minutes(1)))
-    func categoryRequestsCoalesceAndRevalidate() async throws {
+    @Test("concurrent category requests share work, and a success is never repeated", .timeLimit(.minutes(1)))
+    func categoryRequestsCoalesceOnce() async throws {
         let coordinator = SharedOutputCoordinator()
         let probe = ConfigurationProbe()
-        let first = Task { await coordinator.configureAudioSessionCategory { await probe.run(hold: true) } }
+        let first = Task { await coordinator.configureAudioSessionCategory { await probe.run(hold: true); return true } }
         try await waitFor { await probe.waiting }
         var joined = false
         let second = Task {
             joined = true
-            await coordinator.configureAudioSessionCategory { await probe.run() }
+            await coordinator.configureAudioSessionCategory { await probe.run(); return true }
         }
         try await waitFor { joined }
         await probe.release()
         await first.value
         await second.value
         #expect(await probe.calls == 1)
-        await coordinator.configureAudioSessionCategory { await probe.run() }
+        // A host that changed the mode since (music on `.default`) must not be overwritten by the next load.
+        await coordinator.configureAudioSessionCategory { await probe.run(); return true }
+        #expect(await probe.calls == 1)
+    }
+
+    @Test("a failed category declaration is retried by the next load", .timeLimit(.minutes(1)))
+    func categoryFailureRetries() async {
+        let coordinator = SharedOutputCoordinator()
+        let probe = ConfigurationProbe()
+        await coordinator.configureAudioSessionCategory { await probe.run(); return false }
+        await coordinator.configureAudioSessionCategory { await probe.run(); return true }
+        await coordinator.configureAudioSessionCategory { await probe.run(); return true }
+        #expect(await probe.calls == 2)
+    }
+
+    @Test("the category declaration waits behind a pending release", .timeLimit(.minutes(1)))
+    func categoryWaitsForPendingTransition() async throws {
+        let coordinator = SharedOutputCoordinator()
+        let probe = ConfigurationProbe()
+        let release = coordinator.enqueueTransition { await probe.run(hold: true) }
+        try await waitFor { await probe.waiting }
+        let configure = Task { await coordinator.configureAudioSessionCategory { await probe.run(); return true } }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await probe.calls == 1)
+        await probe.release()
+        await release.value
+        await configure.value
         #expect(await probe.calls == 2)
     }
 

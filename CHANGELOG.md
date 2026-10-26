@@ -12,7 +12,12 @@ the public-API contract.
 
 ### Added
 
-- `rendererAudioSessionActivationEnabled` lets hosts own renderer audio-session activation across multiple players. Concurrent loads now share off-main category setup, which revalidates current session settings on later loads.
+- **Hosts can own renderer audio-session activation (AE#872, thanks @jonluca).**
+  `rendererAudioSessionActivationEnabled = false` before `load()` stops software and audio-only loads, track
+  reloads and interruption recovery from activating the session, and route changes from writing the channel
+  preference, for hosts that coordinate audible focus across several players. The category is now declared
+  off-main by the first load instead of at init, shared by concurrent engines and never repeated after it
+  succeeded, so a host that switches the mode afterwards (music on `.default`) keeps it.
 
 - **AV1 Dolby Vision Profile 10.1 plays as Dolby Vision on the software host.**
   AVFoundation and VideoToolbox ignore the RPU an AV1 stream carries in its ITU-T T.35 metadata OBU, so every

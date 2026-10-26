@@ -34,7 +34,8 @@ final class SharedOutputCoordinator {
     /// again as `.primary` drops its own reset instead of having it wipe the criteria it has just written.
     private var deferredCriteriaResets: [ObjectIdentifier: @MainActor () -> Void] = [:]
     private var lastTransition: Task<Void, Never>?
-    private var categoryConfiguration: Task<Void, Never>?
+    private var categoryConfiguration: Task<Bool, Never>?
+    private var categoryConfigured = false
 
     init() {}
 
@@ -108,17 +109,24 @@ final class SharedOutputCoordinator {
         return transition
     }
 
-    /// Category setup belongs to the process-wide session. Concurrent loads share the in-flight
-    /// operation; later loads validate again so failures and host mutations are not cached forever.
-    /// The operation shares the activation/release queue, preserving their order.
-    func configureAudioSessionCategory(_ body: @escaping @Sendable () async -> Void) async {
+    /// The category belongs to the process-wide session: concurrent loads share the in-flight
+    /// declaration, a successful one is never repeated, a failed one is retried by the next load.
+    /// It runs on the activation/release queue, so it is ordered with both.
+    func configureAudioSessionCategory(_ body: @escaping @Sendable () async -> Bool) async {
+        if categoryConfigured { return }
         if let categoryConfiguration {
-            await categoryConfiguration.value
+            _ = await categoryConfiguration.value
             return
         }
-        let configuration = enqueueTransition(body)
+        let previous = lastTransition
+        let configuration = BlockingWork.detached(priority: .userInitiated) { () async -> Bool in
+            await previous?.value
+            return await body()
+        }
+        lastTransition = BlockingWork.detached(priority: .userInitiated) { _ = await configuration.value }
         categoryConfiguration = configuration
-        await configuration.value
+        let succeeded = await configuration.value
+        if succeeded { categoryConfigured = true }
         categoryConfiguration = nil
     }
 
