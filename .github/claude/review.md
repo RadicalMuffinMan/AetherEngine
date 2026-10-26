@@ -98,6 +98,19 @@ writing anything, read your own earlier automated summaries in `gh pr view --com
   was checked and nothing changed, and no inline comments.
 - If the maintainer or the author answered a finding and the answer holds, drop it.
 
+## Tools
+
+Only these shell commands are allowed, and each must run ALONE: no pipes, no `&&` / `;`, no
+`$(...)`, no `cat` / `head` / `grep` in the shell (use the Read and Grep tools on the working tree
+instead). Anything else is denied and wastes a turn.
+
+- `gh pr diff <N>` and `gh pr view <N> --comments`
+- `git show <HEAD SHA>:<path>` and `git ls-tree -r --name-only <HEAD SHA> <dir>`
+- `gh pr comment <N> --body-file - <<'EOF'` followed by the body and `EOF`, for the summary
+
+Inline comments go through `mcp__github_inline_comment__create_inline_comment` with
+`confirmed: true`.
+
 ## Output
 
 1. **Inline comments** (`mcp__github_inline_comment__create_inline_comment`) for findings tied to a
