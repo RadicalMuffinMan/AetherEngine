@@ -172,6 +172,7 @@ the public-API contract.
   progressive software playback no longer start or wait for a throwaway Metal/VideoToolbox graph.
   Interlaced auto-mode loads still share one process-wide warm-up. Same-title custom reloads
   preserve a decoded progressive verdict; actual title switches reassess reopened metadata.
+  Background teardown carries both interlaced and progressive decisions to a retained-reader reload.
 
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and

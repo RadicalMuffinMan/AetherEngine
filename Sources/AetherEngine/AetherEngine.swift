@@ -6041,7 +6041,8 @@ public final class AetherEngine: ObservableObject {
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
                 expectedGeneration: loadGeneration,
                 discTitleIDOverride: selection.discTitleID,
-                resumePlaying: loadedOptions.autoplay
+                resumePlaying: loadedOptions.autoplay,
+                restoredDeinterlaceWarmupDecision: selection.requiresDeinterlaceWarmup
             )
             // AE#460 follow-up: a rebuild that died leaves the session in `.error`, and this branch
             // used to return as if it had come back, so `reloadAtCurrentPosition(applying:)`

@@ -115,6 +115,56 @@ struct Issue232InterlaceProbeTests {
         #expect(engine.lastRequiresDeinterlaceWarmup == changesTitle)
     }
 
+    @Test("custom-source background reload retains interlace evidence through repeated teardown",
+          .timeLimit(.minutes(2)), arguments: [false, true], [false, true])
+    @MainActor
+    func customBackgroundReloadRetainsWarmupDecision(interlaced: Bool, hasDiscTitle: Bool) async throws {
+        let fixture = interlaced ? Self.interlacedBase64 : Self.declaredTTProgressiveBase64
+        let bytes = try #require(Data(base64Encoded: fixture, options: .ignoreUnknownCharacters))
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions()
+        options.autoplay = false
+        options.preferredDecodePath = .software
+        _ = try await engine.load(source: .custom(DataIOReader(data: bytes), formatHint: "mp4"),
+                                  options: options)
+        #expect(engine.lastRequiresDeinterlaceWarmup == interlaced)
+        if hasDiscTitle { engine.activeDiscTitleID = 11 }
+
+        // This is the production background teardown on every platform. Its second invocation
+        // models a re-armed grace window while the live session has already been cleared.
+        engine.releaseVideoPipelineForBackground()
+        engine.releaseVideoPipelineForBackground()
+        #expect(!engine.lastRequiresDeinterlaceWarmup)
+        #expect(engine.activeDiscTitleID == nil)
+        try await engine.reloadAtCurrentPosition()
+        #expect(engine.lastRequiresDeinterlaceWarmup == interlaced)
+        #expect(engine.backgroundTeardownSelection == nil)
+    }
+
+    @Test("a fresh custom load discards the parked source's warm-up decision",
+          .timeLimit(.minutes(2)), arguments: [false, true])
+    @MainActor
+    func freshCustomLoadDiscardsParkedWarmupDecision(initiallyInterlaced: Bool) async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions()
+        options.autoplay = false
+        options.preferredDecodePath = .software
+        for interlaced in [initiallyInterlaced, !initiallyInterlaced] {
+            let fixture = interlaced ? Self.interlacedBase64 : Self.declaredTTProgressiveBase64
+            let bytes = try #require(Data(base64Encoded: fixture, options: .ignoreUnknownCharacters))
+            _ = try await engine.load(source: .custom(DataIOReader(data: bytes), formatHint: "mp4"),
+                                      options: options)
+            #expect(engine.lastRequiresDeinterlaceWarmup == interlaced)
+            #expect(engine.backgroundTeardownSelection == nil)
+            if interlaced == initiallyInterlaced {
+                engine.releaseVideoPipelineForBackground()
+                #expect(engine.backgroundTeardownSelection != nil)
+            }
+        }
+    }
+
     @Test("the shared SPS fallback only breaks an unknown H.264 field-order tie")
     func codecParametersGateSPSTieBreaker() throws {
         let demuxer = try Self.openFixture(Self.interlacedBase64)

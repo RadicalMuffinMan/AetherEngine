@@ -2465,6 +2465,7 @@ extension AetherEngine {
         discTitleIDOverride: Int? = nil,
         resumeOverride: Double? = nil,
         resumePlaying: Bool? = nil,
+        restoredDeinterlaceWarmupDecision: Bool? = nil,
         keepsDisplayRefusedMediaRoute: Bool = false
     ) async -> Error? {
         // Liveness guard: a stop()/load() between scheduling and here would resurrect a dismissed session or kill the successor. Generation captured at schedule time; both stop() and load() invalidate it.
@@ -2576,7 +2577,8 @@ extension AetherEngine {
         }
         // Preserve codec so the decoder label can be reconstructed without re-probing.
         let preservedVideoCodec = lastDetectedVideoCodec
-        let preservedRequiresDeinterlaceWarmup = lastRequiresDeinterlaceWarmup
+        let preservedRequiresDeinterlaceWarmup =
+            restoredDeinterlaceWarmupDecision ?? lastRequiresDeinterlaceWarmup
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.
@@ -2727,7 +2729,10 @@ extension AetherEngine {
 
         // A same-title custom reload passes its title ID too. Keep any decoded progressive
         // verdict for that title; only a different title invalidates the saved probe evidence.
-        let reopenedRequiresDeinterlaceWarmup: Bool = if titleToReopen != outgoingDiscTitleID,
+        // A background teardown already cleared the outgoing title; its same-source reload hands
+        // back the parked decision explicitly. An actual title switch never supplies that value.
+        let reopenedRequiresDeinterlaceWarmup: Bool = if restoredDeinterlaceWarmupDecision == nil,
+                                                         titleToReopen != outgoingDiscTitleID,
                                                          let pre = customPreopened,
                                                          let stream = pre.stream(at: pre.videoStreamIndex),
                                                          let codecpar = stream.pointee.codecpar
