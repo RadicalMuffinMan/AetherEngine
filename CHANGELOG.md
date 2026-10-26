@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **Hosts can query presentation-backed first-frame evidence with `hasRenderedVideoFrame()`.**
+  Native playback reads the current layer after this load's readiness edge; software playback reads
+  the current renderer's non-dropped frame count. Unlike the load-scoped readiness latch, this does
+  not infer a local picture from an external player's readiness. A stopped or replaced session
+  cannot answer with an older asynchronous metrics result.
+
 - **VP9 can use VideoToolbox hardware decoding on the software playback host (AE#878, thanks @jonluca).** WebM streams
   synthesize the required `vpcC` record from probed parameters. The hardware candidate accepts
   8-bit profile 0 and 10-bit profile 2 with 4:2:0 chroma, requires a hardware session, and falls

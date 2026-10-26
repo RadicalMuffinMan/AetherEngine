@@ -4,6 +4,37 @@ import AVFoundation
 
 extension AetherEngine {
 
+    /// Evidence that the current local video surface has presented a frame. This is a point read,
+    /// not the load-scoped `hasFirstFrameReadyForDisplay` latch or evidence of continuing motion.
+    /// Software metrics count non-dropped frames cumulatively for the current renderer; unavailable
+    /// metrics (including visionOS 1.0), cancellation and a superseded session return false.
+    public func hasRenderedVideoFrame() async -> Bool {
+        await hasRenderedVideoFrame(readSoftwareMetrics: { await $0.loadRenderMetrics() })
+    }
+
+    // Keep the asynchronous read injectable so a replacement load can be tested while it is pending.
+    func hasRenderedVideoFrame(
+        readSoftwareMetrics: @MainActor (SoftwarePlaybackHost) async -> SampleBufferRenderer.RenderMetrics?
+    ) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        switch playbackBackend {
+        case .native:
+            // A reused layer may still hold the outgoing item's picture until the next load mounts.
+            return hasFirstFrameReadyForDisplay && nativePlayerLayer?.isReadyForDisplay == true
+        case .software:
+            guard let host = softwareHost else { return false }
+            let generation = loadGeneration
+            guard let metrics = await readSoftwareMetrics(host),
+                  !Task.isCancelled, loadGeneration == generation,
+                  playbackBackend == .software, softwareHost === host else { return false }
+            // Each software host owns one renderer for its lifetime, so host identity also fences
+            // the surface whose asynchronous counters answered.
+            return metrics.total > metrics.dropped
+        case .none, .audio, .aether:
+            return false
+        }
+    }
+
     /// #220 diagnostic opt-in: appends a live large-block census (blocks >= 1 MB, bucketed by
     /// size class) to the 30 s memprobe line. A flat `mallocBlocks` with a rising `mallocMB`
     /// identifies "one large buffer is growing" but not which one; the census names the size
