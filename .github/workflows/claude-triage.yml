@@ -9,7 +9,8 @@ name: Claude triage
 # `issues: write` on this repository, and Claude's only tools besides reading files are three
 # scripts in .github/claude/ that read issues, add labels from an allowlist to THIS issue, and post
 # one comment on THIS issue (the issue number comes from the event payload, not from Claude).
-# CLAUDE_CODE_SCRIPT_CAPS bounds how often the two writing scripts run.
+# CLAUDE_CODE_SCRIPT_CAPS bounds how often the two writing scripts run, and reads of credential
+# locations are denied (see claude-review.yml for why).
 #
 # Skipped: the maintainer's own issues and used-by submissions (their own workflows handle those).
 
@@ -58,3 +59,24 @@ jobs:
             --model claude-opus-5-5
             --max-turns 40
             --allowedTools "Read,Glob,Grep,Bash(./.github/claude/gh.sh:*),Bash(./.github/claude/triage-label.sh:*),Bash(./.github/claude/triage-comment.sh:*)"
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Read(//proc/**)",
+                  "Read(//sys/**)",
+                  "Read(//dev/**)",
+                  "Read(//etc/**)",
+                  "Read(//root/**)",
+                  "Read(//home/runner/.claude.json)",
+                  "Read(//home/runner/.claude/.credentials.json)",
+                  "Read(//home/runner/.config/**)",
+                  "Read(//home/runner/.gitconfig)",
+                  "Read(//home/runner/.ssh/**)",
+                  "Read(//home/runner/.docker/**)",
+                  "Read(//home/runner/.npmrc)",
+                  "Read(//home/runner/work/_temp/**)",
+                  "Read(//home/runner/work/_actions/**)"
+                ]
+              }
+            }
