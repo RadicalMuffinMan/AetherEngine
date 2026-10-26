@@ -114,8 +114,13 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         yCbCrMatrix: CFString?,
         pixelAspectRatio: AVRational?
     ) -> Bool {
+        // Only a propagating attachment counts as a match: the subtitle compositor's copy carries
+        // nothing else, so a matching value marked `.shouldNotPropagate` would be lost there.
         func attachment(_ key: CFString) -> CFTypeRef? {
-            CVBufferCopyAttachment(imageBuffer, key, nil)
+            var mode = CVAttachmentMode.shouldPropagate
+            guard let value = CVBufferCopyAttachment(imageBuffer, key, &mode),
+                  mode == .shouldPropagate else { return nil }
+            return value
         }
 
         if let colorPrimaries,
@@ -138,7 +143,7 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
                   == Int(pixelAspectRatio.den) else {
                 return false
             }
-        } else if attachment(kCVImageBufferPixelAspectRatioKey) != nil {
+        } else if CVBufferCopyAttachment(imageBuffer, kCVImageBufferPixelAspectRatioKey, nil) != nil {
             return false
         }
         return true

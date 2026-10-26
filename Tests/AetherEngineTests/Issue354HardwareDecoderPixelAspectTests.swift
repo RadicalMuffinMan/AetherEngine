@@ -124,6 +124,40 @@ struct Issue354HardwareDecoderPixelAspectTests {
         #expect(output === input)
     }
 
+    @Test("a matching but non-propagating attachment is not a match")
+    func nonPropagatingMatchIsRewritten() throws {
+        let input = try makeOutput()
+        let aspectValue: NSDictionary = [
+            kCVImageBufferPixelAspectRatioHorizontalSpacingKey: 64,
+            kCVImageBufferPixelAspectRatioVerticalSpacingKey: 45,
+        ]
+        CVBufferSetAttachment(input, kCVImageBufferPixelAspectRatioKey, aspectValue, .shouldNotPropagate)
+        CVBufferSetAttachment(input, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldNotPropagate)
+        let output = normalize(input, with: VideoToolboxOutputMetadataNormalizer(), ratio: rational(64, 45),
+                               primaries: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        #expect(output !== input)
+        var mode = CVAttachmentMode.shouldNotPropagate
+        #expect(CVBufferCopyAttachment(output, kCVImageBufferPixelAspectRatioKey, &mode) != nil)
+        #expect(mode == .shouldPropagate)
+        mode = .shouldNotPropagate
+        #expect(CVBufferCopyAttachment(output, kCVImageBufferColorPrimariesKey, &mode) != nil)
+        #expect(mode == .shouldPropagate)
+    }
+
+    @Test("a stale non-propagating PAR is still removed on square pixels")
+    func staleNonPropagatingRatioIsRemoved() throws {
+        let input = try makeOutput()
+        let aspectValue: NSDictionary = [
+            kCVImageBufferPixelAspectRatioHorizontalSpacingKey: 4,
+            kCVImageBufferPixelAspectRatioVerticalSpacingKey: 3,
+        ]
+        CVBufferSetAttachment(input, kCVImageBufferPixelAspectRatioKey, aspectValue, .shouldNotPropagate)
+        let output = normalize(input, with: VideoToolboxOutputMetadataNormalizer(), modifiable: true)
+        #expect(output === input)
+        #expect(aspect(output) == nil)
+    }
+
     @Test("square-pixel output removes stale PAR without mutating an immutable source")
     func staleRatioIsRemovedFromOwnedCopy() throws {
         let input = try makeOutput()
