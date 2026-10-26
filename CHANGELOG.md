@@ -49,7 +49,13 @@ the public-API contract.
   pushed as well, snaps it to the nearest standard frame rate within 1%) and rebuilds DTS from each
   picture's decode slot, under the same picture-order checks. A keyframe the writer pushed late
   continues the GOP before it instead of leaving a gap or overlapping it, and a head that opens on a
-  run of P pictures is sampled on to its first B picture (up to 48 pictures).
+  run of P pictures is sampled on to its first B picture (up to 48 pictures). The rate is the one the
+  bitstream's VUI states when it agrees with the stream (24 is no longer read as 23.976 off a short
+  clip), applied as an exact fraction of a tick, and a continued sequence leans toward where the
+  writer's own pictures say it starts, so a writer clock slightly off its stated rate no longer drifts
+  the picture 61 ms and then overlaps a GOP. Over HLS, a keyframe placed back onto its sequence sits
+  before the index entry the segment plan names, and the cutter and the restart gate now reach for
+  it: before, most segments of such a file opened mid-GOP and could not be decoded on their own.
   `Scripts/make-clamped-ladder-fixture.sh` generates the twins. See `docs/formats.md`.
 
 - **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told

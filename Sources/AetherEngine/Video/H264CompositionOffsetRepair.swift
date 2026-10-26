@@ -134,6 +134,34 @@ enum H264CompositionOffsetRepair {
         /// well, because the container's DTS of a B picture can sit after the presentation time it
         /// belongs to.
         var synthesizesDecodeLadder = false
+        /// The exact picture length of a synthesized ladder, when the rate is known as a fraction (23 fps
+        /// is 90000/23 ticks at 90 kHz). Offsets inside a sequence and the length of a sequence are read
+        /// off it, so a rounded `step` never adds up across a long file.
+        var pictureCadence: Cadence?
+        /// The reorder delay in pictures, which `decodeLead` is the length of. Only a synthesized
+        /// ladder reads it; 0 on every other plan.
+        var decodeLeadPictures: Int64 = 0
+
+        /// The most a synthesized ladder places a keyframe before its written decode time: the reorder
+        /// delay plus two and a half pictures, which is how late the writers this ladder describes
+        /// were measured to push an IDR (four pictures on the 29 fps reporting asset). Continuing a
+        /// sequence and landing on a seek both stay inside it, so the container index, read on the
+        /// written axis, names every keyframe to within this many ticks. 0 for every other plan,
+        /// which keeps each keyframe exactly where the index says.
+        var keyframeAdvanceLimit: Int64 {
+            guard synthesizesDecodeLadder else { return 0 }
+            let (pictures, pictureOverflow) = step.multipliedReportingOverflow(by: 2)
+            let (limit, limitOverflow) = decodeLead.addingReportingOverflow(pictures)
+            let (total, totalOverflow) = limit.addingReportingOverflow(step / 2)
+            return pictureOverflow || limitOverflow || totalOverflow ? 0 : total
+        }
+
+        /// Ticks from a sequence's anchor to its picture `ordinal`, on `pictureCadence` when there is one.
+        func pictureOffset(_ ordinal: Int64) -> Int64? {
+            if let pictureCadence { return pictureCadence.timestamp(at: ordinal) }
+            let (offset, overflow) = ordinal.multipliedReportingOverflow(by: step)
+            return overflow ? nil : offset
+        }
 
         /// The timestamp of a presentation ordinal, nil unless this plan carries a lattice.
         func presentationTimestamp(ordinal: Int64) -> Int64? {
@@ -178,6 +206,11 @@ enum H264CompositionOffsetRepair {
     /// open every GOP on a run of P pictures (measured: twelve, then the first B picture), and without
     /// a regression the head proves nothing either way.
     static let extendedSampleTarget = 48
+    /// Pictures a seek onto a synthesized ladder holds before it places the landing. The writer only
+    /// ever pushes a picture later, so the earliest of `written time - offset of its display slot` over
+    /// the first pictures is a better start than the keyframe alone: measured on the three reporting
+    /// files, 8 pictures cut the spread of the landing from 0.5 to 4.3 pictures to -0.9 to 1.3.
+    static let landingEnvelopePictures = 8
     /// Below this the ladder and the reorder evidence are too thin to trust; sampling stops early
     /// only on a healthy verdict or EOF.
     static let minimumSamples = 9
@@ -217,7 +250,7 @@ enum H264CompositionOffsetRepair {
         streamStartTime: Int64,
         ladderStart: Int64,
         nominalStep: Int64? = nil,
-        standardStep: Int64? = nil
+        rateCadence: Cadence? = nil
     ) -> Verdict {
         guard videoDelay > 0, videoDelay <= 16 else {
             return .inconclusive("reorder delay \(videoDelay) outside 1...16")
@@ -325,13 +358,16 @@ enum H264CompositionOffsetRepair {
         // The average frame rate is only an estimate (short files, rounded durations: a 60-picture
         // 29.97 clip reports 29.80). When the writer left its anchors on the presentation axis they give
         // the exact step. The reporting file pushed its anchors as well (a P picture 1001 ticks after the
-        // P before it), so they agree on nothing; the step is then the standard rate the estimate is
-        // within 1% of, and a head with neither is left alone.
+        // P before it), so they agree on nothing; the step is then the stream's picture rate
+        // (`rateCadence`), and a head with neither is left alone.
+        var pictureCadence: Cadence?
         if synthesizesDecodeLadder {
             if let measured = anchorStep(samples: samples, pocStep: pocStep) {
                 step = measured
-            } else if let standardStep {
-                step = standardStep
+                pictureCadence = Cadence(numerator: measured, denominator: 1)
+            } else if let rateCadence, let rounded = rateCadence.timestamp(at: 1), rounded >= 2 {
+                step = rounded
+                pictureCadence = rateCadence
             } else {
                 return .inconclusive("anchors do not agree on a step")
             }
@@ -346,6 +382,11 @@ enum H264CompositionOffsetRepair {
                 return .inconclusive("cadence does not describe a reorder head")
             }
             decodeLead = -head
+        } else if let pictureCadence {
+            guard let lead = pictureCadence.timestamp(at: Int64(videoDelay)) else {
+                return .inconclusive("reorder head does not fit the timeline")
+            }
+            decodeLead = lead
         } else {
             let (lead, overflow) = Int64(videoDelay).multipliedReportingOverflow(by: step)
             guard !overflow else { return .inconclusive("reorder head does not fit the timeline") }
@@ -398,7 +439,9 @@ enum H264CompositionOffsetRepair {
                 latticeOrigin: latticeOrigin,
                 ladderPhase: ladderPhase,
                 ladderOrdinalOffset: ladderOrdinalOffset,
-                synthesizesDecodeLadder: synthesizesDecodeLadder
+                synthesizesDecodeLadder: synthesizesDecodeLadder,
+                pictureCadence: pictureCadence,
+                decodeLeadPictures: synthesizesDecodeLadder ? Int64(videoDelay) : 0
             )
         )
     }
@@ -417,22 +460,50 @@ enum H264CompositionOffsetRepair {
     static let standardFrameRates: [(num: Int64, den: Int64)] =
         (1...240).map { (Int64($0), 1) } + [24, 30, 48, 60, 120, 240].map { (Int64($0) * 1000, 1001) }
 
-    /// The picture length, rounded to a tick, of the standard frame rate closest to `estimate`, within 1%.
-    /// 29.97 and 30 are both that close to either, so the nearer one wins and a tie names neither. A
-    /// rate that is not a whole number of ticks (23.976 or 23 at 90 kHz) is rounded: the synthesized
-    /// ladder re-anchors on every keyframe, so the half tick per picture never adds up across a GOP the
-    /// way an estimate's error does (29.80 against 29.97 is 17 ticks per picture). nil when no standard
-    /// rate is that close.
-    static func standardFrameStep(near estimate: Int64, timeBase: AVRational) -> Int64? {
+    /// The picture length, as an exact fraction of a tick, of the standard frame rate closest to
+    /// `estimate`, within 1%. 29.97 and 30 are both that close to either, so the nearer one wins and a
+    /// tie names neither. nil when no standard rate is that close.
+    static func standardFrameCadence(near estimate: Int64, timeBase: AVRational) -> Cadence? {
         guard estimate >= 2, timeBase.num > 0, timeBase.den > 0 else { return nil }
-        let ranked = standardFrameRates.map { rate -> (ticks: Double, distance: Double) in
+        let ranked = standardFrameRates.map { rate -> (rate: (num: Int64, den: Int64), distance: Double) in
             let ticks = Double(timeBase.den) * Double(rate.den) / (Double(timeBase.num) * Double(rate.num))
-            return (ticks, abs(ticks - Double(estimate)))
+            return (rate, abs(ticks - Double(estimate)))
         }.sorted { $0.distance < $1.distance }
         guard let nearest = ranked.first, nearest.distance * 100 <= Double(estimate) else { return nil }
         if ranked.count > 1, ranked[1].distance == nearest.distance { return nil }
-        guard nearest.ticks < Double(Int64.max / 4) else { return nil }
-        return Int64(nearest.ticks.rounded())
+        return pictureCadence(rate: nearest.rate, timeBase: timeBase)
+    }
+
+    /// The picture rate a synthesized ladder is rebuilt at. The bitstream states it (the H.264 or HEVC
+    /// VUI timing the parser reads into the codec context): on all three reporting files it named the
+    /// exact rate (23, 29.97, 29.0002 fps), where the average rate of a short file with a pushed tail
+    /// cannot tell 24 from 23.976. It is trusted only within 1% of the average rate, and snapped to the
+    /// nearest standard rate within 0.01% (29.97 and 30 are 0.1% apart and must stay apart). Without
+    /// it, the standard rate nearest the average rate.
+    static func rateCadence(bitstreamRate: AVRational?, estimate: Int64, timeBase: AVRational) -> Cadence? {
+        guard timeBase.num > 0, timeBase.den > 0 else { return nil }
+        if let rate = bitstreamRate, rate.num > 0, rate.den > 0,
+           let stated = pictureCadence(rate: (Int64(rate.num), Int64(rate.den)), timeBase: timeBase) {
+            let ticks = Double(stated.numerator) / Double(stated.denominator)
+            if abs(ticks - Double(estimate)) * 100 <= Double(estimate) {
+                let distance = { (cadence: Cadence) in abs(Double(cadence.numerator) / Double(cadence.denominator) - ticks) }
+                let standard = standardFrameRates.compactMap { pictureCadence(rate: $0, timeBase: timeBase) }
+                    .filter { distance($0) * 10_000 <= ticks }
+                    .min { distance($0) < distance($1) }
+                return standard ?? stated
+            }
+        }
+        return standardFrameCadence(near: estimate, timeBase: timeBase)
+    }
+
+    /// Ticks per picture at `rate` in `timeBase`, as a reduced fraction. nil when it overflows or is
+    /// shorter than two ticks, which the lattice arithmetic refuses.
+    static func pictureCadence(rate: (num: Int64, den: Int64), timeBase: AVRational) -> Cadence? {
+        let (numerator, overflow) = Int64(timeBase.den).multipliedReportingOverflow(by: rate.den)
+        let (denominator, denominatorOverflow) = Int64(timeBase.num).multipliedReportingOverflow(by: rate.num)
+        guard !overflow, !denominatorOverflow, let cadence = Cadence(numerator: numerator, denominator: denominator),
+              cadence.wholeTicks >= 2 else { return nil }
+        return cadence
     }
 
     /// Whether a non-uniform sampled ladder still spans the time its pictures would take at `step`. The
@@ -591,6 +662,12 @@ enum H264CompositionOffsetRepair {
         /// The highest display index placed in the current sequence. A synthesized ladder's next IDR
         /// is expected right after it.
         private var sequenceLastDisplayIndex: Int64?
+        /// The earliest sequence origin the pictures held after a seek point to (`noteLandingEnvelope`).
+        private var landingEnvelopeAnchor: Int64?
+        /// The earliest origin, `written DTS - pictureOffset(display index)`, any picture of the
+        /// current sequence pointed to. The writer only ever pushes a picture later, so this is the
+        /// best reading of where the sequence really started (`continuedSequenceAnchor`).
+        private var sequenceEnvelopeOrigin: Int64?
         /// Pictures emitted untouched because no anchor was available or the arithmetic did not
         /// close. Surfaced so a stream this repair does not describe is visible as a number.
         private(set) var unrepairedPictures = 0
@@ -606,6 +683,15 @@ enum H264CompositionOffsetRepair {
             decodeOrdinal = 0
             anchoredOnLanding = false
             sequenceLastDisplayIndex = nil
+            landingEnvelopeAnchor = nil
+            sequenceEnvelopeOrigin = nil
+        }
+
+        /// The earliest origin the held landing pictures imply, `written DTS - pictureOffset(display
+        /// index)`, which the landing takes when it is earlier than its keyframe's own. Synthesized
+        /// ladders only.
+        mutating func noteLandingEnvelope(anchor: Int64?) {
+            landingEnvelopeAnchor = plan.synthesizesDecodeLadder ? anchor : nil
         }
 
         mutating func noteLanding(leadingPictures: Int64) {
@@ -634,6 +720,7 @@ enum H264CompositionOffsetRepair {
                 decodeOrdinal = 0
                 anchoredOnLanding = false
                 sequenceLastDisplayIndex = nil
+                sequenceEnvelopeOrigin = nil
             } else if awaitingReanchor, isKeyframe {
                 guard pictureOrderCount % plan.pocStep == 0 else {
                     unrepairedPictures += 1
@@ -647,14 +734,22 @@ enum H264CompositionOffsetRepair {
                 // pushed the B pictures), so its origin is `landingIndex` slots back, not its decode slot.
                 let originSlots = plan.synthesizesDecodeLadder ? landingIndex : anchorSlots
                 // Audit BIT-101: a 64-bit `tfdt` step and a landing order near -2^31 leave Int64.
-                let (landingTicks, productOverflow) = slotsOverflow
-                    ? (0, true) : originSlots.multipliedReportingOverflow(by: plan.step)
+                let (landingTicks, productOverflow): (Int64, Bool) = slotsOverflow
+                    ? (0, true)
+                    : plan.synthesizesDecodeLadder
+                        ? plan.pictureOffset(originSlots).map { ($0, false) } ?? (0, true)
+                        : originSlots.multipliedReportingOverflow(by: plan.step)
                 let (anchor, anchorOverflow) = dts.subtractingReportingOverflow(landingTicks)
                 guard !productOverflow, !anchorOverflow else {
                     unrepairedPictures += 1
                     return nil
                 }
-                sequenceAnchorDTS = anchor
+                // Never further back than a continued sequence could have put it, so the segment plan
+                // built from the index still finds this keyframe (`keyframeAdvanceLimit`).
+                sequenceAnchorDTS = landingEnvelopeAnchor.map {
+                    max(min($0, anchor), anchor &- plan.keyframeAdvanceLimit)
+                } ?? anchor
+                landingEnvelopeAnchor = nil
                 sequenceBaseOrdinal = plan.presentationOrdinal(ladderTimestamp: dts)
                     .flatMap { ordinal -> Int64? in
                         let (base, overflow) = ordinal.subtractingReportingOverflow(originSlots)
@@ -663,6 +758,7 @@ enum H264CompositionOffsetRepair {
                 awaitingReanchor = false
                 decodeOrdinal = anchorSlots
                 anchoredOnLanding = true
+                sequenceEnvelopeOrigin = nil
                 sequenceLastDisplayIndex = nil
             }
             guard let anchor = sequenceAnchorDTS, !awaitingReanchor else {
@@ -678,6 +774,11 @@ enum H264CompositionOffsetRepair {
             }
             let displayIndex = pictureOrderCount / plan.pocStep
             sequenceLastDisplayIndex = max(sequenceLastDisplayIndex ?? displayIndex, displayIndex)
+            if plan.synthesizesDecodeLadder, !anchoredOnLanding, displayIndex >= 0,
+               let offset = plan.pictureOffset(displayIndex) {
+                let (origin, overflow) = dts.subtractingReportingOverflow(offset)
+                if !overflow { sequenceEnvelopeOrigin = min(sequenceEnvelopeOrigin ?? origin, origin) }
+            }
             // On a lattice the picture is placed by its ordinal, which reproduces the muxer exactly
             // even where the fraction rounds the other way. Without one, or when the sequence could
             // not be read back onto the lattice, the rounded step still describes the stream to
@@ -687,9 +788,13 @@ enum H264CompositionOffsetRepair {
                     let (ordinal, overflow) = base.addingReportingOverflow(displayIndex)
                     return overflow ? nil : plan.presentationTimestamp(ordinal: ordinal)
                 }
+                ?? plan.pictureOffset(displayIndex).map { anchor &+ plan.shift &+ $0 }
                 ?? (anchor &+ plan.shift &+ displayIndex &* plan.step)
+            // A synthesized DTS sits `decodeLeadPictures` pictures behind its decode slot on the same
+            // lattice as the presentation times, so rounding cannot put it a tick past its own picture.
             let newDTS = plan.synthesizesDecodeLadder
-                ? anchor &+ plan.shift &+ slot &* plan.step &- plan.decodeLead
+                ? plan.pictureOffset(slot &- plan.decodeLeadPictures).map { anchor &+ plan.shift &+ $0 }
+                    ?? (anchor &+ plan.shift &+ slot &* plan.step &- plan.decodeLead)
                 : dts &+ plan.shift &- plan.decodeLead
             // The muxer invariant. A picture that lands before its own decode time means the
             // arithmetic no longer describes this stream, and passing it through unchanged is
@@ -706,26 +811,34 @@ enum H264CompositionOffsetRepair {
         /// keyframe too, and only ever later: on both reporting files the keyframes sat 0 to 4 pictures
         /// after the end of the sequence before them, which left a gap or put the next GOP in front of
         /// the last pictures of this one. A later keyframe therefore continues the sequence right after
-        /// its last picture. One that comes earlier than that is the better reading, because the chain
-        /// itself started on a pushed keyframe (a seek lands on whatever the writer left there) and
-        /// moves back each time a keyframe was pushed less. Within half a tick per picture of the
-        /// sequence the keyframe keeps its own time too: that is all a rounded step can be off by (23 fps
-        /// is 3913.04 ticks at 90 kHz), so the chain does not drift. One later than the reorder head
-        /// plus two and a half pictures is a real discontinuity: a third reporting file at 29 fps kept
-        /// its keyframes four pictures (plus up to 31 ticks) past the sequence before them for a
-        /// hundred seconds.
+        /// its last picture, measured on `pictureCadence`. One that comes earlier than that is the better
+        /// reading, because the chain itself started on a pushed keyframe (a seek lands on whatever the
+        /// writer left there) and moves back each time a keyframe was pushed less. Within half a tick per
+        /// picture of the sequence the keyframe keeps its own time too: the writer's clock does not run
+        /// at exactly the stated rate (the third reporting file states 29.0002 fps and writes 29.003),
+        /// and following an on-time keyframe is what keeps the chain on it; a chain that only counted
+        /// drifted 57 ms behind over 19 minutes and then overlapped where an earlier keyframe pulled it
+        /// back. One later than the reorder head plus two and a half pictures is a real
+        /// discontinuity: the same file kept its keyframes four pictures (plus up to 31 ticks) past the
+        /// sequence before them for a hundred seconds.
         private func continuedSequenceAnchor(keyframeDTS dts: Int64) -> Int64 {
             guard plan.synthesizesDecodeLadder, let previous = sequenceAnchorDTS,
                   let last = sequenceLastDisplayIndex, last >= 0 else { return dts }
             let (pictures, countOverflow) = last.addingReportingOverflow(1)
-            let (length, lengthOverflow) = pictures.multipliedReportingOverflow(by: plan.step)
+            guard !countOverflow, let length = plan.pictureOffset(pictures) else { return dts }
             let (expected, expectedOverflow) = previous.addingReportingOverflow(length)
             let (drift, driftOverflow) = dts.subtractingReportingOverflow(expected)
-            let (limit, limitOverflow) = plan.step.multipliedReportingOverflow(by: 2)
-            guard !countOverflow, !lengthOverflow, !expectedOverflow, !driftOverflow, !limitOverflow
-            else { return dts }
-            guard drift > pictures / 2 + 1, drift <= plan.decodeLead &+ limit &+ plan.step / 2 else { return dts }
-            return expected
+            guard !expectedOverflow, !driftOverflow else { return dts }
+            guard drift > pictures / 2 + 1, drift <= plan.keyframeAdvanceLimit else { return dts }
+            // Counting alone drifts with the writer's clock, so the continued sequence also leans
+            // toward where the pictures it follows say it ends, by at most an eighth of a picture per
+            // sequence: too little to see as a gap, enough to follow a clock 0.01% off the stated rate.
+            guard let origin = sequenceEnvelopeOrigin else { return expected }
+            let (envelope, envelopeOverflow) = origin.addingReportingOverflow(length)
+            guard !envelopeOverflow else { return expected }
+            let slew = plan.step / 8
+            let leaned = expected &+ min(max(envelope &- expected, -slew), slew)
+            return min(dts, max(dts &- plan.keyframeAdvanceLimit, leaned))
         }
     }
 }
@@ -739,6 +852,11 @@ final class H264PictureOrderReader {
     private var context: UnsafeMutablePointer<AVCodecContext>?
     private let codecID: AVCodecID
     var isFramePicture: Bool { parser?.pointee.picture_structure == AV_PICTURE_STRUCTURE_FRAME }
+    /// The picture rate the bitstream's VUI timing states, once the parser has read a parameter set.
+    var frameRate: AVRational? {
+        guard let rate = context?.pointee.framerate, rate.num > 0, rate.den > 0 else { return nil }
+        return rate
+    }
 
     init?(codecParameters: UnsafePointer<AVCodecParameters>, timeBase: AVRational) {
         codecID = codecParameters.pointee.codec_id
@@ -810,8 +928,7 @@ final class H264CompositionOffsetRepairSession {
     /// Ticks per picture at the stream's average frame rate, for a head whose decode ladder has no step
     /// of its own.
     private let nominalStep: Int64?
-    /// `nominalStep` snapped to the standard rate it estimates, for a head whose anchors give no step.
-    private let standardStep: Int64?
+    private let timeBase: AVRational
     private var reader: H264PictureOrderReader?
     private var rewriter: H264CompositionOffsetRepair.Rewriter?
     private let partialRepairCandidate: H264PartialCompositionRepairSession?
@@ -825,6 +942,9 @@ final class H264CompositionOffsetRepairSession {
     /// order while the packets behind it are held to count its leading pictures.
     private var relanding = false
     private var landingPictureOrder: Int64?
+    /// Index in `held` of the first picture displayed after the landing; the leading pictures are the
+    /// ones before it.
+    private var landingTrailingIndex: Int?
 
     /// nil unless this stream is the exact shape the defect needs: ISO-BMFF, H.264 or HEVC, and a
     /// bitstream that declares reordered pictures. Everything else never sees a parser or a held
@@ -850,9 +970,7 @@ final class H264CompositionOffsetRepairSession {
         self.ladderStart = ladderStart
         self.nominalStep = H264CompositionOffsetRepair.nominalFrameStep(
             frameRate: stream.pointee.avg_frame_rate, timeBase: stream.pointee.time_base)
-        self.standardStep = nominalStep.flatMap {
-            H264CompositionOffsetRepair.standardFrameStep(near: $0, timeBase: stream.pointee.time_base)
-        }
+        self.timeBase = stream.pointee.time_base
         self.reader = reader
         let (lead, overflow) = stream.pointee.start_time.subtractingReportingOverflow(ladderStart)
         // The partial-region repair reads H.264 NAL types to find its IDRs, so HEVC gets the
@@ -885,6 +1003,15 @@ final class H264CompositionOffsetRepairSession {
     var decodeTimestampOffset: Int64? {
         guard phase == .repairing, let rewriter else { return nil }
         return rewriter.plan.shift - rewriter.plan.decodeLead
+    }
+
+    /// How far before its index entry (read through `decodeTimestampOffset`) a repaired keyframe can
+    /// be placed. 0 when every keyframe stays on the index. Measured on the 23 fps reporting asset: a
+    /// cutter that wanted the keyframe at or past its entry missed 25 of 40 segments, which then
+    /// opened on audio mid-GOP.
+    var keyframeAdvanceTicks: Int64 {
+        guard phase == .repairing, let rewriter else { return 0 }
+        return rewriter.plan.keyframeAdvanceLimit
     }
 
     /// Returns true when the packet was taken over by the session and must not be emitted yet.
@@ -942,17 +1069,21 @@ final class H264CompositionOffsetRepairSession {
                     return false
                 }
                 landingPictureOrder = pictureOrderCount
-            } else if let landing = landingPictureOrder, let pictureOrderCount, pictureOrderCount > landing {
-                held.append((packet, pictureOrderCount))
-                finishLanding()
-                return true
+            } else if landingTrailingIndex == nil, let landing = landingPictureOrder, let pictureOrderCount,
+                      pictureOrderCount > landing {
+                landingTrailingIndex = held.count
             }
         } else if landingPictureOrder == nil {
             return false
         }
         held.append((packet, pictureOrderCount))
         heldBytes += Int(max(0, packet.pointee.size))
-        if heldBytes >= H264CompositionOffsetRepair.sampleByteBudget
+        // A synthesized ladder holds a few pictures more to read the landing's envelope off them.
+        let wantsEnvelope = rewriter?.plan.synthesizesDecodeLadder == true
+            && held.lazy.filter { $0.packet.pointee.stream_index == self.streamIndex }.count
+                < H264CompositionOffsetRepair.landingEnvelopePictures
+        if (landingTrailingIndex != nil && !wantsEnvelope)
+            || heldBytes >= H264CompositionOffsetRepair.sampleByteBudget
             || held.count >= H264CompositionOffsetRepair.heldPacketCeiling {
             finishLanding()
         }
@@ -963,17 +1094,41 @@ final class H264CompositionOffsetRepairSession {
         relanding = false
         guard var rewriter else { return }
         if let landing = landingPictureOrder {
-            let leading = held.filter {
+            let leading = held.prefix(landingTrailingIndex ?? held.count).filter {
                 $0.packet.pointee.stream_index == streamIndex
                     && ($0.pictureOrderCount.map { $0 < landing } ?? false)
             }.count
             rewriter.noteLanding(leadingPictures: Int64(leading))
+            rewriter.noteLandingEnvelope(anchor: landingEnvelope(plan: rewriter.plan))
         }
+        landingTrailingIndex = nil
         for entry in held where entry.packet.pointee.stream_index == streamIndex {
             applyRepair(to: entry.packet, pictureOrderCount: entry.pictureOrderCount, using: &rewriter)
         }
         self.rewriter = rewriter
         landingPictureOrder = nil
+    }
+
+    /// The earliest origin the held landing pictures imply: each was written no earlier than its own
+    /// time, so `DTS - pictureOffset(display index)` over the landing's sequence bounds where the
+    /// sequence really starts. Stops at the next IDR, whose picture order starts over.
+    private func landingEnvelope(plan: H264CompositionOffsetRepair.Plan) -> Int64? {
+        guard plan.synthesizesDecodeLadder, plan.pocStep > 0 else { return nil }
+        var earliest: Int64?
+        var first = true
+        for entry in held where entry.packet.pointee.stream_index == streamIndex {
+            let isKeyframe = (entry.packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+            guard let pictureOrderCount = entry.pictureOrderCount else { continue }
+            if !first, isKeyframe, pictureOrderCount == 0 { break }
+            first = false
+            let dts = entry.packet.pointee.dts
+            guard dts != Int64.min, pictureOrderCount % plan.pocStep == 0,
+                  let offset = plan.pictureOffset(pictureOrderCount / plan.pocStep) else { continue }
+            let (origin, overflow) = dts.subtractingReportingOverflow(offset)
+            guard !overflow else { continue }
+            earliest = min(earliest ?? origin, origin)
+        }
+        return earliest
     }
 
     /// The sample is past `sampleTarget` without a picture-order regression, every picture so far reports
@@ -1024,6 +1179,7 @@ final class H264CompositionOffsetRepairSession {
             reader?.reset()
             relanding = true
             landingPictureOrder = nil
+            landingTrailingIndex = nil
         case .off:
             break
         }
@@ -1068,13 +1224,17 @@ final class H264CompositionOffsetRepairSession {
     /// `nominalStep` is nil on the first pass, so the missing-head partial repair below keeps first
     /// claim on a non-uniform ladder; only when it declines does the nominal-rate rebuild get a turn.
     private func decide(using nominalStep: Int64?) {
+        let rate = nominalStep.flatMap {
+            H264CompositionOffsetRepair.rateCadence(bitstreamRate: reader?.frameRate, estimate: $0, timeBase: timeBase)
+        }
         let verdict = H264CompositionOffsetRepair.classify(
             samples: samples,
             videoDelay: videoDelay,
             streamStartTime: streamStartTime,
             ladderStart: ladderStart,
-            nominalStep: nominalStep,
-            standardStep: nominalStep == nil ? nil : standardStep
+            // The span check reads the rate too, and the stated one is the better reading of it.
+            nominalStep: rate?.timestamp(at: 1) ?? nominalStep,
+            rateCadence: rate
         )
         switch verdict {
         case .repair(let plan):

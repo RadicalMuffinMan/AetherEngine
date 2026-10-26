@@ -861,6 +861,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// which is what the cutter compared before the axis existed.
     var planBoundaryAxis: PlanBoundaryAxis = .decode
 
+    /// How far before its boundary the keyframe each `segmentPlan` entry names may arrive
+    /// (`VODSegmentCutter.reachTicks`). Empty unless a #409 repair moves keyframes off the index.
+    var planKeyframeReachTicks: [Int64] = []
+
     /// Guards subsystem refs + `sessionEpoch`. Never held across waits or network I/O so
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
     let restartLock = NSLock()
@@ -1559,6 +1563,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // stamping. Read from the demuxer that produced them, never from the URL or the
                 // host's metadata: on a remux session the delivered container is the one indexed.
                 planBoundaryAxis = PlanBoundaryAxis.forContainer(formatName: dem.containerFormatName)
+                planKeyframeReachTicks = Self.keyframeReachTicks(
+                    advance: dem.indexedKeyframeAdvanceTicks, keyframes: keyframes,
+                    boundaries: plan.map(\.startPts))
                 let firstKeyframePts = keyframes.sorted().first ?? 0
                 self.firstKeyframePts = firstKeyframePts
                 let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
@@ -3499,6 +3506,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             restartTargetVideoPts: videoTarget,
             boundaryClaimsRandomAccess: planBoundariesClaimRandomAccess,
             planBoundaryAxis: planBoundaryAxis,
+            keyframeReachTicks: Array(planKeyframeReachTicks.dropFirst(min(baseIndex, planKeyframeReachTicks.count))),
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
             subtitlePacketStreamIndices: allEmbeddedSubtitleStreamIndices,   // #112 rework

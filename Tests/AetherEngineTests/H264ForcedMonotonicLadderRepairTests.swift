@@ -92,6 +92,52 @@ struct H264ForcedMonotonicLadderRepairTests {
         #expect(pushed == healthy)
     }
 
+    @Test("a keyframe moved back onto its sequence stays within the reach its index entry is read with")
+    func movedKeyframeStaysWithinIndexReach() throws {
+        let data = try #require(Data(base64Encoded: Self.pushedKeyframeFixtureBase64, options: .ignoreUnknownCharacters))
+        let demuxer = Demuxer()
+        try demuxer.open(reader: DataIOReader(data: data), formatHint: "mp4")
+        defer { demuxer.close() }
+        let videoIndex = demuxer.videoStreamIndex
+        var keyframes: [Int64] = []
+        while let packet = try? demuxer.readPacket() {
+            if packet.pointee.stream_index == videoIndex, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 {
+                keyframes.append(packet.pointee.dts)
+            }
+            var owned: UnsafeMutablePointer<AVPacket>? = packet
+            trackedPacketFree(&owned)
+        }
+        let index = demuxer.indexedKeyframes(streamIndex: videoIndex).sorted()
+        let advance = demuxer.indexedKeyframeAdvanceTicks
+        // Reorder delay 2 plus two and a half pictures at 29.97 fps.
+        #expect(advance == 6006 + 2 * 3003 + 1501)
+        #expect(keyframes.count == index.count)
+        // The pushed keyframe is delivered before its entry, which is why a cutter needs the reach.
+        #expect(zip(keyframes, index).contains { $0 < $1 })
+        #expect(zip(keyframes, index).allSatisfy { $0 <= $1 && $0 >= $1 - advance })
+        let reach = HLSVideoEngine.keyframeReachTicks(advance: advance, keyframes: index, boundaries: index)
+        #expect(zip(zip(keyframes, index), reach).allSatisfy { pair, reach in pair.0 + reach >= pair.1 })
+    }
+
+    @Test("a continued sequence leans toward the earliest origin its pictures point to, an eighth of a picture at a time")
+    func continuedSequenceLeansTowardEnvelope() {
+        var plan = H264CompositionOffsetRepair.Plan(step: 3000, decodeLead: 6000, shift: 0, pocStep: 2)
+        plan.synthesizesDecodeLadder = true
+        plan.pictureCadence = H264CompositionOffsetRepair.Cadence(numerator: 3000, denominator: 1)
+        plan.decodeLeadPictures = 2
+        var rewriter = H264CompositionOffsetRepair.Rewriter(plan: plan)
+        // The writer pushed the first IDR 600 ticks late and left the rest of its sequence on time,
+        // so counting from the IDR runs 600 ticks behind where the sequence really is.
+        _ = rewriter.rewrite(dts: 600, pictureOrderCount: 0, isKeyframe: true)
+        for picture in 1..<10 {
+            _ = rewriter.rewrite(dts: Int64(picture) * 3000, pictureOrderCount: Int64(picture) * 2, isKeyframe: false)
+        }
+        // The next IDR is pushed three pictures: it continues the sequence at 30 600 by count, and
+        // leans 3000 / 8 ticks toward the 30 000 the on-time pictures point to.
+        let idr = rewriter.rewrite(dts: 39_000, pictureOrderCount: 0, isKeyframe: true)
+        #expect(idr.map(\.pts) == Int64(30_600 - 375))
+    }
+
     @Test("a head that opens on a run of P pictures is sampled until it reorders")
     func leadingPRunIsSampledUntilReordering() throws {
         let healthy = try Self.videoTimestamps(base64: Self.leadingPRunHealthyFixtureBase64)
@@ -159,7 +205,7 @@ struct H264ForcedMonotonicLadderRepairTests {
         #expect(withoutStandard == .inconclusive("anchors do not agree on a step"))
         guard case .repair(let plan) = H264CompositionOffsetRepair.classify(
             samples: samples, videoDelay: 2, streamStartTime: 0, ladderStart: -12012,
-            nominalStep: 3003, standardStep: 3003)
+            nominalStep: 3003, rateCadence: H264CompositionOffsetRepair.Cadence(numerator: 3003, denominator: 1))
         else {
             Issue.record("expected a repair")
             return
@@ -183,30 +229,55 @@ struct H264ForcedMonotonicLadderRepairTests {
         #expect(H264CompositionOffsetRepair.nominalLadderFits(samples: samples, step: 3103, videoDelay: 2))
         guard case .repair(let plan) = H264CompositionOffsetRepair.classify(
             samples: samples, videoDelay: 2, streamStartTime: 0, ladderStart: 0,
-            nominalStep: 3103, standardStep: 3103)
+            nominalStep: 3103, rateCadence: H264CompositionOffsetRepair.Cadence(numerator: 90000, denominator: 29))
         else {
             Issue.record("expected a repair")
             return
         }
         #expect(plan.step == 3103)
+        // The offsets come off the exact 29 fps length, so a sequence of 1000 pictures ends where
+        // 29 fps puts it rather than 450 ticks early on the rounded step.
+        #expect(plan.pictureOffset(1000) == 3_103_448)
     }
 
-    @Test("the standard step is the nearest standard rate within 1%")
-    func standardFrameStepSnapsToNearestRate() {
+    @Test("the standard cadence is the nearest standard rate within 1%, as an exact fraction")
+    func standardFrameCadenceSnapsToNearestRate() {
         let ninetyKilohertz = AVRational(num: 1, den: 90000)
+        func ticks(_ estimate: Int64, _ timeBase: AVRational = ninetyKilohertz) -> (Int64, Int64)? {
+            H264CompositionOffsetRepair.standardFrameCadence(near: estimate, timeBase: timeBase)
+                .map { ($0.numerator, $0.denominator) }
+        }
         // 29.97 and 30 are both within 1% of each other; the nearer one wins.
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 3003, timeBase: ninetyKilohertz) == 3003)
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 3001, timeBase: ninetyKilohertz) == 3000)
+        #expect(ticks(3003)! == (3003, 1))
+        #expect(ticks(3001)! == (3000, 1))
         // A 60-picture 29.97 clip reports 29.80.
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 3020, timeBase: ninetyKilohertz) == 3003)
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 3600, timeBase: ninetyKilohertz) == 3600)
-        // Whole rates count too, and a rate that is not a whole number of ticks is rounded: 23 fps is
-        // 3913.04 ticks (the second reporting file), 23.976 is 3753.75 rather than 24 fps's 3750.
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 3913, timeBase: ninetyKilohertz) == 3913)
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 3754, timeBase: ninetyKilohertz) == 3754)
+        #expect(ticks(3020)! == (3003, 1))
+        #expect(ticks(3600)! == (3600, 1))
+        // Whole rates count too, kept as the fraction they are: 23 fps is 3913.04 ticks (the second
+        // reporting file), 23.976 is 3753.75 rather than 24 fps's 3750.
+        #expect(ticks(3913)! == (90000, 23))
+        #expect(ticks(3754)! == (15015, 4))
         // Half a frame per second is further than 1% from every standard rate.
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 180_000, timeBase: ninetyKilohertz) == nil)
-        #expect(H264CompositionOffsetRepair.standardFrameStep(near: 1001, timeBase: AVRational(num: 1, den: 24000)) == 1001)
+        #expect(ticks(180_000) == nil)
+        #expect(ticks(1001, AVRational(num: 1, den: 24000))! == (1001, 1))
+    }
+
+    @Test("the bitstream's stated rate wins over an average that cannot tell 24 from 23.976")
+    func bitstreamRateNamesTheCadence() {
+        let ninetyKilohertz = AVRational(num: 1, den: 90000)
+        func cadence(_ rate: AVRational?, _ estimate: Int64) -> (Int64, Int64)? {
+            H264CompositionOffsetRepair.rateCadence(bitstreamRate: rate, estimate: estimate, timeBase: ninetyKilohertz)
+                .map { ($0.numerator, $0.denominator) }
+        }
+        // A 24 fps clip with a pushed tail averages 23.98: the average alone picks 23.976.
+        #expect(cadence(nil, 3753)! == (15015, 4))
+        #expect(cadence(AVRational(num: 24, den: 1), 3753)! == (3750, 1))
+        // 30000/1001 stays 29.97 and does not snap to 30, which is 0.1% away.
+        #expect(cadence(AVRational(num: 30000, den: 1001), 3003)! == (3003, 1))
+        // The third reporting file states 590325/20356 (29.0002 fps), which is 29 to within 0.01%.
+        #expect(cadence(AVRational(num: 590325, den: 20356), 3103)! == (90000, 29))
+        // A stated rate that disagrees with the stream by more than 1% is not believed.
+        #expect(cadence(AVRational(num: 60, den: 1), 3003)! == (3003, 1))
     }
 
     @Test("a variable-rate head is still left alone")
