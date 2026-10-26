@@ -289,7 +289,11 @@ public actor FrameExtractor {
 
     private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
-        guard !isShutDown, seconds.isFinite, seconds >= 0 else { return nil }
+        guard !isShutDown, !Task.isCancelled, seconds.isFinite, seconds >= 0 else { return nil }
+        // A valid request owns the scrub intent even when its image is already cached or it
+        // yields to playback. Retire the preceding decode before either early return.
+        currentToken?.cancel()
+        boundedCancellation?.cancel()
         if let hit = cache.get(mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize) {
             scheduleIdleClose()
             return hit
@@ -301,42 +305,47 @@ public actor FrameExtractor {
                            category: .swPlayback, level: .verbose)
             return nil
         }
-        currentToken?.cancel()
-        boundedCancellation?.cancel()
         let token = CancelToken()
         currentToken = token
 
         let context = self.context
-        let result = await runOnQueue { () -> FrameResult in
-            if token.isCancelled { return FrameResult(image: nil) }
-            let start = DispatchTime.now()
-            let wasOpen = context.isOpen
-            let bytesBefore = context.bytesFetched
-            do {
-                try context.ensureOpen()
-            } catch {
-                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
-                return FrameResult(image: nil)
+        let result = await withTaskCancellationHandler {
+            await runOnQueue { () -> FrameResult in
+                if token.isCancelled { return FrameResult(image: nil) }
+                let start = DispatchTime.now()
+                let wasOpen = context.isOpen
+                let bytesBefore = context.bytesFetched
+                do {
+                    try context.ensureOpen()
+                } catch {
+                    EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                    return FrameResult(image: nil)
+                }
+                let image = context.decodeFrame(
+                    at: seconds, mode: mode,
+                    targetWidth: targetWidth, maxSize: maxSize,
+                    isCancelled: { token.isCancelled }
+                )
+                // Per-miss cost line: correlates extraction bursts with playback stutter
+                // (#93 post-recovery lag diagnosis). bytes = link bandwidth this miss consumed.
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+                let bytes = context.bytesFetched - bytesBefore
+                EngineLog.emit(
+                    "[FrameExtractor] miss mode=\(mode) t=\(String(format: "%.2f", seconds))s "
+                    + "took=\(String(format: "%.0f", ms))ms bytes=\(bytes) "
+                    + "reopened=\(wasOpen ? "n" : "y") image=\(image == nil ? "nil" : "ok") "
+                    + "cancelled=\(token.isCancelled ? "y" : "n")",
+                    category: .swPlayback, level: .verbose
+                )
+                return FrameResult(image: image)
             }
-            let image = context.decodeFrame(
-                at: seconds, mode: mode,
-                targetWidth: targetWidth, maxSize: maxSize,
-                isCancelled: { token.isCancelled }
-            )
-            // Per-miss cost line: correlates extraction bursts with playback stutter
-            // (#93 post-recovery lag diagnosis). bytes = link bandwidth this miss consumed.
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
-            let bytes = context.bytesFetched - bytesBefore
-            EngineLog.emit(
-                "[FrameExtractor] miss mode=\(mode) t=\(String(format: "%.2f", seconds))s "
-                + "took=\(String(format: "%.0f", ms))ms bytes=\(bytes) "
-                + "reopened=\(wasOpen ? "n" : "y") image=\(image == nil ? "nil" : "ok") "
-                + "cancelled=\(token.isCancelled ? "y" : "n")",
-                category: .swPlayback, level: .verbose
-            )
-            return FrameResult(image: image)
+        } onCancel: {
+            token.cancel()
         }
-        if let image = result.image, !token.isCancelled {
+        // Cancellation can win after the decode's last check, or while its result waits to
+        // reenter this actor. Never publish/cache that result or reset a newer request's idle timer.
+        guard !isShutDown, !Task.isCancelled, !token.isCancelled else { return nil }
+        if let image = result.image {
             cache.set(image, mode: mode, seconds: seconds, targetWidth: targetWidth, maxSize: maxSize)
         }
         scheduleIdleClose()

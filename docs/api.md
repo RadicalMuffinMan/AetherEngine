@@ -1210,6 +1210,13 @@ say so on the tracker rather than working around it.
 
 ## Stills and thumbnails
 
+`FrameExtractor.thumbnail`, `preview` and `snapshot` share one current request per extractor.
+A valid request supersedes an older decode even when the newer result is cached or yields to
+playback. Cancelling its awaiting Task cancels that request, and a cancelled or superseded request
+returns nil instead of publishing a late image. An invalid or already-cancelled request does not
+replace another caller's work. Cancellation is cooperative between decode steps; an in-flight
+source read still uses its normal timeout. Use `boundedSnapshot` for an explicit total deadline.
+
 | Symbol | Notes |
 | --- | --- |
 | `scrubThumbnail(atSeconds:maxWidth:)` | Cache-backed still for the active session, live or VOD. Decodes bytes the session already holds, so it opens no second connection and works on single-connection sources (debrid / torrent links, IPTV accounts capped at one request) where a second demuxer is refused. A native session decodes from its segment cache, a software session from its packet cache (VOD, AE#605) or its DVR packet ring (live, #544). A VOD target outside what is retained returns nil rather than the nearest retained frame. |

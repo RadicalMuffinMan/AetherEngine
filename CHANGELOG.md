@@ -159,6 +159,12 @@ the public-API contract.
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
+- **A superseded still decode no longer publishes after a newer cache hit.** Thumbnail, preview
+  and snapshot requests retire older work before returning a cached image or yielding to playback.
+  Cancelling the awaiting Task also cancels its decode; late results return nil and cannot populate
+  the cache or reset a newer request's idle timer. Invalid or already-cancelled requests leave an
+  active caller's work alone.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
