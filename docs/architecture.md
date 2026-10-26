@@ -508,9 +508,9 @@ Sources/AetherEngine/
 │   ├── AetherEngine+FrameExtractor.swift    makeFrameExtractor() convenience for the currently loaded URL
 │   ├── DolbyVisionStillConverter.swift      `DolbyVisionStillReshaping` trait. Applies the RPU-carried DV colour transform to a DV P5 / P10.0 base-layer frame (IPT-PQ-C2, not YCbCr) so scrub stills lose the green + magenta cast (#103)
 │   ├── FrameExtractor.swift                 Off-playback still extraction actor: serial decode queue, cancel-supersede, idle-close
-│   ├── FrameDecodeContext.swift             Isolated FFmpeg demux + decode + sws_scale → CGImage (thumbnail / snapshot)
+│   ├── FrameDecodeContext.swift             Isolated FFmpeg demux + decode + sws_scale → CGImage (thumbnail / preview / snapshot)
 │   ├── FrameCache.swift                     Bounded LRU: mode-isolated stores, second-bucketed thumbnails
-│   ├── FrameTypes.swift                     FrameMode (.thumbnail / .snapshot)
+│   ├── FrameTypes.swift                     FrameMode (.thumbnail / .preview / .snapshot)
 │   └── HDRToneMapper.swift                  zscale + tonemap libavfilter graph: HDR (PQ / HLG, BT.2020) stills → SDR BT.709
 ├── IO/
 │   ├── IOReader.swift                       Public custom byte-source protocol + MediaSource (load(source:) input)

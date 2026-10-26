@@ -21,6 +21,11 @@ the public-API contract.
   tvOS 27) into an LG CX and on macOS 27 (M5 Pro). See `docs/formats.md`. Every RPU passes `DoviRpuGuard` (CRC and the
   known panic paths) before libdovi, built panic=abort, parses it, as every HEVC RPU already does.
 
+- **Frame-accurate downscaled stills through `FrameExtractor.preview(at:maxWidth:)` (AE#871, thanks @jonluca).**
+  Previews decode forward to the requested frame while retaining full reconstruction and high-quality
+  scaling. They yield to starved playback and keep a small, separate cache. The CLI exposes the same
+  behavior with `aetherctl extract --preview --width <px>`.
+
 - **Remote MPEG-DASH on-demand manifests play (AE#859, thanks @qoli).**
   A static, single-Period MPD whose representations are single files addressed by `SegmentBase`
   failed at open with `Invalid data found when processing input`: the FFmpeg build has no DASH
