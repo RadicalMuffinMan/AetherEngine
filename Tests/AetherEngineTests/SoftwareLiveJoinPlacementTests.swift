@@ -130,4 +130,23 @@ struct SoftwareLiveJoinPlacementTests {
         }
         #expect(decision == .fromStart)
     }
+
+    /// A segmented source resumes on its own up to its cushion plus one unit behind the newest media,
+    /// which can pass the join's threshold: 2 x 6 s segments plus a little land 12+ s behind against a
+    /// threshold of 12. That is still the edge, so the feeder's catch-up waits for more.
+    @Test("an ordinary resume on a segmented source is never caught up",
+          arguments: [2.0, 4.0, 6.0, 10.0, 44.0])
+    func ordinaryResumeIsNotCaughtUp(unit: Double) throws {
+        for cushion in [nil, 3.0, 20.0] {
+            let h = SoftwareLiveHoldback(deliveryUnitSeconds: unit, edgeCushionSeconds: cushion)
+            let deepestResume = try #require(h.resumeCushionSeconds) + unit
+            #expect(deepestResume < h.resumeCatchUpSpanSeconds)
+        }
+    }
+
+    @Test("a continuous source catches up on the join's own threshold")
+    func continuousCatchUpIsTheJoinThreshold() {
+        #expect(SoftwareLiveHoldback.continuous.resumeCatchUpSpanSeconds
+                == SoftwareLiveJoinPolicy.leadSeconds + SoftwareLiveJoinPolicy.minimumSkipSeconds)
+    }
 }

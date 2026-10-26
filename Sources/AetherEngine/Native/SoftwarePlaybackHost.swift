@@ -2402,9 +2402,11 @@ final class SoftwarePlaybackHost {
         // own live seek carries it through the tickets, the subtitle anchor and the clock like any
         // other. The feeder states the target on the source axis; the mapping is `sourceSeconds
         // (forSession:)` inverted, under the same lock.
-        let noteLiveResumeCatchUp: @Sendable (Double) -> Void = { [weak self] targetPts in
+        // Carries the seek generation it was decided under: a seek that lands in between is the
+        // viewer's choice of position, and a catch-up decided before it must not undo it.
+        let noteLiveResumeCatchUp: @Sendable (Double, UInt64) -> Void = { [weak self] targetPts, generation in
             Task { @MainActor [weak self] in
-                guard let self, !self.stopRequested,
+                guard let self, !self.stopRequested, self.seekGeneration == generation,
                       let target = self.liveSessionSeconds(forSource: targetPts) else { return }
                 self.liveResumeCatchUp.send(target)
             }
@@ -2891,7 +2893,7 @@ final class SoftwarePlaybackHost {
         audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?),
         noteDecodeGeneration: @Sendable () -> Void,
         noteRebuffering: @Sendable (Bool) -> Void = { _ in },
-        noteLiveResumeCatchUp: @Sendable (Double) -> Void = { _ in }
+        noteLiveResumeCatchUp: @Sendable (Double, UInt64) -> Void = { _, _ in }
     ) {
         // The join's start is placed once, before the first packet is fed; a seek before then is
         // the viewer's own choice of position and retires it.
@@ -3031,6 +3033,9 @@ final class SoftwarePlaybackHost {
                             resumePlacement = nil
                         case .place(let targetPts)?:
                             resumePlacement = nil
+                            // A segmented source resumes up to its cushion plus one unit behind on its
+                            // own, which passes the join's threshold and is still the edge.
+                            guard newest - clock >= holdback.resumeCatchUpSpanSeconds else { break }
                             EngineLog.emit(
                                 "[SWHost] live resume re-placed \(String(format: "%.1f", holdback.joinLeadSeconds))s "
                                 + "behind the newest media: the source handed over "
@@ -3038,7 +3043,7 @@ final class SoftwarePlaybackHost {
                                 + "(target pts=\(String(format: "%.2f", targetPts)))",
                                 category: .swPlayback
                             )
-                            noteLiveResumeCatchUp(targetPts)
+                            noteLiveResumeCatchUp(targetPts, feederGeneration)
                         }
                     }
                     // Decode-lag visibility for device logs: only after lead was once
