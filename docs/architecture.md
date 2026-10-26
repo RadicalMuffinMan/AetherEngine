@@ -99,7 +99,9 @@ video decoder passes the callback's `imageBufferModifiable` flag into
 buffer untouched, a modifiable buffer is updated in place, and other updates use an owned pixel
 buffer from a format-keyed pool. A failed copy preserves the original output rather than mutating
 storage the decoder still owns. The same policy removes a stale pixel-aspect attachment when the
-current stream uses square pixels.
+current stream uses square pixels. The AV1 Dolby Vision RPU path reuses that owned output or makes
+its own copy before changing buffer and IOSurface metadata. If copying fails, it delivers the
+original without setting or clearing RPU keys, including when RPU attachment is disabled.
 
 
 ```

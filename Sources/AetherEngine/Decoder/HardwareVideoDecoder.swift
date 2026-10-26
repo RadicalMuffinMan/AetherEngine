@@ -881,10 +881,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // layer's dynamic range, while the same RPU on a copy in a pool of our own was visibly applied
             // and responded to both (DVLab ab-test2, rounds 1 and 2). So the frame goes out as that copy,
             // unless the normalizer already handed back one of its own.
-            if outputBuffer === imageBuffer, let copy = rpuFrameCopier.copy(imageBuffer) {
-                outputBuffer = copy
-            }
-            AV1DolbyVisionRPUTable.attach(AV1DolbyVisionRPU.attachEnabled ? rpu : nil, to: outputBuffer)
+            outputBuffer = AV1DolbyVisionRPUTable.attachingToOwnedOutput(
+                AV1DolbyVisionRPU.attachEnabled ? rpu : nil,
+                normalized: outputBuffer, original: imageBuffer, copyOriginal: rpuFrameCopier.copy)
         }
 
         reportDecodedFormat(outputBuffer)

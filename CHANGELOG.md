@@ -198,6 +198,8 @@ the public-API contract.
 - **VideoToolbox output metadata respects immutable reference buffers.** Colour and pixel-aspect
   attachments are updated in place only when the decode callback marks the buffer modifiable.
   Otherwise a pooled owned copy receives the attachments; matching output is passed through.
+  AV1 Dolby Vision RPU updates also require an owned output: if copying fails, the original frame
+  is delivered without setting or clearing metadata on the decoder's reference buffer.
 
 - **Software playback teardown no longer blocks the main actor on renderer removal (AE#873, thanks @jonluca).**
   The video renderer leaves the synchronizer immediately, also when its clock is stopped, and the
