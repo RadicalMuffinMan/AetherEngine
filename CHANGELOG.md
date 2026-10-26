@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.48.0] - 2026-10-26
+
 ### Added
 
 - **VP9 can use VideoToolbox hardware decoding on the software playback host (AE#878, thanks @jonluca).** WebM streams
