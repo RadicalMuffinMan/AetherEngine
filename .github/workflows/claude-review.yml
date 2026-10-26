@@ -14,6 +14,9 @@ name: Claude review
 # - reads of credential locations are denied (`/proc` would hand over the process environment and
 #   with it the OAuth token; the runner's temp directory and home dotfiles hold tokens and action
 #   state). `~/.claude/projects` stays readable: Claude Code parks long tool output there.
+#   Shell commands run in Claude Code's sandbox, with no unsandboxed retry and no run at all if
+#   the sandbox is unavailable; the denials bind them too, the network reaches only
+#   api.github.com (for gh), and `~/.gitconfig` stays readable or git and gh refuse to start.
 # Building and testing the PR stays the CI workflow's job.
 
 on:
@@ -97,13 +100,20 @@ jobs:
                   "Read(//home/runner/.claude.json)",
                   "Read(//home/runner/.claude/.credentials.json)",
                   "Read(//home/runner/.config/**)",
-                  "Read(//home/runner/.gitconfig)",
                   "Read(//home/runner/.ssh/**)",
                   "Read(//home/runner/.docker/**)",
                   "Read(//home/runner/.npmrc)",
                   "Read(//home/runner/work/_temp/**)",
                   "Read(//home/runner/work/_actions/**)"
                 ]
+              },
+              "sandbox": {
+                "enabled": true,
+                "failIfUnavailable": true,
+                "allowUnsandboxedCommands": false,
+                "network": {
+                  "allowedDomains": ["api.github.com"]
+                }
               }
             }
 
