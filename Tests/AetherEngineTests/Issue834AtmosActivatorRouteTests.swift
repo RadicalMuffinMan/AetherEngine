@@ -24,6 +24,17 @@ struct Issue834AtmosActivatorRouteTests {
         #expect(!AtmosOutputActivator.routeTakesActivator(outputPortTypes: []))
     }
 
+    @Test("the software host's transport as the activator reads it")
+    func softwareTransportTruthTable() {
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.playing) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.seeking) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.loading) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.paused) == false)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.idle) == nil)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.ended) == nil)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.error("failed")) == nil)
+    }
+
     // The session's own value, pinned where there is no session: the test below only builds for iOS
     // and tvOS, so a macOS run passed with the constant spelled "HDMI" while every HDMI route on an
     // Apple TV reported "HDMIOutput" and none took the activator.
