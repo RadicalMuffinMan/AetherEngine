@@ -12,6 +12,8 @@ the public-API contract.
 
 ### Added
 
+- `rendererAudioSessionActivationEnabled` lets hosts own renderer audio-session activation across multiple players. Concurrent loads now share off-main category setup, which revalidates current session settings on later loads.
+
 - **AV1 Dolby Vision Profile 10.1 plays as Dolby Vision on the software host.**
   AVFoundation and VideoToolbox ignore the RPU an AV1 stream carries in its ITU-T T.35 metadata OBU, so every
   Apple route showed a 10.1 source's HDR10 base layer, and an Apple TV, where AV1 always plays through dav1d,

@@ -34,6 +34,7 @@ final class SharedOutputCoordinator {
     /// again as `.primary` drops its own reset instead of having it wipe the criteria it has just written.
     private var deferredCriteriaResets: [ObjectIdentifier: @MainActor () -> Void] = [:]
     private var lastTransition: Task<Void, Never>?
+    private var categoryConfiguration: Task<Void, Never>?
 
     init() {}
 
@@ -105,6 +106,20 @@ final class SharedOutputCoordinator {
         }
         lastTransition = transition
         return transition
+    }
+
+    /// Category setup belongs to the process-wide session. Concurrent loads share the in-flight
+    /// operation; later loads validate again so failures and host mutations are not cached forever.
+    /// The operation shares the activation/release queue, preserving their order.
+    func configureAudioSessionCategory(_ body: @escaping @Sendable () async -> Void) async {
+        if let categoryConfiguration {
+            await categoryConfiguration.value
+            return
+        }
+        let configuration = enqueueTransition(body)
+        categoryConfiguration = configuration
+        await configuration.value
+        categoryConfiguration = nil
     }
 
     /// Log label for an engine: its host-given tag, or the identifier's hash when there is none.
