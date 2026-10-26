@@ -86,6 +86,18 @@ say so and leave the call to the maintainer.
 - Every Dolby Vision RPU passes `DoviRpuGuard` before libdovi parses it.
 - On the simulator there are no hardware video decoders.
 
+## Re-reviews
+
+The workflow runs again after every push. The prompt's `EVENT` is `synchronize` then. Before
+writing anything, read your own earlier automated summaries in `gh pr view --comments`:
+
+- Review the whole PR as it stands now, but report only what is NEW since your last summary or
+  still unresolved from it. Do not repeat inline comments that are still on the same lines.
+- If an earlier finding was fixed, say so in one line. If the push changed nothing your review
+  is about (a rebase, a CHANGELOG tweak, a typo), post a single short line saying the new head
+  was checked and nothing changed, and no inline comments.
+- If the maintainer or the author answered a finding and the answer holds, drop it.
+
 ## Output
 
 1. **Inline comments** (`mcp__github_inline_comment__create_inline_comment`) for findings tied to a
@@ -94,7 +106,7 @@ say so and leave the call to the maintainer.
 2. **One summary comment** (`gh pr comment`), in this shape:
 
    ```
-   ## Automated review
+   ## Automated review (<short head SHA>)
 
    <One or two sentences: what the PR does and whether the direction is right.>
 
@@ -109,7 +121,7 @@ say so and leave the call to the maintainer.
 
    <one-line thanks>
 
-   <sub>Automated review by Claude, triggered by the maintainer. It reads code, it does not run it.</sub>
+   <sub>Automated review by Claude on every push. It reads code, it does not run it; a maintainer reviews and merges.</sub>
    ```
 
    With no findings, say so in one line; do not invent any.
