@@ -150,7 +150,8 @@ the public-API contract.
 - **Explicit software-host pause wins over late decoder, rebuffer and preroll clock starts.** The output
   latches transport authority under the same lock as every clock write, including before the first frame
   arms the clock. A paused seek still updates its anchor at zero rate, and explicit play restores normal
-  preroll. Stopping an already-paused output retires and flushes it without resetting its clock.
+  preroll. A play that arrives before the feeder publishes its armed latch preserves the pending initial
+  clock start. Stopping an already-paused output retires and flushes it without resetting its clock.
 
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the

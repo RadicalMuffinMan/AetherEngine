@@ -291,6 +291,27 @@ struct Sodalite104PausedFirstFrameTests {
     }
 
     @MainActor
+    @Test("play before the armed latch preserves the feeder's pending rate correction",
+          .timeLimit(.minutes(1)))
+    func playBetweenRevisionReadAndArmedLatch() {
+        let host = SoftwarePlaybackHost()
+        let output = AudioOutput()
+        host.installClockOutputForTesting(output)
+        defer { host.stop() }
+        host.pause()
+        output.seekClock(to: .zero, rate: 1)
+        // The feeder reads this revision before publishing clockArmed. A concurrent play sees
+        // the clock as unarmed, so it must leave this pending correction responsible for starting it.
+        let armRevision = output.clockCommandRevision
+        host.play()
+        #expect(host.isPlaying)
+        #expect(output.rate == 0, "play must not start an unanchored clock")
+        host.installClockOutputForTesting(output, armed: true)
+        output.setRate(1, ifRevision: armRevision)
+        #expect(output.rate == 1, "enabling transport cannot invalidate the only pending clock start")
+    }
+
+    @MainActor
     private func drainClockArmCallbacks() async throws {
         // The marker follows every correction queued by this test on the same serial queue.
         // waitFor keeps the wait cancellable and leaves the main actor free to execute them.

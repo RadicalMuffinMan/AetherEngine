@@ -213,14 +213,20 @@ final class AudioOutput: @unchecked Sendable {
     /// still seek at rate zero; only an explicit play enables positive rates again.
     func setPlaybackEnabled(_ enabled: Bool) {
         lock.lock()
-        defer { lock.unlock() }
         playbackEnabled = enabled
+        // Enabling owns no clock write. A feeder may already hold the revision for an arm
+        // whose latch play() has not seen yet; that correction still owes the initial start.
+        guard !enabled else { lock.unlock(); return }
         _clockCommandRevision &+= 1
-        guard !enabled else { return }
         endPreroll()
+        let at = synchronizer.currentTime()
+        let sourceSeconds = timeline.sourceSeconds(forRenderer: at.seconds)
         if synchronizer.rate != 0 {
-            synchronizer.setRate(0, time: synchronizer.currentTime())
+            synchronizer.setRate(0, time: at)
         }
+        lock.unlock()
+        EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", sourceSeconds)) (host transport disabled)",
+                       category: .swPlayback)
     }
 
     /// Set playback speed (0.5-2.0). Hosts retain their preferred speed; explicit pause wins.
