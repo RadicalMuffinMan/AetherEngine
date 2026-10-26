@@ -100,24 +100,28 @@ timestamps pass the slot policy. It assigns existing slots plus that lead rather
 frame rate; DTS, audio and the keyframe index remain unchanged. An ambiguous head stays untouched.
 
 Some writers go one step further: after dropping `ctts` they force the decode-order presentation
-times to be monotonic, so each anchor keeps its own presentation time and each B picture decoded
-after it is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before
+times to be monotonic, so each B picture (and on some files each anchor too) decoded after another
+picture is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before
 it. There is then no ladder to read a step from: the reporting file (H.264 High, 720p, GOP 90)
 stepped 3003 on 87% of its samples and 1001, 2252, 9009 or 12012 on the rest, so the probe skipped it
 as non-uniform and QuickTime, the Files app and both engine routes showed the B pictures out of
 order. When nothing above takes such a head, it is repaired with the step taken from the stream's
 average frame rate, provided the sampled span is the time its pictures take at that rate within the
 reorder delay plus two pictures, and every other check above still passes. The step is then
-remeasured on the anchors, which the writer left on the presentation axis (the average rate is only
-an estimate: a 60-picture 29.97 fps clip reports 29.80); a head whose anchors do not agree to
-within a tick per picture is left untouched. DTS is rebuilt from each picture's decode slot rather than shifted, since a
+remeasured on the anchors when the writer left them on the presentation axis (the average rate is
+only an estimate: a 60-picture 29.97 fps clip reports 29.80). The reporting file pushed its P pictures
+as well (each anchor 1001 ticks past the picture before it), so no two anchors agree; the step is
+then the standard frame rate (23.976, 24, 25, 29.97, 30, 48, 50, 59.94 or 60) nearest the average
+rate, if that is within 1% and a whole number of ticks. A head with neither is left untouched. DTS is rebuilt from each picture's decode slot rather than shifted, since a
 pushed B picture's DTS can sit after its own presentation time. After a seek onto an open-GOP
 keyframe, which kept its own presentation time, the sequence origin is taken from its display rank
 rather than its decode slot. The shift is what puts the first
 keyframe on the stream's start time, clamped to **16 pictures** because this writer left the keyframe
 four pictures ahead. Measured on a generated twin (`Scripts/make-clamped-ladder-fixture.sh`, 900
 pictures at 29.97 fps), the AVPlayer route stepped backwards 169 times before and 0 after, and the
-software route 44 times before and 0 after.
+software route 44 times before and 0 after. Its `pushed-anchors.mp4`, which pushes the anchors as
+well, was left untouched before ("anchors do not agree on a step", 44 backward steps on the software
+route) and is repaired with 0 after.
 
 ### Matroska with presentation slots in coding order
 

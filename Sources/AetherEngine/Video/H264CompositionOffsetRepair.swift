@@ -212,7 +212,8 @@ enum H264CompositionOffsetRepair {
         videoDelay: Int,
         streamStartTime: Int64,
         ladderStart: Int64,
-        nominalStep: Int64? = nil
+        nominalStep: Int64? = nil,
+        standardStep: Int64? = nil
     ) -> Verdict {
         guard videoDelay > 0, videoDelay <= 16 else {
             return .inconclusive("reorder delay \(videoDelay) outside 1...16")
@@ -318,13 +319,18 @@ enum H264CompositionOffsetRepair {
         }
 
         // The average frame rate is only an estimate (short files, rounded durations: a 60-picture
-        // 29.97 clip reports 29.80). The writer's anchors carry their own presentation times untouched,
-        // so when they agree they give the exact step, and when they do not the head is not this shape.
+        // 29.97 clip reports 29.80). When the writer left its anchors on the presentation axis they give
+        // the exact step. The reporting file pushed its anchors as well (a P picture 1001 ticks after the
+        // P before it), so they agree on nothing; the step is then the standard rate the estimate is
+        // within 1% of, and a head with neither is left alone.
         if synthesizesDecodeLadder {
-            guard let measured = anchorStep(samples: samples, pocStep: pocStep) else {
+            if let measured = anchorStep(samples: samples, pocStep: pocStep) {
+                step = measured
+            } else if let standardStep {
+                step = standardStep
+            } else {
                 return .inconclusive("anchors do not agree on a step")
             }
-            step = measured
         }
 
         // The reorder head is one decode lead long, and with a fractional cadence that lead is a
@@ -400,6 +406,28 @@ enum H264CompositionOffsetRepair {
         let ticks = (Double(timeBase.den) * Double(frameRate.den)) / (Double(timeBase.num) * Double(frameRate.num))
         guard ticks.isFinite, ticks >= 2, ticks < Double(Int64.max / 4) else { return nil }
         return Int64(ticks.rounded())
+    }
+
+    /// Frame rates a camera, encoder or broadcast chain actually produces.
+    static let standardFrameRates: [(num: Int64, den: Int64)] = [
+        (24000, 1001), (24, 1), (25, 1), (30000, 1001), (30, 1), (48, 1), (50, 1), (60000, 1001), (60, 1),
+    ]
+
+    /// The whole-tick picture length of the standard frame rate closest to `estimate`, within 1%. 29.97
+    /// and 30 are both that close to either, so the nearer one wins and a tie names neither. nil when no
+    /// standard rate is that close, or when the nearest one is not a whole number of ticks in
+    /// `timeBase` (23.976 at 90 kHz): a neighbouring rate that happens to be whole would drift.
+    static func standardFrameStep(near estimate: Int64, timeBase: AVRational) -> Int64? {
+        guard estimate >= 2, timeBase.num > 0, timeBase.den > 0 else { return nil }
+        let ranked = standardFrameRates.map { rate -> (num: Int64, den: Int64, distance: Double) in
+            let numerator = Int64(timeBase.den) * rate.den
+            let denominator = Int64(timeBase.num) * rate.num
+            return (numerator, denominator, abs(Double(numerator) / Double(denominator) - Double(estimate)))
+        }.sorted { $0.distance < $1.distance }
+        guard let nearest = ranked.first, nearest.distance * 100 <= Double(estimate) else { return nil }
+        if ranked.count > 1, ranked[1].distance == nearest.distance { return nil }
+        guard nearest.num % nearest.den == 0 else { return nil }
+        return nearest.num / nearest.den
     }
 
     /// Whether a non-uniform sampled ladder still spans the time its pictures would take at `step`. The
@@ -743,6 +771,8 @@ final class H264CompositionOffsetRepairSession {
     /// Ticks per picture at the stream's average frame rate, for a head whose decode ladder has no step
     /// of its own.
     private let nominalStep: Int64?
+    /// `nominalStep` snapped to the standard rate it estimates, for a head whose anchors give no step.
+    private let standardStep: Int64?
     private var reader: H264PictureOrderReader?
     private var rewriter: H264CompositionOffsetRepair.Rewriter?
     private let partialRepairCandidate: H264PartialCompositionRepairSession?
@@ -781,6 +811,9 @@ final class H264CompositionOffsetRepairSession {
         self.ladderStart = ladderStart
         self.nominalStep = H264CompositionOffsetRepair.nominalFrameStep(
             frameRate: stream.pointee.avg_frame_rate, timeBase: stream.pointee.time_base)
+        self.standardStep = nominalStep.flatMap {
+            H264CompositionOffsetRepair.standardFrameStep(near: $0, timeBase: stream.pointee.time_base)
+        }
         self.reader = reader
         let (lead, overflow) = stream.pointee.start_time.subtractingReportingOverflow(ladderStart)
         // The partial-region repair reads H.264 NAL types to find its IDRs, so HEVC gets the
@@ -986,7 +1019,8 @@ final class H264CompositionOffsetRepairSession {
             videoDelay: videoDelay,
             streamStartTime: streamStartTime,
             ladderStart: ladderStart,
-            nominalStep: nominalStep
+            nominalStep: nominalStep,
+            standardStep: nominalStep == nil ? nil : standardStep
         )
         switch verdict {
         case .repair(let plan):

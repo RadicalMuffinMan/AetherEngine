@@ -6,8 +6,14 @@
 # QuickTime and the Files app (AVFoundation) show such a file with its pictures stepping back and
 # forth; FFmpeg-based players reorder by picture order count and look right.
 #
+# Some writers push the anchors as well (the reporting file has P pictures 1001 ticks past the picture
+# before them), so the anchors no longer measure a step either. pushed-anchors.mp4 reproduces that by
+# adding 1001 ticks to every other picture before the clamp, away from the end of each GOP so the
+# keyframes keep their own time.
+#
 #   bframes-healthy.mp4  H.264 High 1280x720 29.97 fps, B pyramid, GOP 90, 30 s + AAC (the twin)
 #   clamped-ladder.mp4   the same stream, ctts dropped, ladder clamped as above
+#   pushed-anchors.mp4   the same stream, ctts dropped, anchors pushed too
 #
 # testsrc2 draws a frame counter and a moving bar, so the order is visible by eye.
 #
@@ -15,7 +21,7 @@
 #   ./Scripts/make-clamped-ladder-fixture.sh [output-dir] [--check]
 #
 # --check builds aetherctl and prints the #409 verdict (pktdump) and the decoded order (swdecode)
-# for the clamped file. Requires ffmpeg with libx264 (macOS: `brew install ffmpeg`).
+# for both clamped files. Requires ffmpeg with libx264 (macOS: `brew install ffmpeg`).
 
 set -euo pipefail
 
@@ -44,16 +50,29 @@ FF=(ffmpeg -hide_banner -loglevel error -y)
   -bsf:v 'setts=ts=max(PTS\,PREV_OUTDTS+1001)' -video_track_timescale 90000 -movflags +faststart \
   "$OUT/clamped-ladder.mp4"
 
+# N counts packets in decode order, so mod(N, 2) pushes P and B pictures alike. The last ten pictures
+# of each GOP are left alone so the push does not run on into the next keyframe.
+"${FF[@]}" -i "$OUT/bframes-healthy.mp4" -map 0 -c copy \
+  -bsf:v 'setts=ts=max(PTS+1001*mod(N\,2)*lt(mod(N\,90)\,80)\,PREV_OUTDTS+1001)' \
+  -video_track_timescale 90000 -movflags +faststart \
+  "$OUT/pushed-anchors.mp4"
+
+FIXTURES=(clamped-ladder.mp4 pushed-anchors.mp4)
 echo "wrote $OUT/bframes-healthy.mp4"
-echo "wrote $OUT/clamped-ladder.mp4"
-ffprobe -v error -select_streams v:0 -show_entries packet=pts,dts -of csv=p=0 "$OUT/clamped-ladder.mp4" \
-  | awk -F, 'NR > 1 { step[$2 - prev]++ } { if ($1 == $2) same++; prev = $2; n++ }
-      END { printf "clamped-ladder.mp4: %d packets, PTS == DTS on %d, DTS steps:", n, same
-            for (s in step) printf " %s x%d", s, step[s]; print "" }'
+for name in "${FIXTURES[@]}"; do
+  echo "wrote $OUT/$name"
+  ffprobe -v error -select_streams v:0 -show_entries packet=pts,dts -of csv=p=0 "$OUT/$name" \
+    | awk -F, -v name="$name" 'NR > 1 { step[$2 - prev]++ } { if ($1 == $2) same++; prev = $2; n++ }
+        END { printf "%s: %d packets, PTS == DTS on %d, DTS steps:", name, n, same
+              for (s in step) printf " %s x%d", s, step[s]; print "" }'
+done
 
 if [[ $CHECK -eq 1 ]]; then
   swift build --package-path "$REPO_ROOT" --product aetherctl >/dev/null 2>&1
   CTL="$(swift build --package-path "$REPO_ROOT" --product aetherctl --show-bin-path 2>/dev/null)/aetherctl"
-  "$CTL" pktdump --count 12 "$OUT/clamped-ladder.mp4" 2>&1 | grep -E '#409' || echo "no #409 verdict line"
-  "$CTL" swdecode --frames 300 "$OUT/clamped-ladder.mp4" 2>&1 | grep -E 'Steps backwards' || true
+  for name in "${FIXTURES[@]}"; do
+    echo "$name:"
+    "$CTL" pktdump --count 12 "$OUT/$name" 2>&1 | grep -E '#409' || echo "no #409 verdict line"
+    "$CTL" swdecode --frames 300 "$OUT/$name" 2>&1 | grep -E 'Steps backwards' || true
+  done
 fi

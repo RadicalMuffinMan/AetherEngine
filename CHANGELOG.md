@@ -41,11 +41,12 @@ the public-API contract.
 ### Fixed
 
 - **MP4s whose writer dropped `ctts` and forced the decode ladder monotonic play in order.**
-  Such a file reports `PTS == DTS` on every sample, keeps each anchor on its own presentation time
-  and pushes each B picture 1001 ticks past the picture decoded before it, so the ladder has no single
+  Such a file reports `PTS == DTS` on every sample and pushes each B picture (on some files each anchor
+  too) 1001 ticks past the picture decoded before it, so the ladder has no single
   step and the #409 probe left the stream untouched ("decode ladder is not uniform"). Both routes then
   showed the B pictures in decode order, as QuickTime and the Files app do. The repair now takes the
-  step from the stream's average frame rate, remeasures it on the anchors and rebuilds DTS from each
+  step from the stream's average frame rate, remeasures it on the anchors (or, when the anchors were
+  pushed as well, snaps it to the nearest standard frame rate within 1%) and rebuilds DTS from each
   picture's decode slot, under the same picture-order checks. `Scripts/make-clamped-ladder-fixture.sh`
   generates a twin pair. See `docs/formats.md`.
 
