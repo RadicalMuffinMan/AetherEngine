@@ -938,12 +938,13 @@ final class SoftwarePlaybackHost {
     private let reposition: Reposition
 
     init(videoGravity: AVLayerVideoGravity = .resizeAspect,
+         renderer: SampleBufferRenderer? = nil,
          reposition: @escaping Reposition = { dem, target, budget, queue, superseded in
              await dem.seekBounded(to: target, timeout: budget, on: queue,
                                    isSuperseded: superseded)
          }) {
         self.reposition = reposition
-        self.renderer = SampleBufferRenderer(videoGravity: videoGravity)
+        self.renderer = renderer ?? SampleBufferRenderer(videoGravity: videoGravity)
         // Default to the software decoder; load() swaps it for the
         // VT-backed one when the source's video codec is HEVC.
         self.videoDecoder = SoftwareVideoDecoder()
@@ -1566,6 +1567,7 @@ final class SoftwarePlaybackHost {
 
     func play() {
         guard !stopRequested, failure == nil else { return }
+        renderer.recoverAfterSuspensionIfNeeded()
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
         // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).

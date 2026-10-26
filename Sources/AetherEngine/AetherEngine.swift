@@ -923,6 +923,11 @@ public final class AetherEngine: ObservableObject {
     /// The category is still declared once per process; pair with `deactivatesAudioSessionOnStop = false`
     /// when the host also owns final deactivation. Native AVKit activation is unaffected.
     public var rendererAudioSessionActivationEnabled = true
+
+    /// Keep a paused video session through background suspension instead of releasing its pipeline.
+    /// Off by default: the system may invalidate decoders while suspended, requiring a reload.
+    /// This does not enable background playback or change the policy for a playing session.
+    public var retainsVideoPipelineWhenBackgrounded = false
     /// Set by the host from its PiP delegate (iOS: AVKit; tvOS: host-built AVPictureInPictureController);
     /// the keepalive policy + pause-safety read it.
     public var pictureInPictureActive = false {
@@ -1292,8 +1297,10 @@ public final class AetherEngine: ObservableObject {
         softwareHostHasAudio: Bool,
         keepVideoAlive: Bool,
         pipActive: Bool,
-        state: PlaybackState
+        state: PlaybackState,
+        retainPausedVideoPipeline: Bool = false
     ) -> BackgroundAction {
+        if retainPausedVideoPipeline && state == .paused { return .doNothing }
         if isAudioBackend { return .doNothing }
         if keepVideoAlive {
             if hasSoftwareHost {
@@ -5929,7 +5936,7 @@ public final class AetherEngine: ObservableObject {
         // (wedge-safe, mirrors the unconditional background teardown). Audio backends are already spared.
         // #127: same grace window as the didEnterBackground path, so pause-after-background quick switches
         // also skip the rebuild.
-        if isBackgrounded && !pictureInPictureActive && !audioAVPlayerActive && audioHost == nil && softwareHost == nil {
+        if isBackgrounded && !retainsVideoPipelineWhenBackgrounded && !pictureInPictureActive && !audioAVPlayerActive && audioHost == nil && softwareHost == nil {
             switch Self.backgroundStep(
                 action: .teardownVideo,
                 state: state,
@@ -8537,7 +8544,8 @@ public final class AetherEngine: ObservableObject {
             softwareHostHasAudio: softwareHost?.deliversAudio == true,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
-            state: state
+            state: state,
+            retainPausedVideoPipeline: retainsVideoPipelineWhenBackgrounded
         )
         switch Self.backgroundStep(
             action: action,
@@ -8669,7 +8677,8 @@ public final class AetherEngine: ObservableObject {
             softwareHostHasAudio: softwareHost?.deliversAudio == true,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
-            state: state
+            state: state,
+            retainPausedVideoPipeline: retainsVideoPipelineWhenBackgrounded
         )
     }
     #endif
