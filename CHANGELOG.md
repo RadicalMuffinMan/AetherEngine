@@ -159,6 +159,11 @@ the public-API contract.
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
+- **A retained paused session reapplies background policy after a seek (AE#870 follow-up).**
+  Play received during the seek previously settled directly into playing without the background
+  decision owed by a normal resume. The decision now waits for the seek to settle, then respects
+  disabled background playback or software audio-only mode; a seek that stays paused keeps retention.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle

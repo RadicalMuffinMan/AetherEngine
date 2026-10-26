@@ -67,6 +67,7 @@ public final class AetherEngine: ObservableObject {
             ) {
                 // AE#870: a retained paused session skipped the background policy, so a resume in the
                 // background (lock screen, Control Center, AVKit) owes the playing-session decision.
+                // A seek can resume while it is in flight, so it owes the decision at settlement too.
                 backgroundActionOwed = true
             }
             settleOwedBackgroundAction()
@@ -1331,11 +1332,13 @@ public final class AetherEngine: ObservableObject {
 
     /// AE#870: `retainsVideoPipelineWhenBackgrounded` answers only for a paused session. One that
     /// resumes while still backgrounded gets the playing-session policy (teardown with background
-    /// playback off, software audio-only), whichever transport owner started it.
+    /// playback off, software audio-only), whichever transport owner started it. A seek can carry a
+    /// later play request, so leaving the retained pause for a seek owes that decision as well;
+    /// `backgroundDecisionMustWait` defers it until the seek's final transport state is known.
     nonisolated static func backgroundPolicyIsOwedOnResume(
         isBackgrounded: Bool, retainsPausedPipeline: Bool, from: PlaybackState, to: PlaybackState
     ) -> Bool {
-        isBackgrounded && retainsPausedPipeline && from == .paused && to == .playing
+        isBackgrounded && retainsPausedPipeline && from == .paused && (to == .playing || to == .seeking)
     }
 
     /// #127: how to execute a BackgroundAction. A PAUSED teardown on platforms with quick app switches
