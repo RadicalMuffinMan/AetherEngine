@@ -101,6 +101,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var width: Int32 = 0
     private var height: Int32 = 0
     private var codecName = "HEVC"
+    /// What `open()` built its format description from, so a VP9 key frame at a new size can get one.
+    private var formatCodecType = kCMVideoCodecType_HEVC
+    private var formatExtensions: NSDictionary?
 
     /// Color metadata from codecpar, re-applied to every CVPixelBuffer.
     /// VTDecompressionSession should propagate these from SPS+hvcC but has been observed not to;
@@ -301,6 +304,8 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         let configuration = try VideoToolboxVideoFormat.make(stream: stream)
         codecName = configuration.codecName
+        formatCodecType = configuration.codecType
+        formatExtensions = configuration.extensions
         if codecpar.pointee.codec_id == AV_CODEC_ID_VP9 {
             if #available(macOS 11.0, iOS 26.2, tvOS 26.2, visionOS 26.2, *) {
                 VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
@@ -443,6 +448,46 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         return true
     }
 
+    /// VP9 may change its coded size at any key frame, and a session built for the old size answers
+    /// every frame after it with kVTVideoDecoderBadDataErr, which libavcodec never did. So the key frame
+    /// gets a format description and session of its own size, after the old session has delivered
+    /// what it still holds. Not an epoch change: the packets that follow belong to the same feed.
+    private func adoptVP9FrameSize(_ size: (width: Int32, height: Int32)) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard size.width != width || size.height != height,
+              let old = session, !sessionLost, let refConBox else { return }
+        var fd: CMVideoFormatDescription?
+        let fdStatus = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: formatCodecType,
+            width: size.width,
+            height: size.height,
+            extensions: formatExtensions,
+            formatDescriptionOut: &fd
+        )
+        guard fdStatus == noErr, let formatDesc = fd else {
+            EngineLog.emit("[HardwareVideoDecoder] VP9 resize to \(size.width)x\(size.height): "
+                           + "format description failed (\(fdStatus))", category: .swPlayback)
+            return
+        }
+        VTDecompressionSessionWaitForAsynchronousFrames(old)
+        let created = makeSession(formatDescription: formatDesc, refCon: refConBox)
+        guard let fresh = created.session else {
+            EngineLog.emit("[HardwareVideoDecoder] VP9 resize to \(size.width)x\(size.height): "
+                           + "session refused (\(created.status)), keeping \(width)x\(height)",
+                           category: .swPlayback)
+            return
+        }
+        VTDecompressionSessionInvalidate(old)
+        EngineLog.emit("[HardwareVideoDecoder] VP9 key frame resizes \(width)x\(height) -> "
+                       + "\(size.width)x\(size.height), session rebuilt", category: .swPlayback)
+        session = fresh
+        formatDescription = formatDesc
+        width = size.width
+        height = size.height
+    }
+
     #if DEBUG
     /// Invalidate the live session without forgetting it, which is what the system does on an iOS
     /// screen lock: the next decode returns `kVTInvalidSessionErr`. For the aetherctl harness.
@@ -555,6 +600,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     // MARK: - Decode
 
     func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64? = nil) {
+        if streamCodecID == AV_CODEC_ID_VP9, (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0,
+           let data = packet.pointee.data, packet.pointee.size > 0,
+           let size = VideoToolboxVideoFormat.vp9KeyFrameSize(
+            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))) {
+            adoptVP9FrameSize(size)
+        }
         lock.lock()
         // AE#492: see `SoftwareVideoDecoder.decode`. Same rule, same lock as `flush()`.
         if let epoch, epoch != currentEpoch { lock.unlock(); return }

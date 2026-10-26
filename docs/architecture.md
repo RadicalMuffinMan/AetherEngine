@@ -88,7 +88,7 @@ and profile 2 (10-bit 4:2:0). `VideoToolboxVideoFormat` synthesizes the `vpcC` r
 using the [VP codec configuration box](https://www.webmproject.org/vp9/mp4/#vp-codec-configuration-box)
 layout. Supplemental decoder registration is gated by OS availability. `VideoDecoderOpener` closes
 a failed candidate and opens libavcodec before the host publishes its decoder or starts reading
-packets; a failed fallback is also closed and its error is propagated. Playback remains on the
+packets; a failed fallback is also closed and its error is propagated. `HardwareVideoDecoder` reads the coded size from each VP9 key frame header and rebuilds its session when it changes. Playback remains on the
 software presentation route because AVPlayer's HLS path does not accept VP9. Existing HEVC
 hardware probing, Dolby Vision selection and HDR10+ delivery are unchanged.
 

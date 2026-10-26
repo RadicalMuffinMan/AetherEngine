@@ -286,6 +286,59 @@ struct SoftwareDecoderSelectionTests {
         }
     }
 
+    /// Packs a VP9 uncompressed header MSB first, as the bitstream writes it.
+    private static func vp9Header(_ fields: [(value: UInt32, bits: Int)]) -> [UInt8] {
+        var bytes: [UInt8] = []
+        var accumulator: UInt32 = 0
+        var pending = 0
+        for (value, bits) in fields {
+            for shift in stride(from: bits - 1, through: 0, by: -1) {
+                accumulator = accumulator << 1 | (value >> UInt32(shift) & 1)
+                pending += 1
+                if pending == 8 { bytes.append(UInt8(accumulator)); accumulator = 0; pending = 0 }
+            }
+        }
+        if pending > 0 { bytes.append(UInt8(accumulator << UInt32(8 - pending))) }
+        return bytes
+    }
+
+    private static func vp9KeyFrame(profile: UInt32, width: UInt32, height: UInt32,
+                                    frameType: UInt32 = 0, showExisting: UInt32 = 0) -> [UInt8] {
+        var fields: [(value: UInt32, bits: Int)] = [(2, 2), (profile & 1, 1), (profile >> 1, 1)]
+        if profile == 3 { fields.append((0, 1)) }
+        fields += [(showExisting, 1), (frameType, 1), (1, 1), (0, 1), (0x49_83_42, 24)]
+        if profile >= 2 { fields.append((0, 1)) }
+        fields += [(2, 3), (0, 1)]
+        if profile == 1 || profile == 3 { fields.append((0, 3)) }
+        fields += [(width - 1, 16), (height - 1, 16), (0, 8)]
+        return vp9Header(fields)
+    }
+
+    private static func keyFrameSize(_ bytes: [UInt8]) -> (width: Int32, height: Int32)? {
+        bytes.withUnsafeBufferPointer { VideoToolboxVideoFormat.vp9KeyFrameSize($0) }
+    }
+
+    @Test("a VP9 key frame header yields its coded size for every profile")
+    func vp9KeyFrameSize() {
+        for profile: UInt32 in 0...3 {
+            let size = Self.keyFrameSize(Self.vp9KeyFrame(profile: profile, width: 1280, height: 720))
+            #expect(size?.width == 1280 && size?.height == 720, "profile \(profile)")
+        }
+        let odd = Self.keyFrameSize(Self.vp9KeyFrame(profile: 2, width: 3839, height: 1607))
+        #expect(odd?.width == 3839 && odd?.height == 1607)
+    }
+
+    @Test("inter frames, shown existing frames and truncated headers declare no size")
+    func vp9KeyFrameSizeRefusals() {
+        #expect(Self.keyFrameSize(Self.vp9KeyFrame(profile: 0, width: 640, height: 360, frameType: 1)) == nil)
+        #expect(Self.keyFrameSize(Self.vp9KeyFrame(profile: 0, width: 640, height: 360, showExisting: 1)) == nil)
+        let full = Self.vp9KeyFrame(profile: 0, width: 640, height: 360)
+        #expect(Self.keyFrameSize(Array(full.prefix(6))) == nil)
+        var badSync = full
+        badSync[1] ^= 0xFF
+        #expect(Self.keyFrameSize(badSync) == nil)
+    }
+
     @Test("a rejected hardware open closes its state and opens libavcodec before returning")
     func failedHardwareOpenFallsBack() throws {
         try withVP9Stream { stream in

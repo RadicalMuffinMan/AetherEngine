@@ -247,6 +247,51 @@ enum VideoToolboxVideoFormat {
         )
     }
 
+    /// The coded size a VP9 key frame declares in its uncompressed header (VP9 bitstream spec 6.2),
+    /// or nil for any other frame or a header too short to read. A superframe starts with its first
+    /// frame, which is the key frame when the packet is one.
+    static func vp9KeyFrameSize(_ bytes: UnsafeBufferPointer<UInt8>) -> (width: Int32, height: Int32)? {
+        var reader = BitReader(bytes)
+        guard reader.read(2) == 2 else { return nil }   // frame_marker
+        let profileLow = reader.read(1), profileHigh = reader.read(1)
+        guard let profileLow, let profileHigh else { return nil }
+        let profile = profileHigh << 1 | profileLow
+        if profile == 3, reader.read(1) == nil { return nil }
+        // show_existing_frame, then frame_type (0 = key frame)
+        guard reader.read(1) == 0, reader.read(1) == 0 else { return nil }
+        guard reader.read(2) != nil,                     // show_frame, error_resilient_mode
+              reader.read(24) == 0x49_83_42 else { return nil }
+        if profile >= 2, reader.read(1) == nil { return nil }  // ten_or_twelve_bit
+        guard let colorSpace = reader.read(3) else { return nil }
+        if colorSpace != 7 {                             // CS_RGB
+            guard reader.read(1) != nil else { return nil }    // color_range
+            if profile == 1 || profile == 3, reader.read(3) == nil { return nil }
+        } else if profile == 1 || profile == 3, reader.read(1) == nil {
+            return nil
+        }
+        guard let widthMinusOne = reader.read(16),
+              let heightMinusOne = reader.read(16) else { return nil }
+        return (Int32(widthMinusOne) + 1, Int32(heightMinusOne) + 1)
+    }
+
+    private struct BitReader {
+        let bytes: UnsafeBufferPointer<UInt8>
+        var position = 0
+
+        init(_ bytes: UnsafeBufferPointer<UInt8>) { self.bytes = bytes }
+
+        mutating func read(_ count: Int) -> UInt32? {
+            guard position + count <= bytes.count * 8 else { return nil }
+            var value: UInt32 = 0
+            for _ in 0..<count {
+                let bit = bytes[position >> 3] >> (7 - UInt8(position & 7)) & 1
+                value = value << 1 | UInt32(bit)
+                position += 1
+            }
+            return value
+        }
+    }
+
     /// Mirrors FFmpeg's `get_vp9_level`: first matching luma sample-rate and picture-size ceiling.
     private static func estimatedVP9Level(
         width: Int32,
