@@ -159,6 +159,11 @@ the public-API contract.
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
+- **Supplemental decoder registration compiles with the Xcode 26.0 and 26.1 mobile SDKs.**
+  AV1 and VP9 registration calls are compiled only where the SDK declares them. Older mobile
+  toolchains retain hardware capability queries and the software fallback; macOS and newer SDKs
+  keep their existing registration behavior.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle

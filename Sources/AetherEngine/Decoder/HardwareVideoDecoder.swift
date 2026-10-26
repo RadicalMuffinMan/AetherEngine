@@ -307,9 +307,13 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         formatCodecType = configuration.codecType
         formatExtensions = configuration.extensions
         if codecpar.pointee.codec_id == AV_CODEC_ID_VP9 {
+            // Mobile SDKs first declare this function in Xcode 26.2 (Swift 6.2.3).
+            // Older SDKs still query hardware support and keep the normal software fallback.
+            #if os(macOS) || compiler(>=6.2.3)
             if #available(macOS 11.0, iOS 26.2, tvOS 26.2, visionOS 26.2, *) {
                 VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
             }
+            #endif
             guard VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9) else {
                 throw VideoDecoderError.hardwareDecoderUnavailable(codec: "VP9")
             }
