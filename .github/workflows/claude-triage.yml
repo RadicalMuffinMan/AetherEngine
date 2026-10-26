@@ -79,6 +79,9 @@ jobs:
                 ]
               },
               "sandbox": {
+                "enabled": true,
+                "failIfUnavailable": true,
+                "allowUnsandboxedCommands": false,
                 "network": {
                   "allowedDomains": ["api.github.com"]
                 }
