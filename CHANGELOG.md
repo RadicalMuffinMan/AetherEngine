@@ -159,6 +159,9 @@ the public-API contract.
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
+- **The scrub-preview CLI builds with warnings treated as errors.** The success count checks
+  whether a placement exists without binding an unused copy; diagnostic output is unchanged.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
