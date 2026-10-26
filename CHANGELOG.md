@@ -169,6 +169,10 @@ the public-API contract.
   ratio's magnitude instead of each rational component, preserving values such as 759:712 while
   still rejecting extreme pixel shapes and implausible resulting display aspects.
 
+- **VideoToolbox output metadata respects immutable reference buffers.** Colour and pixel-aspect
+  attachments are updated in place only when the decode callback marks the buffer modifiable.
+  Otherwise a pooled owned copy receives the attachments; matching output is passed through.
+
 - **A remote disc image on an extensionless URL is recognized by its `Content-Type` (AE#860, thanks @qoli).**
   The HTTP disc adapter was gated on the `.iso` / `.img` / `.udf` extension alone, so an ISO behind an
   opaque proxy path reached libavformat as raw filesystem bytes and failed with `Invalid data found
