@@ -317,6 +317,20 @@ _Nothing yet._
   MacBook Air M1 SDR panel a Dolby Vision P8.1 master with and without `SUPPLEMENTAL-CODECS`, a
   High-tier 3832x1600 PQ master and an audio switch to AC-3 on each were all accepted. The item still
   falls back, later titles are still offered the master, and the log now says so. tvOS is unchanged.
+- **A software live session reports its edge rebuffer as `.rebuffering`.** When the source paused, the
+  live feeder parked the synchronizer to refill but kept that to itself: `playbackPhase` stayed
+  `.playing` over a standing picture until the reader's own stall timeout promoted the source to
+  `.stalled`, 20 s later. A host app watching the clock reloaded the session after 2 s, and each fresh
+  join landed the lead behind the same frozen burst, so the viewer saw the last four seconds again,
+  three times over, before the feed came back. `SoftwarePlaybackHost.isRebuffering` now follows the
+  pumps' hold (the live feeder's dry ring and the on-demand loop's exhausted audio lead) and the
+  engine folds it into `isBuffering`, as it does the audio host's wait.
+- **A software live session catches up after a pause whose backlog arrives at once.** A source that
+  resumes by handing over everything it missed left the picture the length of the pause behind the
+  newest media, and nothing on that path ever caught up. The feeder now watches a resume with the
+  join's own rule and, once the backlog has landed, moves the picture up to the join lead behind the
+  newest media through the engine's live rejoin seek; a source that skipped what it missed is left
+  where it resumed.
 
 - **A seek no longer waits on a segment pump running at the efficiency class.** A VOD pump far
   enough ahead of playback relaxes to `.utility` (AE#286), and a seek's restart stops it and waits
