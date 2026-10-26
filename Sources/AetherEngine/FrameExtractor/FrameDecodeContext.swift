@@ -574,7 +574,8 @@ final class FrameDecodeContext: @unchecked Sendable {
             }
             #endif
             if isHDR {
-                var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase)
+                var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase,
+                                                 highQuality: mode.isFrameAccurate)
                 if toned != nil {
                     defer { av_frame_free(&toned) }
                     if let img = Self.cgImageFromRGBAFrame(toned!) { return img }
