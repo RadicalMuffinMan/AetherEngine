@@ -14,7 +14,7 @@ head_sha="$3"
 result_json="$4"
 pr_json="$5"
 
-footer="<sub>Automated review by Claude of ${head_sha:0:7}. It reads the code, it does not build or run it; a maintainer reviews and merges.</sub>"
+footer="<sub>Automated review by Quint (Claude) of ${head_sha:0:7}. It reads the code, it does not build or run it; a maintainer reviews and merges.</sub>"
 
 # Paths may come back absolute or prefixed with the data directory; reduce them to repo paths and
 # keep only files this PR actually changes.
