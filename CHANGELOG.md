@@ -111,6 +111,11 @@ the public-API contract.
 
 ### Changed
 
+- **FFmpegBuild 3.10.1, for a libzvbi security update.** libzvbi 0.2.46 fixes an out-of-bounds
+  write in the teletext DRCS conversion (CVE-2026-110654, GHSA-p2vx-rpw8-hp43, medium). The
+  `libzvbi_teletext` decoder is built and the teletext path is wired end to end, so a DVB teletext
+  stream reaches that code. FFmpeg (`n8.1.3`), dav1d and zimg are unchanged in content.
+
 - **A Profile 7 FEL source keeps the native route while the host reports an AirPlay video receiver on the audio route (iOS).**
   The dual-layer route draws into a local layer that no receiver picks up, so a TV the viewer sent the
   title to played sound only. When the host says the receiver shows video
