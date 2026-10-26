@@ -439,7 +439,8 @@ enum H264CompositionOffsetRepair {
     /// writer's forced-monotonic ladder runs ahead of that by at most the reorder head plus the anchor
     /// it pushed past (measured 3.5 pictures on the reporting file at delay 2), and falls behind only
     /// by what the next anchor has not yet reclaimed; a genuinely variable-rate head misses it by far
-    /// more.
+    /// more. `step` is rounded, so each bound also gives a tick per picture: a third reporting file at
+    /// 29 fps (3103.45 ticks) ran exactly that four pictures ahead and missed the upper bound by 3.
     static func nominalLadderFits(samples: [Sample], step: Int64, videoDelay: Int) -> Bool {
         guard step >= 2, let first = samples.first?.dts, let last = samples.last?.dts, last > first else {
             return false
@@ -450,7 +451,7 @@ enum H264CompositionOffsetRepair {
         let (low, lowOverflow) = max(0, pictures - slack).multipliedReportingOverflow(by: step)
         let (high, highOverflow) = (pictures + slack).multipliedReportingOverflow(by: step)
         guard !overflow, !lowOverflow, !highOverflow else { return false }
-        return span >= low && span <= high
+        return span >= low - pictures && span <= high + pictures
     }
 
     /// Ticks per picture read off the sampled anchors, the pictures that display later than everything
@@ -710,7 +711,9 @@ enum H264CompositionOffsetRepair {
         /// moves back each time a keyframe was pushed less. Within half a tick per picture of the
         /// sequence the keyframe keeps its own time too: that is all a rounded step can be off by (23 fps
         /// is 3913.04 ticks at 90 kHz), so the chain does not drift. One later than the reorder head
-        /// plus two pictures is a real discontinuity.
+        /// plus two and a half pictures is a real discontinuity: a third reporting file at 29 fps kept
+        /// its keyframes four pictures (plus up to 31 ticks) past the sequence before them for a
+        /// hundred seconds.
         private func continuedSequenceAnchor(keyframeDTS dts: Int64) -> Int64 {
             guard plan.synthesizesDecodeLadder, let previous = sequenceAnchorDTS,
                   let last = sequenceLastDisplayIndex, last >= 0 else { return dts }
@@ -721,7 +724,7 @@ enum H264CompositionOffsetRepair {
             let (limit, limitOverflow) = plan.step.multipliedReportingOverflow(by: 2)
             guard !countOverflow, !lengthOverflow, !expectedOverflow, !driftOverflow, !limitOverflow
             else { return dts }
-            guard drift > pictures / 2 + 1, drift <= plan.decodeLead &+ limit else { return dts }
+            guard drift > pictures / 2 + 1, drift <= plan.decodeLead &+ limit &+ plan.step / 2 else { return dts }
             return expected
         }
     }

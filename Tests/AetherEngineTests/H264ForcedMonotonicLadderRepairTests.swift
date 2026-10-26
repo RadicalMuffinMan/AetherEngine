@@ -170,6 +170,27 @@ struct H264ForcedMonotonicLadderRepairTests {
         #expect(plan.shift == 12012)
     }
 
+    @Test("a head four pictures ahead of a rounded 29 fps step still fits the nominal rate")
+    func roundedStepHeadFitsNominalRate() {
+        // The third reporting file's head: 29 fps is 3103.45 ticks, the step rounds to 3103, and the
+        // ladder runs exactly the reorder head plus two pictures ahead, 3 ticks past the bound without
+        // a tick per picture for the rounding.
+        let pocs: [Int64] = [0, 8, 4, 2, 6, 16, 12, 10, 14, 22, 18, 20]
+        let ladder: [Int64] = [0, 6207, 7758, 9309, 24826, 27153, 29480, 31807, 34134, 38272, 42410, 46548]
+        let samples = zip(pocs, ladder).enumerated().map { index, pair in
+            H264CompositionOffsetRepair.Sample(dts: pair.1, pts: pair.1, pictureOrderCount: pair.0, isKeyframe: index == 0)
+        }
+        #expect(H264CompositionOffsetRepair.nominalLadderFits(samples: samples, step: 3103, videoDelay: 2))
+        guard case .repair(let plan) = H264CompositionOffsetRepair.classify(
+            samples: samples, videoDelay: 2, streamStartTime: 0, ladderStart: 0,
+            nominalStep: 3103, standardStep: 3103)
+        else {
+            Issue.record("expected a repair")
+            return
+        }
+        #expect(plan.step == 3103)
+    }
+
     @Test("the standard step is the nearest standard rate within 1%")
     func standardFrameStepSnapsToNearestRate() {
         let ninetyKilohertz = AVRational(num: 1, den: 90000)

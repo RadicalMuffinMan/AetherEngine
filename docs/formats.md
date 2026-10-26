@@ -118,12 +118,14 @@ decode slot rather than shifted, since a pushed B picture's DTS can sit after it
 time. The writer pushes keyframes as well, and only ever later: on both reporting files they sat 0 to
 4 pictures after the end of the GOP before them, which left a gap or put the next GOP in front of the
 last pictures of the previous one. A later IDR therefore continues the sequence before it, unless it
-is later than the reorder delay plus two pictures (a real discontinuity) or within half a tick per
+is later than the reorder delay plus two and a half pictures (a real discontinuity; a third reporting
+file at 29 fps kept its keyframes four pictures late for a hundred seconds) or within half a tick per
 picture (all a rounded step can be off by); an earlier one keeps its own time, which is how a chain
 started on a pushed keyframe after a seek moves back into place. The second reporting file also opens
 every GOP on twelve P pictures before its first B, so a head that has not reordered after twelve
 pictures, with `PTS == DTS` throughout, is sampled on to its first regression plus a mini-GOP, up to
-**48 pictures**. After a seek onto an open-GOP
+**48 pictures**. The sampled span is checked against the rounded step with a tick per picture to
+spare, which is what the third file's head needed. After a seek onto an open-GOP
 keyframe, which kept its own presentation time, the sequence origin is taken from its display rank
 rather than its decode slot. The shift is what puts the first
 keyframe on the stream's start time, clamped to **16 pictures** because this writer left the keyframe
