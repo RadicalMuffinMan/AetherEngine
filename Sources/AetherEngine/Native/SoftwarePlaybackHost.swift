@@ -1712,7 +1712,7 @@ final class SoftwarePlaybackHost {
                     // A pending preroll can own a future start even while the clock reads zero.
                     aOut.setRate(0, ifRevision: revision)
                 } else if let rate = PausedFirstFrame.rateCorrectionAtArm(
-                    transportPlaying: self.isPlaying, pausedBeforeFirstFrame: self.pausedBeforeFirstFrame,
+                    transportPlaying: true, pausedBeforeFirstFrame: false,
                     synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) {
                     // A later rebuffer pause, seek or rate command owns the output now. The
                     // comparison and correction are atomic with those commands inside AudioOutput.
