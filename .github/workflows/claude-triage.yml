@@ -71,12 +71,16 @@ jobs:
                   "Read(//home/runner/.claude.json)",
                   "Read(//home/runner/.claude/.credentials.json)",
                   "Read(//home/runner/.config/**)",
-                  "Read(//home/runner/.gitconfig)",
                   "Read(//home/runner/.ssh/**)",
                   "Read(//home/runner/.docker/**)",
                   "Read(//home/runner/.npmrc)",
                   "Read(//home/runner/work/_temp/**)",
                   "Read(//home/runner/work/_actions/**)"
                 ]
+              },
+              "sandbox": {
+                "network": {
+                  "allowedDomains": ["api.github.com"]
+                }
               }
             }
