@@ -1777,6 +1777,20 @@ public final class AetherEngine: ObservableObject {
             category: .engine)
     }
 
+    /// AE#887: a panel that reports HDR headroom during playback is presenting HDR, so a refusal latched
+    /// earlier in the process was about the stream it was served, not about the panel. Measured on an
+    /// Apple TV 4K (tvOS 27, output 4K HDR): a live PQ master refused with -11868, the latch set, and the
+    /// playback probe read headroom 1.20 a tenth of a second later. Left standing, the latch routed every
+    /// later HDR title in the process media-direct, without its subtitle renditions.
+    nonisolated static func withdrawPanelRefusalOnHDRReading() {
+        guard panelRefusedHDRMaster else { return }
+        panelRefusedHDRMaster = false
+        EngineLog.emit(
+            "[DisplayCriteria] the panel reports HDR during playback, so the earlier HDR-master refusal was "
+            + "not the panel's; withdrawn, the next HDR load offers the master again (#887)",
+            category: .engine)
+    }
+
     nonisolated(unsafe) static var forceMasterPlaylistForTesting = false
 
     /// TEST-ONLY. Flip the master-route override for the `aetherctl live --force-master` harness.
@@ -2943,7 +2957,8 @@ public final class AetherEngine: ObservableObject {
             } else if MasterFallbackDecision.shouldLatchPanelRefusal(
                 code: rejection.code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
                 displaySwitchInProgress: switching,
-                panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand) {
+                panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand,
+                hostAssertsPanelHDR: loadedOptions.panelIsInHDRMode) {
                 Self.panelRefusedHDRMaster = true
                 // A display that refused an HDR master no longer vouches for the HDR proof either. Cleared
                 // here, before the fallback below reloads, so that session cannot read the proof.
@@ -2951,6 +2966,11 @@ public final class AetherEngine: ObservableObject {
                 EngineLog.emit(
                     "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
                     + "routes HDR sources media-direct until it returns from the background (#588)",
+                    category: .engine)
+            } else if loadedOptions.panelIsInHDRMode {
+                EngineLog.emit(
+                    "[DisplayCriteria] HDR master refused (code=\(rejection.code)) while the host asserts the "
+                    + "panel presents HDR; this item falls back, the process does not latch the refusal (#887)",
                     category: .engine)
             } else if HLSVideoEngine.builtInPanelEngagesOnDemand {
                 EngineLog.emit(
@@ -7144,6 +7164,7 @@ public final class AetherEngine: ObservableObject {
             }
             let presentsHDR = await self.displayCriteria.probePanelDuringPlayback()
             guard !Task.isCancelled, self.loadGeneration == gen, presentsHDR else { return }
+            Self.withdrawPanelRefusalOnHDRReading()
             self.republishPanelPresentsHDR(
                 effectiveFormat: effectiveFormat,
                 because: "the panel answered HDR during playback and the load-time read could not see it")
