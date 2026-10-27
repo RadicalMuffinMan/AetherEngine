@@ -66,6 +66,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Bitmap subtitle history is bounded by bytes, not only by time (AE#879, thanks @qoli).**
+  A dense PGS track kept thousands of full-RGBA cue images inside the 300 s retention window: measured on an Apple TV
+  4K, 2,207 cues and 290 MB of pixels after ten minutes, of which 560 cues were ever shown. Bitmap cues that ended more
+  than 60 s behind the playhead are now dropped, oldest first, once the retained images exceed 64 MiB. A backward seek
+  into such a stretch re-decodes it from the packet store, as a seek past 300 s already did. Images stay plain
+  premultiplied RGBA, so the `SubtitleImage` contract and the presentation path are unchanged.
 - **An MP4 that stores each subtitle track in its own byte range no longer starves playback (AE#909, thanks @oxyc).**
   The demuxer visits one block per subtitle track in turn, and the reader's 8-block detour cache, smaller than that
   cycle, missed on every visit: 14 `mov_text` tracks re-fetched every 4 MB block on every pass, which on a slow origin
