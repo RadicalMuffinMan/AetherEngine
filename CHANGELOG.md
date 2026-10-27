@@ -40,6 +40,12 @@ the public-API contract.
 
 ### Fixed
 
+- **An MP4 that stores each subtitle track in its own byte range no longer starves playback (AE#909, thanks @oxyc).**
+  The demuxer visits one block per subtitle track in turn, and the reader's 8-block detour cache, smaller than that
+  cycle, missed on every visit: 14 `mov_text` tracks re-fetched every 4 MB block on every pass, which on a slow origin
+  rebuffered every few seconds. The cache now grows, up to 24 blocks, when it has to fetch a block again that it
+  evicted, and the idle sweep shrinks it back. A file without such a cycle stays at 8 blocks.
+
 - **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told
   to mix, so a stereo track reached the tap as its left channel alone, 2.1 as silence, and 4.0 to 7.1 as the centre
   alone. The tap's converter now mixes every channel but the LFE. The native and remote-HLS paths were unaffected.
