@@ -34,6 +34,11 @@ the public-API contract.
 
 ### Fixed
 
+- **A failed AV1 Dolby Vision frame copy no longer writes RPU metadata into the decoder's reference picture (AE#907,
+  thanks @jonluca).** If the copy that carries the RPU could not be made, the callback still set or cleared the RPU
+  keys on VideoToolbox's original buffer and its IOSurface. RPU updates now require an owned output; on a failed
+  copy the original frame is delivered unchanged. Follow-up to AE#876.
+
 - **A VP9 key frame retired by a seek no longer resizes the hardware session (AE#904, thanks @jonluca).** A parked
   key frame from the pre-seek feed could rebuild the VideoToolbox session at its old size before the epoch check
   rejected it, discarding the reference pictures the current feed needed; the next inter frame produced no image.
@@ -271,8 +276,6 @@ the public-API contract.
 - **VideoToolbox output metadata respects immutable reference buffers.** Colour and pixel-aspect
   attachments are updated in place only when the decode callback marks the buffer modifiable.
   Otherwise a pooled owned copy receives the attachments; matching output is passed through.
-  AV1 Dolby Vision RPU updates also require an owned output: if copying fails, the original frame
-  is delivered without setting or clearing metadata on the decoder's reference buffer.
 
 - **Software playback teardown no longer blocks the main actor on renderer removal (AE#873, thanks @jonluca).**
   The video renderer leaves the synchronizer immediately, also when its clock is stopped, and the
