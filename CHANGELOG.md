@@ -26,6 +26,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A software playback clock stays stopped when first-frame arming overlaps a pause (AE#867, thanks
+  @jonluca).** The feeder's post-arm rate correction could restart the synchronizer after `pause()` stopped it
+  but before the host published its paused intent, leaving the clock running behind parked decode
+  loops and causing video to catch up rapidly on resume. The correction now runs on the main actor
+  with transport changes, ignores retired outputs and seek generations, and yields to newer clock
+  commands, including rebuffer pauses. Pending pauses and end-of-media tail playback are preserved.
+
 - **An audio tap consumer that falls behind is told where it lost audio (AE#864, thanks @qoli).** The tap stream
   shed its oldest queued buffer when full, and the buffer received next was already queued, so it arrived without
   `discontinuity` and a host read contiguous PCM across a gap of seconds. The queue now keeps what it holds, drops
@@ -225,13 +232,6 @@ the public-API contract.
 - **The HLS fixture reads its redirect port under the lifecycle lock.** A request worker could read
   the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
   and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
-
-- **A software playback clock stays stopped when first-frame arming overlaps a pause.**
-  The feeder's post-arm rate correction could restart the synchronizer after `pause()` stopped it
-  but before the host published its paused intent, leaving the clock running behind parked decode
-  loops and causing video to catch up rapidly on resume. The correction now runs on the main actor
-  with transport changes, ignores retired outputs and seek generations, and yields to newer clock
-  commands, including rebuffer pauses. Pending pauses and end-of-media tail playback are preserved.
 
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
