@@ -998,7 +998,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // that never left loading ended at 120.00 and passed a check against the final time. Each tick
     // counts at most two seconds, so a drill's own seek forward is not mistaken for playback.
     var clockAdvance = 0.0
-    var previousTickTime: Double?
+    var previousTickTime: Double? = engine.currentTime
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         if resumeAnchor != nil, tick <= 3 {
