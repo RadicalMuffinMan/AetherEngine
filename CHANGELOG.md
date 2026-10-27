@@ -84,7 +84,6 @@ the public-API contract.
   Empty writes complete without occupying capacity, and nonpositive read lengths fail without
   consuming bytes. Current ingest callers already filter both cases, so this hardens the internal
   contract for future callers rather than changing existing playback.
-
 - **Supplemental decoder registration compiles against the stock Xcode 26.0/26.1 mobile SDKs (AE#900, thanks
   @jonluca).** `VTRegisterSupplementalVideoDecoderIfAvailable` first appears in the Xcode 26.2 mobile SDKs, so the
   two AV1/VP9 registration calls sit behind `compiler(>=6.2.3)` as an SDK proxy. Capability queries, software
