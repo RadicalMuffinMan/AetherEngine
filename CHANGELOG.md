@@ -12,6 +12,83 @@ the public-API contract.
 
 ### Added
 
+- **`EngineLog.structuredHandler` hands a host each line with its category and level (AE#897, thanks
+  @mschirrmeister).** A log viewer that files lines by subsystem had only the text and guessed the category from the
+  `[Prefix]` convention. The new handler gets the same redacted lines as `handler`, plus the `Category` the line was
+  written under and its `Level` (`.info`, since verbose lines still never reach a host). Additive: `handler` is
+  unchanged.
+
+- **Hosts can query presentation-backed first-frame evidence with `hasRenderedVideoFrame()` (AE#901, thanks @jonluca).**
+  Native playback reads the current layer after this load's readiness edge; software playback reads
+  the current renderer's non-dropped frame count. Unlike the load-scoped readiness latch, this does
+  not infer a local picture from an external player's readiness. A stopped or replaced session
+  cannot answer with an older asynchronous metrics result.
+
+### Changed
+
+- **Hardware deinterlace warm-up starts only when a source needs it (AE#877, thanks @jonluca).**
+  Engine construction and progressive software playback no longer start or wait for a throwaway Metal/VideoToolbox graph.
+  Interlaced auto-mode loads still share one process-wide warm-up. Same-title custom reloads
+  preserve a decoded progressive verdict; actual title switches reassess reopened metadata.
+  Background teardown carries both interlaced and progressive decisions to a retained-reader reload.
+
+### Fixed
+
+- **A retained paused session reapplies background policy after a seek or reload (AE#870 follow-up).**
+  Play received during a seek, or remote-HLS autoplay after a reload, could settle directly into
+  playing without the background decision owed by a normal resume. The decision now waits for the
+  operation to settle, then respects disabled background playback or software audio-only mode;
+  a seek or reload that stays paused keeps retention.
+
+- **A failed AV1 Dolby Vision frame copy no longer writes RPU metadata into the decoder's reference picture (AE#907,
+  thanks @jonluca).** If the copy that carries the RPU could not be made, the callback still set or cleared the RPU
+  keys on VideoToolbox's original buffer and its IOSurface. RPU updates now require an owned output; on a failed
+  copy the original frame is delivered unchanged. Follow-up to AE#876.
+
+- **Anamorphic snapshots fit their requested bounds, and HDR stills keep the displayed aspect (AE#905,
+  thanks @jonluca).**
+  Snapshot sizing now applies the source pixel aspect before enforcing both `maxSize` limits,
+  including fractional bounds. HDR tone mapping uses the same display dimensions as SDR and
+  Dolby Vision stills, instead of returning the coded aspect or upscaling a small source.
+
+- **A VP9 key frame retired by a seek no longer resizes the hardware session (AE#904, thanks @jonluca).** A parked
+  key frame from the pre-seek feed could rebuild the VideoToolbox session at its old size before the epoch check
+  rejected it, discarding the reference pictures the current feed needed; the next inter frame produced no image.
+  The epoch is now checked under the session lock before any resize. Follow-up to AE#878.
+
+- **A software playback clock stays stopped when first-frame arming overlaps a pause (AE#867, thanks
+  @jonluca).** The feeder's post-arm rate correction could restart the synchronizer after `pause()` stopped it
+  but before the host published its paused intent, leaving the clock running behind parked decode
+  loops and causing video to catch up rapidly on resume. The correction now runs on the main actor
+  with transport changes, ignores retired outputs and seek generations, and yields to newer clock
+  commands, including rebuffer pauses. Pending pauses and end-of-media tail playback are preserved.
+
+- **An audio tap consumer that falls behind is told where it lost audio (AE#864, thanks @qoli).** The tap stream
+  shed its oldest queued buffer when full, and the buffer received next was already queued, so it arrived without
+  `discontinuity` and a host read contiguous PCM across a gap of seconds. The queue now keeps what it holds, drops
+  what arrives while it is full, and flags the first buffer it takes after that. The architecture notes no longer
+  call the 12 s release window a bound on retained audio: the decoded tail of the current segment is held on top.
+- **24p Matroska video reaches AVPlayer on its exact frame grid (AE#886, thanks @akhanwav).** Matroska stores 1 ms
+  ticks, so a 23.976 fps track arrived as alternating 41 and 42 ms steps and the fMP4 kept them (timescale 16000).
+  At 59.94 Hz every second 23.976 frame sits exactly on a refresh boundary, so that half-millisecond rounding could
+  turn a steady 3:2 cadence into 3, 2, 2, 3 bursts. A VOD track on a time base of 0.1 ms or coarser whose rate is
+  exactly a standard one (23.976, 24, 29.97, 30, 47.952, 48, 59.94, 60) is now muxed on a timescale that holds one
+  frame in whole ticks (1/24000 with 1001 ticks a frame for 23.976), and every timestamp within one source tick of a
+  grid slot is put on that slot. Off-grid timestamps keep their own time, so variable-rate stretches pass through;
+  25 and 50 fps already fit 1 ms and are unchanged.
+- **A 24.000 fps source is programmed as 24 Hz, not 23.976 Hz (AE#884, thanks @akhanwav).** `FrameRateSnap` sent
+  the whole 23.5 to 24.05 window to 23.976, so Match Frame Rate ran 24p content one frame in 1001 fast and the
+  panel repeated a frame about every 42 s. A probe within 0.005 of 24.000 now snaps to 24; a Matroska track with
+  DefaultDuration probes as an exact 24/1 or 24000/1001, so 23.976 sources and noisier probes keep 23.976.
+- **The internal HLS byte FIFO defensively rejects operations that could look like EOF (AE#875, thanks @jonluca).**
+  Empty writes complete without occupying capacity, and nonpositive read lengths fail without
+  consuming bytes. Current ingest callers already filter both cases, so this hardens the internal
+  contract for future callers rather than changing existing playback.
+
+## [7.48.0] - 2026-10-26
+
+### Added
+
 - **VP9 can use VideoToolbox hardware decoding on the software playback host (AE#878, thanks @jonluca).** WebM streams
   synthesize the required `vpcC` record from probed parameters. The hardware candidate accepts
   8-bit profile 0 and 10-bit profile 2 with 4:2:0 chroma, requires a hardware session, and falls
@@ -159,7 +236,13 @@ the public-API contract.
   saving the resume point at that moment stored 0. A completion before readiness is no longer a landing; the
   item's first roll releases the hold.
 
-- **A superseded still decode no longer publishes after a newer cache hit.** Thumbnail, preview
+- **The Atmos output activator rides through a short pause on HDMI (AE#848, thanks @nulltuple).**
+  A host pause stopped the silent Atmos stream at once, so a receiver that needs it dropped its
+  Dolby Atmos badge on every pause and scrub and re-locked on resume. It now keeps playing for 60 s
+  and pauses only if the host is still paused then. Leaving APAC, leaving an all-HDMI route (AE#834)
+  or tearing the session down still releases it immediately.
+
+- **A superseded still decode no longer publishes after a newer cache hit (AE#906, thanks @jonluca).** Thumbnail, preview
   and snapshot requests retire older work before returning a cached image or yielding to playback;
   a resident approximation cache hit also retires an older refined decode.
   Cancelling the awaiting Task also cancels its decode; late results return nil and cannot populate
@@ -317,6 +400,20 @@ the public-API contract.
   MacBook Air M1 SDR panel a Dolby Vision P8.1 master with and without `SUPPLEMENTAL-CODECS`, a
   High-tier 3832x1600 PQ master and an audio switch to AC-3 on each were all accepted. The item still
   falls back, later titles are still offered the master, and the log now says so. tvOS is unchanged.
+- **A software live session reports its edge rebuffer as `.rebuffering`.** When the source paused, the
+  live feeder parked the synchronizer to refill but kept that to itself: `playbackPhase` stayed
+  `.playing` over a standing picture until the reader's own stall timeout promoted the source to
+  `.stalled`, 20 s later. A host app watching the clock reloaded the session after 2 s, and each fresh
+  join landed the lead behind the same frozen burst, so the viewer saw the last four seconds again,
+  three times over, before the feed came back. `SoftwarePlaybackHost.isRebuffering` now follows the
+  pumps' hold (the live feeder's dry ring and the on-demand loop's exhausted audio lead) and the
+  engine folds it into `isBuffering`, as it does the audio host's wait.
+- **A software live session catches up after a pause whose backlog arrives at once.** A source that
+  resumes by handing over everything it missed left the picture the length of the pause behind the
+  newest media, and nothing on that path ever caught up. The feeder now watches a resume with the
+  join's own rule and, once the backlog has landed, moves the picture up to the join lead behind the
+  newest media through the engine's live rejoin seek; a source that skipped what it missed is left
+  where it resumed.
 
 - **A seek no longer waits on a segment pump running at the efficiency class.** A VOD pump far
   enough ahead of playback relaxes to `.utility` (AE#286), and a seek's restart stops it and waits

@@ -561,12 +561,12 @@ final class FrameDecodeContext: @unchecked Sendable {
                     av_frame_free(&transferredFrame)
                 }
             }
+            let sar = resolvedSAR(frame: f)
             let width = mode.usesTargetWidth
                 ? targetWidth
-                : Self.clampedWidth(frame: f, maxSize: maxSize)
+                : Self.clampedWidth(frame: f, sar: sar, maxSize: maxSize)
             #if DolbyVisionStillReshaping
             if isDolbyVisionNoBaseLayer {
-                let sar = resolvedSAR(frame: f)
                 if let img = DolbyVisionStillConverter.makeImage(frame: f, targetWidth: width, sar: sar) {
                     return img
                 }
@@ -575,7 +575,7 @@ final class FrameDecodeContext: @unchecked Sendable {
             #endif
             if isHDR {
                 var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase,
-                                                 highQuality: mode.isFrameAccurate)
+                                                 sar: sar, highQuality: mode.isFrameAccurate)
                 if toned != nil {
                     defer { av_frame_free(&toned) }
                     if let img = Self.cgImageFromRGBAFrame(toned!) { return img }
@@ -694,15 +694,21 @@ final class FrameDecodeContext: @unchecked Sendable {
         return (dstW, dstH)
     }
 
-    /// Snapshot output width: native width, optionally capped to `maxSize` (aspect-preserved).
-    private static func clampedWidth(frame: UnsafeMutablePointer<AVFrame>, maxSize: CGSize?) -> Int {
+    /// Snapshot bounds apply to square-pixel output, after the source SAR corrects its shape.
+    private static func clampedWidth(frame: UnsafeMutablePointer<AVFrame>, sar: AVRational,
+                                     maxSize: CGSize?) -> Int {
         let nativeW = Int(frame.pointee.width)
         let nativeH = Int(frame.pointee.height)
         guard let maxSize, maxSize.width > 0, maxSize.height > 0, nativeW > 0, nativeH > 0 else {
             return nativeW
         }
-        let scale = min(maxSize.width / CGFloat(nativeW), maxSize.height / CGFloat(nativeH), 1.0)
-        return max(1, Int((CGFloat(nativeW) * scale).rounded()))
+        let displayHeight = CGFloat(nativeH) * CGFloat(sar.den) / CGFloat(sar.num)
+        // Whole output pixels must fit both limits, including fractional CGSize bounds.
+        // Keep the width bound in pixels: dividing by nativeW and multiplying back can
+        // turn an exactly fitting integer into the preceding representable value.
+        let heightLimitedWidth = maxSize.height.rounded(.down) * CGFloat(nativeW) / displayHeight
+        let width = min(CGFloat(nativeW), maxSize.width.rounded(.down), heightLimitedWidth)
+        return max(1, Int(width.rounded(.down)))
     }
 
     /// Copy an RGBA AVFrame (e.g. tone-mapper output) into an owned-buffer CGImage.

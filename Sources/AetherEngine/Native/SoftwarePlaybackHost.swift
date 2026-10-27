@@ -182,6 +182,19 @@ final class SoftwarePlaybackHost {
     /// publishes this as `clock.sourceTime` so the subtitle overlay drainer scans the
     /// packet store on the right axis.
     @Published private(set) var sourceClockSeconds: Double = 0
+    /// The pump has paused the synchronizer to refill: the live feeder at a dry ring (#107, a
+    /// source that paused or delivers below real time) or the on-demand loop with its audio lead
+    /// exhausted. The engine folds it into `isBuffering`, so `playbackPhase` reads `.rebuffering`
+    /// from the moment the clock stops, as it does on the AVPlayer-backed hosts; before, the phase
+    /// stayed `.playing` over a standing picture until the reader's own stall timeout promoted it
+    /// to `.stalled`, and a host app watching the clock had nothing to tell a paused source from a
+    /// dead session.
+    @Published private(set) var isRebuffering: Bool = false
+    /// A position on the session axis the live feeder wants the picture moved up to after an edge
+    /// rebuffer resumed behind a backlog the source handed over at once (the join lead behind the
+    /// newest media, decided by `SoftwareLiveJoinPolicy` as the join itself was). The engine seeks
+    /// there as its own rejoin; the host does not move the cursor itself.
+    let liveResumeCatchUp = PassthroughSubject<Double, Never>()
     @Published private(set) var duration: Double = 0
     @Published private(set) var rate: Float = 0
     /// #376: carries the classification with the message, so the engine can publish both.
@@ -313,6 +326,15 @@ final class SoftwarePlaybackHost {
         liveEdgeLock.lock()
         defer { liveEdgeLock.unlock() }
         return (sessionStartPts.isFinite ? sessionStartPts : 0) + seconds
+    }
+
+    /// The live feeder's inverse of `sourceSeconds(forSession:)`: a source PTS on the session axis,
+    /// nil before the first packet has anchored the session.
+    func liveSessionSeconds(forSource pts: Double) -> Double? {
+        liveEdgeLock.lock()
+        defer { liveEdgeLock.unlock() }
+        guard isLive, sessionStartPts.isFinite, pts.isFinite else { return nil }
+        return max(0, pts - sessionStartPts)
     }
 
     private let demuxQueue = DispatchQueue(label: "engine.sw.demux", qos: .userInitiated)
@@ -1681,7 +1703,45 @@ final class SoftwarePlaybackHost {
     }
 
     var clockRateForTesting: Float? { audioOutput?.rate }
+
+    func installClockOutputForTesting(_ output: AudioOutput, armed: Bool = false) {
+        audioOutput = output
+        clockArmed = armed
+    }
+
+    func finishClockOutputForTesting() {
+        didReachEnd = true
+        isPlaying = false
+    }
     #endif
+
+    /// The latch is synchronous for the feeder; transport reconciliation shares play/pause's actor.
+    func makeClockArmCallback(audioOutput aOut: AudioOutput?) -> @Sendable () -> Void {
+        { [weak self] in
+            guard let self, let aOut else { return }
+            let generation = self.seekGeneration
+            let revision = aOut.clockCommandRevision
+            self.clockArmed = true
+            // A transport change before arming still needs correction, but the feeder must not
+            // restart the clock between pause() stopping it and publishing isPlaying=false.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.audioOutput === aOut,
+                      self.admitsRead(generation: generation) else { return }
+                // EOF may drain its queued audio tail, but an explicit pre-arm pause still wins.
+                guard self.pausedByHost || (!self.didParkClockAtEnd && !self.didReachEnd) else { return }
+                if !self.isPlaying || self.pausedBeforeFirstFrame {
+                    // A pending preroll can own a future start even while the clock reads zero.
+                    aOut.setRate(0, ifRevision: revision)
+                } else if let rate = PausedFirstFrame.rateCorrectionAtArm(
+                    transportPlaying: true, pausedBeforeFirstFrame: false,
+                    synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) {
+                    // A later rebuffer pause, seek or rate command owns the output now. The
+                    // comparison and correction are atomic with those commands inside AudioOutput.
+                    aOut.setRate(rate, ifRevision: revision)
+                }
+            }
+        }
+    }
 
     /// AE#549: re-anchor a master clock that stopped without a pause of ours, where it stands.
     ///
@@ -2295,6 +2355,7 @@ final class SoftwarePlaybackHost {
         stopRequested = true
         pausedBeforeFirstFrame = false
         isPlaying = false
+        isRebuffering = false
         seekInFlight = false
         // A teardown inside a seek's window would otherwise leave it open on this instance.
         noteSeekSettled(seekGeneration)
@@ -2368,6 +2429,26 @@ final class SoftwarePlaybackHost {
         let vTbSec = videoTimeBaseSeconds
         let aTbSec = audioTimeBaseSeconds
         let liveSession = isLive
+        // Pump-thread side of `isRebuffering`: hops to the main actor and writes only on a change.
+        let noteRebuffering: @Sendable (Bool) -> Void = { [weak self] rebuffering in
+            Task { @MainActor [weak self] in
+                guard let self, self.isRebuffering != rebuffering else { return }
+                self.isRebuffering = rebuffering
+            }
+        }
+        // The feeder's resume re-placement, handed to the engine on the session axis: the engine's
+        // own live seek carries it through the tickets, the subtitle anchor and the clock like any
+        // other. The feeder states the target on the source axis; the mapping is `sourceSeconds
+        // (forSession:)` inverted, under the same lock.
+        // Carries the seek generation it was decided under: a seek that lands in between is the
+        // viewer's choice of position, and a catch-up decided before it must not undo it.
+        let noteLiveResumeCatchUp: @Sendable (Double, UInt64) -> Void = { [weak self] targetPts, generation in
+            Task { @MainActor [weak self] in
+                guard let self, !self.stopRequested, self.seekGeneration == generation,
+                      let target = self.liveSessionSeconds(forSource: targetPts) else { return }
+                self.liveResumeCatchUp.send(target)
+            }
+        }
         let noteEdge: @Sendable (Double) -> Void = { [weak self] ptsSec in
             guard let self, ptsSec.isFinite else { return }
             self.liveEdgeLock.lock()
@@ -2431,16 +2512,7 @@ final class SoftwarePlaybackHost {
         let getClockArmed: @Sendable () -> Bool = { [weak self] in
             self?.clockArmed ?? true
         }
-        let setClockArmed: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            self.clockArmed = true
-            // Sodalite#104 round 4: a pause() or play() between this arm reading its rate and the line
-            // above found no clock to act on.
-            guard let aOut, let rate = PausedFirstFrame.rateCorrectionAtArm(
-                transportPlaying: self.isPlaying, pausedBeforeFirstFrame: self.pausedBeforeFirstFrame,
-                synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) else { return }
-            if rate == 0 { aOut.pause() } else { aOut.setRate(rate) }
-        }
+        let setClockArmed = makeClockArmCallback(audioOutput: aOut)
         let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in
             self?.seekGeneration ?? 0
         }
@@ -2567,7 +2639,9 @@ final class SoftwarePlaybackHost {
                     markClockArmed: setClockArmed,
                     onEnd: onEnd,
                     audioTapSink: getAudioTapSink,
-                    noteDecodeGeneration: noteDecodeGeneration
+                    noteDecodeGeneration: noteDecodeGeneration,
+                    noteRebuffering: noteRebuffering,
+                    noteLiveResumeCatchUp: noteLiveResumeCatchUp
                 )
             }
             return
@@ -2615,7 +2689,8 @@ final class SoftwarePlaybackHost {
                 splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
                 subtitleTapSink: getSubtitleTapSink,
                 recordingTap: recordingTap,
-                playedMedia: playedMediaLedger
+                playedMedia: playedMediaLedger,
+                noteRebuffering: noteRebuffering
             )
         }
     }
@@ -2845,7 +2920,9 @@ final class SoftwarePlaybackHost {
         markClockArmed: @Sendable () -> Void,
         onEnd: @Sendable () -> Void,
         audioTapSink: @Sendable () -> ((@Sendable (CMSampleBuffer) -> Void)?),
-        noteDecodeGeneration: @Sendable () -> Void
+        noteDecodeGeneration: @Sendable () -> Void,
+        noteRebuffering: @Sendable (Bool) -> Void = { _ in },
+        noteLiveResumeCatchUp: @Sendable (Double, UInt64) -> Void = { _, _ in }
     ) {
         // The join's start is placed once, before the first packet is fed; a seek before then is
         // the viewer's own choice of position and retires it.
@@ -2854,6 +2931,10 @@ final class SoftwarePlaybackHost {
         // while that is pending: when the join was decided.
         var liveJoinAlignSince: TimeInterval?
         var liveJoinAlignLead: Double?
+        // After an edge rebuffer resumes, watches what the source hands over on its way back and
+        // moves the picture up behind it once (see the `.none` arm below). Nil when nothing is
+        // being watched.
+        var resumePlacement: SoftwareLiveJoinPolicy? = nil
         // Audio look-ahead pump (#107 audio chopping): feed audio packets ahead of the
         // combined cursor so the audio renderer holds AudioLookaheadPolicy.targetLeadSeconds
         // of decoded audio regardless of video decode pace. Without it audio lead is capped
@@ -2943,6 +3024,8 @@ final class SoftwarePlaybackHost {
                 ) {
                 case .pauseForRebuffer:
                     rebuffering = true
+                    noteRebuffering(true)
+                    resumePlacement = nil
                     let resumesAt = cushion.map { ", resumes at \(String(format: "%.1f", $0))s ahead" } ?? ""
                     EngineLog.emit(
                         "[SWHost] live source underrun: pausing clock to rebuffer "
@@ -2952,13 +3035,46 @@ final class SoftwarePlaybackHost {
                     aOut.pause()
                 case .resume:
                     rebuffering = false
+                    noteRebuffering(false)
                     EngineLog.emit(
                         "[SWHost] rebuffered: resuming clock (lead=\(String(format: "%.2f", lead))s "
                         + "ahead=\(String(format: "%.2f", ahead))s)",
                         category: .swPlayback
                     )
                     aOut.setRate(currentRate())
+                    // A source that paused comes back one of two ways: it skips what it missed and
+                    // continues near real time, or it hands the whole backlog over at once. The
+                    // second leaves the picture the length of the pause behind the newest media,
+                    // and nothing on this path ever catches up. So the join's own rule watches the
+                    // resume the way it watched the connect burst, and moves the picture up once
+                    // the backlog has landed: `.fromStart` is a source that skipped (nothing worth
+                    // moving for), `.place` the lead behind what it handed over.
+                    resumePlacement = SoftwareLiveJoinPolicy()
                 case .none:
+                    if var placement = resumePlacement, newest.isFinite, clock.isFinite {
+                        let holdback = liveHoldback()
+                        switch placement.observe(firstPts: clock, newestPts: newest,
+                                                 at: ProcessInfo.processInfo.systemUptime,
+                                                 leadSeconds: holdback.joinLeadSeconds) {
+                        case nil:
+                            resumePlacement = placement
+                        case .fromStart?:
+                            resumePlacement = nil
+                        case .place(let targetPts)?:
+                            resumePlacement = nil
+                            // A segmented source resumes up to its cushion plus one unit behind on its
+                            // own, which passes the join's threshold and is still the edge.
+                            guard newest - clock >= holdback.resumeCatchUpSpanSeconds else { break }
+                            EngineLog.emit(
+                                "[SWHost] live resume re-placed \(String(format: "%.1f", holdback.joinLeadSeconds))s "
+                                + "behind the newest media: the source handed over "
+                                + "\(String(format: "%.1f", newest - clock))s at once after the pause "
+                                + "(target pts=\(String(format: "%.2f", targetPts)))",
+                                category: .swPlayback
+                            )
+                            noteLiveResumeCatchUp(targetPts, feederGeneration)
+                        }
+                    }
                     // Decode-lag visibility for device logs: only after lead was once
                     // healthy (startup fill must not trip it), rate-limited to one per 5 s.
                     if lead >= 0.5 { hadLead = true }
@@ -2998,7 +3114,9 @@ final class SoftwarePlaybackHost {
                 feederGeneration = generation
                 preArmPacketsFed = 0
                 hadLead = false
+                if rebuffering { noteRebuffering(false) }
                 rebuffering = false
+                resumePlacement = nil
                 liveJoinPending = false
                 liveJoinAlignSince = nil
             }
@@ -3283,7 +3401,8 @@ final class SoftwarePlaybackHost {
         splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
         subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
         recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
-        playedMedia: PlayedMediaLedger? = nil
+        playedMedia: PlayedMediaLedger? = nil,
+        noteRebuffering: @Sendable (Bool) -> Void = { _ in }
     ) {
         // Clock arming: one-shot latch (seekClock is not idempotent -- re-calling snaps clock back to initialClockTime). Shared with host so a seek before first audio isn't overridden by a late re-arm.
 
@@ -3401,6 +3520,7 @@ final class SoftwarePlaybackHost {
         func releaseRebufferHold(_ why: String) {
             guard rebuffering else { return }
             rebuffering = false
+            noteRebuffering(false)
             EngineLog.emit("[SWHost] releasing rebuffer hold: \(why)", category: .swPlayback)
             audioOutput?.setRate(currentRate())
         }
@@ -3504,6 +3624,7 @@ final class SoftwarePlaybackHost {
             ) {
             case .pauseForRebuffer:
                 rebuffering = true
+                noteRebuffering(true)
                 EngineLog.emit(
                     "[SWHost] audio lead exhausted (\(String(format: "%.2f", lead))s); "
                     + "pausing clock for rebuffer",
@@ -3512,6 +3633,7 @@ final class SoftwarePlaybackHost {
                 aOut.pause()
             case .resume:
                 rebuffering = false
+                noteRebuffering(false)
                 EngineLog.emit(
                     "[SWHost] rebuffered to \(String(format: "%.2f", lead))s audio lead; "
                     + "resuming clock",
@@ -3578,6 +3700,7 @@ final class SoftwarePlaybackHost {
                     lastEnqueuedAudioPtsSec = .nan
                     diagAudioPtsSec = .nan
                     diagAudioPtsGeneration = gen
+                    if rebuffering { noteRebuffering(false) }
                     rebuffering = false
                     // The lead is zero again after a seek, so the latch has to earn itself back:
                     // keeping it set pauses the clock for a rebuffer on the first post-seek check.

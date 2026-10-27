@@ -58,6 +58,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let nalFramingLatch: NALFramingLatch?
         /// Forwarded to `MP4SegmentMuxer.VideoConfig.stereo`.
         let stereo: StereoVideoSignal?
+        /// AE#886: the exact frame grid of a constant-rate track on a coarse time base. Non-nil gives
+        /// the muxer the grid's time base and puts every on-grid frame onto its slot.
+        let frameGrid: CFRFrameGrid?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
@@ -70,9 +73,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
             nalFramingOverride: VideoNALFraming? = nil,
             convertsAnnexBSamples: Bool = false,
             nalFramingLatch: NALFramingLatch? = nil,
-            stereo: StereoVideoSignal? = nil
+            stereo: StereoVideoSignal? = nil,
+            frameGrid: CFRFrameGrid? = nil
         ) {
             self.stereo = stereo
+            self.frameGrid = frameGrid
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.codecTagOverride = codecTagOverride
@@ -177,6 +182,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Source video TB, carried to rescale timestamps (avformat_write_header rewrites the muxer's TB).
     private let sourceVideoTimeBase: AVRational
+    /// AE#886: `videoConfig.frameGrid` on VOD, nil on live. Pump-thread counters for the finish line.
+    private let frameGrid: CFRFrameGrid?
+    private var griddedVideoPackets = 0
+    private var offGridVideoPackets = 0
     private let videoConfig: StreamConfig
     private let audioConfig: AudioConfig?
 
@@ -1583,6 +1592,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
+        self.frameGrid = isLive ? nil : video.frameGrid
         self.targetSegmentDurationSeconds = targetSegmentDurationSeconds
         self.segmentBoundaries = segmentBoundaries
         self.planAnchorVideoPts = planAnchorVideoPts
@@ -2180,7 +2190,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         let muxerVideo = MP4SegmentMuxer.VideoConfig(
             codecpar: videoCodecpar,
-            timeBase: videoConfig.timeBase,
+            timeBase: frameGrid?.outputTimeBase ?? videoConfig.timeBase,
             codecTagOverride: videoConfig.codecTagOverride,
             // Ad creative carries its own signaling; don't force the program's overrides onto it. A same-PID
             // parameter-set change is still the same program, so it keeps them (isAdCreative false).
@@ -4794,7 +4804,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
             "[HLSSegmentProducer] pump finished: reason=\(exitReason) "
             + "packetsRead=\(packetsRead) "
             + "packetsWritten=\(packetsWrittenCount) lastError=\(lastError) "
-            + "elapsed=\(String(format: "%.0f", elapsedMs))ms cacheCount=\(cache.count)",
+            + "elapsed=\(String(format: "%.0f", elapsedMs))ms cacheCount=\(cache.count)"
+            + (frameGrid.map { " frameGrid=1/\($0.outputTimeBase.den)x\($0.frameTicks) "
+                + "onGrid=\(griddedVideoPackets) offGrid=\(offGridVideoPackets)" } ?? ""),
             category: .session
         )
 
@@ -4976,7 +4988,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let frameIsKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
         let frameSegmentIndex = currentMuxerSegmentIndex
 
+        // AE#886: decided on the source time base, before the rescale rounds it away.
+        let gridded = muxer.muxerVideoTimeBase.den == frameGrid?.outputTimeBase.den
+            ? frameGrid?.place(pts: packet.pointee.pts, dts: packet.pointee.dts,
+                               duration: packet.pointee.duration, shift: videoShiftPts)
+            : nil
         av_packet_rescale_ts(packet, sourceVideoTimeBase, muxer.muxerVideoTimeBase)
+        if let gridded {
+            packet.pointee.pts = gridded.pts
+            packet.pointee.dts = gridded.dts
+            packet.pointee.duration = gridded.duration
+            griddedVideoPackets += 1
+        } else if frameGrid != nil {
+            offGridVideoPackets += 1
+        }
         let write = muxer.writePacket(packet)
         if write.rc < 0, !loggedVideoWriteFailure {
             // #369: this rc used to be dropped on the floor; the field failure (movenc rejecting a
