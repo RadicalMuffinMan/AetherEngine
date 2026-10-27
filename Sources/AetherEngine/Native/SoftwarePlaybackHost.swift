@@ -1703,7 +1703,45 @@ final class SoftwarePlaybackHost {
     }
 
     var clockRateForTesting: Float? { audioOutput?.rate }
+
+    func installClockOutputForTesting(_ output: AudioOutput, armed: Bool = false) {
+        audioOutput = output
+        clockArmed = armed
+    }
+
+    func finishClockOutputForTesting() {
+        didReachEnd = true
+        isPlaying = false
+    }
     #endif
+
+    /// The latch is synchronous for the feeder; transport reconciliation shares play/pause's actor.
+    func makeClockArmCallback(audioOutput aOut: AudioOutput?) -> @Sendable () -> Void {
+        { [weak self] in
+            guard let self, let aOut else { return }
+            let generation = self.seekGeneration
+            let revision = aOut.clockCommandRevision
+            self.clockArmed = true
+            // A transport change before arming still needs correction, but the feeder must not
+            // restart the clock between pause() stopping it and publishing isPlaying=false.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.audioOutput === aOut,
+                      self.admitsRead(generation: generation) else { return }
+                // EOF may drain its queued audio tail, but an explicit pre-arm pause still wins.
+                guard self.pausedByHost || (!self.didParkClockAtEnd && !self.didReachEnd) else { return }
+                if !self.isPlaying || self.pausedBeforeFirstFrame {
+                    // A pending preroll can own a future start even while the clock reads zero.
+                    aOut.setRate(0, ifRevision: revision)
+                } else if let rate = PausedFirstFrame.rateCorrectionAtArm(
+                    transportPlaying: true, pausedBeforeFirstFrame: false,
+                    synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) {
+                    // A later rebuffer pause, seek or rate command owns the output now. The
+                    // comparison and correction are atomic with those commands inside AudioOutput.
+                    aOut.setRate(rate, ifRevision: revision)
+                }
+            }
+        }
+    }
 
     /// AE#549: re-anchor a master clock that stopped without a pause of ours, where it stands.
     ///
@@ -2474,16 +2512,7 @@ final class SoftwarePlaybackHost {
         let getClockArmed: @Sendable () -> Bool = { [weak self] in
             self?.clockArmed ?? true
         }
-        let setClockArmed: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            self.clockArmed = true
-            // Sodalite#104 round 4: a pause() or play() between this arm reading its rate and the line
-            // above found no clock to act on.
-            guard let aOut, let rate = PausedFirstFrame.rateCorrectionAtArm(
-                transportPlaying: self.isPlaying, pausedBeforeFirstFrame: self.pausedBeforeFirstFrame,
-                synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) else { return }
-            if rate == 0 { aOut.pause() } else { aOut.setRate(rate) }
-        }
+        let setClockArmed = makeClockArmCallback(audioOutput: aOut)
         let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in
             self?.seekGeneration ?? 0
         }
