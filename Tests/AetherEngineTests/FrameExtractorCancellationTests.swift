@@ -54,7 +54,8 @@ struct FrameExtractorCancellationTests {
     @Test("A resident cache hit supersedes an older refined decode")
     func residentCacheHitSupersedesRefinement() async throws {
         let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data(), maxReadSize: 1_024)
-        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-cancellation")
+        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-cancellation",
+                                       residentBudget: .seconds(60))
         let cached = try #require(await extractor.residentPreview(
             rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false }))
         reader.arm()
@@ -73,7 +74,8 @@ struct FrameExtractorCancellationTests {
     @Test("Rejected resident requests leave another caller's valid refinement alone")
     func rejectedResidentRequestsDoNotSupersedeRefinement() async throws {
         let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data(), maxReadSize: 1_024)
-        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-guards")
+        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts", identity: "resident-guards",
+                                       residentBudget: .seconds(60))
         _ = try #require(await extractor.residentPreview(
             rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false }))
         reader.arm()

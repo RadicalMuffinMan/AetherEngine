@@ -30,6 +30,9 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// (main) title. Threaded into `Demuxer.open` so a still follows the currently-selected disc title
     /// instead of always decoding the default one (AE#105).
     private let selectTitleID: Int?
+    /// Wall-clock budget of one resident or bounded decode. Tests that hold the source on an I/O
+    /// gate widen it, so a slow runner cannot turn a deliberate wait into a deadline miss.
+    private let residentBudget: Duration
     /// Owned only during a controlled one-shot extraction. The ordinary URL and
     /// custom-reader paths retain their existing ownership rules.
     private var boundedReader: IOReader?
@@ -155,9 +158,11 @@ final class FrameDecodeContext: @unchecked Sendable {
         self.formatHint = nil
         self.selectTitleID = selectTitleID
         self.allowsHardwareDecode = allowsHardwareDecode
+        self.residentBudget = .milliseconds(750)
     }
 
-    init(reader: IOReader, formatHint: String?, allowsHardwareDecode: Bool = false) {
+    init(reader: IOReader, formatHint: String?, allowsHardwareDecode: Bool = false,
+         residentBudget: Duration = .milliseconds(750)) {
         // Placeholder; unused when reader != nil (openInternal opens the reader).
         self.url = URL(string: "aether-custom://frame-extractor")!
         self.openedHTTPHeaders = [:]
@@ -170,6 +175,7 @@ final class FrameDecodeContext: @unchecked Sendable {
         // public custom-reader/network caller on the issue #27 software default. The 2026-09-02
         // device trace measured 30 software context opens in 20 seconds over resident H.264 bytes.
         self.allowsHardwareDecode = allowsHardwareDecode || reader is DataIOReader
+        self.residentBudget = residentBudget
     }
 
     deinit {
@@ -514,7 +520,7 @@ final class FrameDecodeContext: @unchecked Sendable {
             guard let ticks = Demuxer.ticks(forSeconds: max(0, offsetSeconds), timeBase: timeBase) else { return nil }
             offsetTicks = ticks
         }
-        let deadline = residentDeadline ?? ContinuousClock.now.advanced(by: .milliseconds(750))
+        let deadline = residentDeadline ?? ContinuousClock.now.advanced(by: residentBudget)
         var packetCount = 0
 
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()

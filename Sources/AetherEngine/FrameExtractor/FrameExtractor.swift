@@ -135,8 +135,10 @@ public actor FrameExtractor {
                   yieldWhile: yieldWhile)
     }
 
-    init(residentReader: IOReader, formatHint: String, identity: String) {
-        self.init(context: FrameDecodeContext(reader: residentReader, formatHint: formatHint),
+    init(residentReader: IOReader, formatHint: String, identity: String,
+         residentBudget: Duration = .milliseconds(750)) {
+        self.init(context: FrameDecodeContext(reader: residentReader, formatHint: formatHint,
+                                              residentBudget: residentBudget),
                   yieldWhile: nil, residentIdentity: identity)
     }
 
