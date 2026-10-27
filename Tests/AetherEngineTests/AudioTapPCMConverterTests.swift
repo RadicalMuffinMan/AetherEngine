@@ -118,6 +118,7 @@ final class AudioTapPCMConverterTests: XCTestCase {
                 let out = AudioTapPCMConverter().convert(
                     try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000, channels: channels,
                                    layoutTag: tag, values: values))
+                XCTAssertTrue(out.allSatisfy { $0.channels == .downmix })
                 XCTAssertGreaterThan(peak(out), 0.05, "\(channels)ch: channel \(ch) missing from the downmix")
             }
         }
@@ -142,6 +143,71 @@ final class AudioTapPCMConverterTests: XCTestCase {
                                               layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 6))
         XCTAssertFalse(out.isEmpty)
         XCTAssertGreaterThan(peak(out), 0.05)
+    }
+
+    // MARK: - Dialogue channel (#908)
+
+    /// MPEG_5_1_A is FL FR FC LFE BL BR, AudioDecoder's 6-channel order.
+    private static let fiveOne: AudioChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A
+
+    func testDialogueTakesTheCentreAloneAndIgnoresTheRestOfTheMix() throws {
+        let conv = AudioTapPCMConverter(channels: .dialogue)
+        let out = conv.convert(try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000, channels: 6,
+                                              layoutTag: Self.fiveOne,
+                                              values: [0.5, 0.5, 0, 0.5, 0.5, 0.5]))
+        XCTAssertFalse(out.isEmpty)
+        XCTAssertTrue(out.allSatisfy { $0.channels == .dialogue })
+        XCTAssertLessThan(peak(out), 0.001, "score and effects leaked into the dialogue tap")
+    }
+
+    func testDialogueCarriesTheCentreAtUnity() throws {
+        let conv = AudioTapPCMConverter(channels: .dialogue)
+        let out = conv.convert(try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000, channels: 6,
+                                              layoutTag: Self.fiveOne,
+                                              values: [0, 0, 0.25, 0, 0, 0]))
+        XCTAssertEqual(peak(out), 0.25, accuracy: 0.01)
+    }
+
+    func testDownmixInstallStillMixesEveryChannel() throws {
+        let conv = AudioTapPCMConverter()
+        let out = conv.convert(try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000, channels: 6,
+                                              layoutTag: Self.fiveOne,
+                                              values: [0.5, 0.5, 0, 0.5, 0.5, 0.5]))
+        XCTAssertTrue(out.allSatisfy { $0.channels == .downmix })
+        XCTAssertGreaterThan(peak(out), 0.05)
+    }
+
+    /// Every multichannel layout AudioDecoder emits that has a centre gets it picked: 4.0 to 7.1.
+    func testDialogueFindsTheCentreInEveryDecoderLayoutThatHasOne() throws {
+        for channels: UInt32 in 4...8 {
+            var values = [Float](repeating: 0, count: Int(channels))
+            values[2] = 0.25   // FC is index 2 in every FFmpeg default order from 4.0 up
+            let conv = AudioTapPCMConverter(channels: .dialogue)
+            let out = conv.convert(try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000,
+                                                  channels: channels,
+                                                  layoutTag: audioChannelLayoutTag(for: Int32(channels)),
+                                                  values: values))
+            XCTAssertTrue(out.allSatisfy { $0.channels == .dialogue }, "\(channels)ch")
+            XCTAssertEqual(peak(out), 0.25, accuracy: 0.01, "\(channels)ch")
+        }
+    }
+
+    /// No centre to take: mono, stereo, 2.1 and a discrete layout fall back to the downmix and say
+    /// so, with signal. (A description with no layout at all gets AudioDecoder's own order for its
+    /// channel count, which from 4 channels up has a centre.)
+    func testDialogueFallsBackToTheDownmixWithoutACentre() throws {
+        let cases: [(UInt32, AudioChannelLayoutTag?)] = [
+            (1, kAudioChannelLayoutTag_Mono), (2, kAudioChannelLayoutTag_Stereo),
+            (3, kAudioChannelLayoutTag_WAVE_2_1), (6, kAudioChannelLayoutTag_DiscreteInOrder | 6),
+        ]
+        for (channels, tag) in cases {
+            let conv = AudioTapPCMConverter(channels: .dialogue)
+            let out = conv.convert(try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000,
+                                                  channels: channels, layoutTag: tag))
+            XCTAssertFalse(out.isEmpty, "\(channels)ch \(String(describing: tag))")
+            XCTAssertTrue(out.allSatisfy { $0.channels == .downmix }, "\(channels)ch \(String(describing: tag))")
+            XCTAssertGreaterThan(peak(out), 0.05, "\(channels)ch \(String(describing: tag))")
+        }
     }
 
     /// The byte copy assumes packed interleaved Float32; anything else is skipped, not misread.

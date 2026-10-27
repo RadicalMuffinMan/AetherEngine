@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **The audio tap can deliver the dialogue channel instead of a full downmix (AE#908, thanks @l984-451).**
+  `installAudioTap(channels: .dialogue)` folds the mono output from the front-centre channel alone, where a 5.1 or 7.1
+  mix carries its dialogue, so a speech recognizer is no longer fed the score and effects of every other channel. The
+  output format is unchanged. A source without a centre falls back to the downmix, and the new
+  `AudioTapBuffer.channels` says which one a buffer carries. Additive: `installAudioTap()` keeps its behaviour.
+
 - **`EngineLog.structuredHandler` hands a host each line with its category and level (AE#897, thanks
   @mschirrmeister).** A log viewer that files lines by subsystem had only the text and guessed the category from the
   `[Prefix]` convention. The new handler gets the same redacted lines as `handler`, plus the `Category` the line was
