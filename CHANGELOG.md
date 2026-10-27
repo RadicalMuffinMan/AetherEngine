@@ -34,6 +34,11 @@ the public-API contract.
 
 ### Fixed
 
+- **A VP9 key frame retired by a seek no longer resizes the hardware session (AE#904, thanks @jonluca).** A parked
+  key frame from the pre-seek feed could rebuild the VideoToolbox session at its old size before the epoch check
+  rejected it, discarding the reference pictures the current feed needed; the next inter frame produced no image.
+  The epoch is now checked under the session lock before any resize. Follow-up to AE#878.
+
 - **A software playback clock stays stopped when first-frame arming overlaps a pause (AE#867, thanks
   @jonluca).** The feeder's post-arm rate correction could restart the synchronizer after `pause()` stopped it
   but before the host published its paused intent, leaving the clock running behind parked decode
@@ -73,7 +78,6 @@ the public-API contract.
   back to libavcodec if registration, configuration or session creation fails. Decoder diagnostics
   report the implementation that actually opened. A key frame that changes the coded size rebuilds the
   session at the new size; a session built for the old one rejects every frame after the switch.
-  A packet retired by a seek cannot resize that session and discard the current reference pictures.
 
 - **Hosts can own renderer audio-session activation (AE#872, thanks @jonluca).**
   `rendererAudioSessionActivationEnabled = false` before `load()` stops software and audio-only loads, track
