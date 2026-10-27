@@ -44,7 +44,8 @@ the public-API contract.
   The demuxer visits one block per subtitle track in turn, and the reader's 8-block detour cache, smaller than that
   cycle, missed on every visit: 14 `mov_text` tracks re-fetched every 4 MB block on every pass, which on a slow origin
   rebuffered every few seconds. The cache now grows, up to 24 blocks, when it has to fetch a block again that it
-  evicted, and the idle sweep shrinks it back. A file without such a cycle stays at 8 blocks.
+  evicted, and the idle sweep shrinks it back. A file without such a cycle stays at 8 blocks, and so does one whose
+  cycle the ceiling could not hold either.
 
 - **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told
   to mix, so a stereo track reached the tap as its left channel alone, 2.1 as silence, and 4.0 to 7.1 as the centre
