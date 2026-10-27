@@ -34,11 +34,12 @@ the public-API contract.
 
 - **A refused video-session rebuild is retried at the next keyframes in the foreground.** When the system
   invalidated the hardware session and VideoToolbox refused the rebuild, the decoder dropped every packet
-  and the picture froze beside live audio until the next foreground return. The host now retries at each
-  keyframe fed while the session is still lost (at least two seconds apart), up to four times, and then
-  waits for the next foreground return, which starts a fresh budget. Nothing is retried in the background,
-  where VideoToolbox refuses a rebuild by design. The session is not moved to `.error` for this: that state
-  is terminal until the next load, so a rebuild that succeeds later could not clear it.
+  and the picture froze beside live audio. The host now retries at each keyframe fed while the session is
+  still lost: four attempts at least two seconds apart, then one attempt every 30 seconds, so a session the
+  system gives back later recovers without a reload. Nothing is retried while the app is in the background
+  without picture-in-picture, where VideoToolbox refuses a rebuild by design; a foreground return starts a
+  fresh quick budget. The session is not moved to `.error` for this: that state is terminal until the next
+  load, so a rebuild that succeeds later could not clear it.
 
 - **The in-band HEVC parameter-set scan stops at 16 MiB of input.** A stream that carries no parameter sets,
   or one whose packets are very large, could be read far past what the packet budget implies before the

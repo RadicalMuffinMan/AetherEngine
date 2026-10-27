@@ -6,22 +6,26 @@ import AetherLibavcodec
 import AetherLibavutil
 @testable import AetherEngine
 
-/// AE#739 follow-up: a rebuild that VideoToolbox refused in the foreground is retried at each following
-/// keyframe, a bounded number of times, then waits for the next foreground return instead of retrying for ever.
+/// AE#739 follow-up: a rebuild that VideoToolbox refused while the picture is on screen is retried at each
+/// following keyframe: quickly at first, then at a slower spacing, so a session the system gives back recovers.
 @Suite("Video session retry", .serialized, .timeLimit(.minutes(1)))
 struct VideoSessionRetryTests {
 
     // MARK: - Policy
 
-    @Test("each keyframe while a recovery is owed is one retry, up to the cap, then one give-up")
-    func boundedRetries() {
+    @Test("the first retries are quick, then the retries slow down instead of stopping")
+    func quickThenSlow() {
         var policy = VideoSessionRetryPolicy()
         var decisions: [VideoSessionRetryPolicy.Decision] = []
-        for i in 0..<(VideoSessionRetryPolicy.maxAttempts + 3) {
+        // Four keyframes three seconds apart are all quick attempts; the slow spacing then holds the next back.
+        for i in 0..<VideoSessionRetryPolicy.maxAttempts {
             decisions.append(policy.onKeyframe(owed: true, now: Double(i) * 3))
         }
+        // The last quick attempt was at 9 s: 15 s is inside the slow spacing, 39 s is exactly at it.
+        decisions.append(policy.onKeyframe(owed: true, now: 15))
+        decisions.append(policy.onKeyframe(owed: true, now: 39))
         let expected: [VideoSessionRetryPolicy.Decision] =
-            (1...VideoSessionRetryPolicy.maxAttempts).map { .retry(attempt: $0) } + [.giveUp, .none, .none]
+            (1...VideoSessionRetryPolicy.maxAttempts).map { .retry(attempt: $0) } + [.none, .retry(attempt: 5)]
         #expect(decisions == expected)
     }
 
@@ -43,18 +47,20 @@ struct VideoSessionRetryTests {
         #expect(policy.onKeyframe(owed: true, now: 12.0) == .retry(attempt: 2))
     }
 
-    @Test("a successful rebuild gives the next loss a fresh budget, even after giving up")
+    @Test("a reset gives the next loss a fresh quick budget, even after the retries had slowed down")
     func resetRestoresTheBudget() {
         var policy = VideoSessionRetryPolicy()
-        for i in 0...VideoSessionRetryPolicy.maxAttempts { _ = policy.onKeyframe(owed: true, now: Double(i) * 3) }
-        #expect(policy.gaveUp)
+        for i in 0..<VideoSessionRetryPolicy.maxAttempts { _ = policy.onKeyframe(owed: true, now: Double(i) * 3) }
+        #expect(policy.attempts == VideoSessionRetryPolicy.maxAttempts)
         policy.reset()
+        #expect(policy.attempts == 0)
         #expect(policy.onKeyframe(owed: true, now: 0) == .retry(attempt: 1))
     }
 
-    // MARK: - Host: background, give-up and the foreground return
+    // MARK: - Host: the picture off screen, the slow retries and the foreground return
 
-    @Test("a keyframe in the background spends no retry, whether audio-only or a retained paused session")
+    @MainActor
+    @Test("a keyframe with the picture off screen in the background spends no retry")
     func backgroundSpendsNoRetry() {
         let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
         defer { host.stop() }
@@ -64,34 +70,46 @@ struct VideoSessionRetryTests {
             host.keyframeWhileSessionLostForTesting()
         }
         #expect(host.videoSessionRetryAttemptsForTesting == 0)
-        #expect(!host.videoSessionRetryGaveUpForTesting)
         #expect(host.failure == nil)
     }
 
-    @Test("a spent budget gives up without publishing a failure, so the session is not left in the error state")
-    func giveUpPublishesNoFailure() {
+    @MainActor
+    @Test("with the picture still on screen in the background (picture-in-picture), a keyframe retries")
+    func pictureInPictureRetries() {
+        let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
+        defer { host.stop() }
+        // The engine reports no off-screen background while a picture-in-picture window shows the picture.
+        host.noteAppInBackground(false)
+        host.setVideoSessionRecoveryOwedForTesting()
+        host.keyframeWhileSessionLostForTesting()
+        #expect(host.videoSessionRetryAttemptsForTesting == 1)
+    }
+
+    @MainActor
+    @Test("a spent quick budget keeps retrying at the slow spacing and publishes no failure")
+    func slowRetriesPublishNoFailure() {
         let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
         defer { host.stop() }
         host.spendVideoSessionRetriesForTesting()
         host.setVideoSessionRecoveryOwedForTesting()
         host.keyframeWhileSessionLostForTesting()
-        #expect(host.videoSessionRetryGaveUpForTesting)
+        #expect(host.videoSessionRetryAttemptsForTesting == VideoSessionRetryPolicy.maxAttempts + 1)
         #expect(host.failure == nil)
     }
 
-    @Test("the foreground return starts a fresh budget after a give-up")
+    @MainActor
+    @Test("coming back on screen starts a fresh quick budget, and the next keyframe retries at once")
     func foregroundReturnStartsFreshBudget() {
         let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
         defer { host.stop() }
         host.spendVideoSessionRetriesForTesting()
+        host.noteAppInBackground(true)
+        #expect(host.videoSessionRetryAttemptsForTesting == VideoSessionRetryPolicy.maxAttempts)
+        host.noteAppInBackground(false)
+        #expect(host.videoSessionRetryAttemptsForTesting == 0)
         host.setVideoSessionRecoveryOwedForTesting()
         host.keyframeWhileSessionLostForTesting()
-        #expect(host.videoSessionRetryGaveUpForTesting)
-        host.noteAppInBackground(true)
-        #expect(host.videoSessionRetryGaveUpForTesting)
-        host.noteAppInBackground(false)
-        #expect(!host.videoSessionRetryGaveUpForTesting)
-        #expect(host.videoSessionRetryAttemptsForTesting == 0)
+        #expect(host.videoSessionRetryAttemptsForTesting == 1)
     }
 
     // MARK: - Decoder reports keyframes while lost

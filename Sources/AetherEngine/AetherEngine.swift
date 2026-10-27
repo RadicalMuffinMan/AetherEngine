@@ -946,6 +946,7 @@ public final class AetherEngine: ObservableObject {
             // SW-PiP Phase C: flip the frame compositor with the PiP state so subtitles appear in the
             // window and never double-draw under the fullscreen host overlay.
             softwareHost?.updateSubtitleCompositor(cues: subtitleCues + secondarySubtitleCues, enabled: pictureInPictureActive, delaySeconds: softwareSubtitleDelaySeconds)
+            noteVideoPresentationToHost()
             #if os(tvOS)
             // PiP window closed while backgrounded: nothing keeps the app running anymore, so the
             // wedge-safe teardown is due before idle suspension (mirrors the iOS pause-while-backgrounded path).
@@ -8307,7 +8308,6 @@ public final class AetherEngine: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.softwareHost?.noteAppInBackground(false)
                 #if os(iOS)
                 self.cancelBackgroundGraceWindow()
                 self.softwareHost?.exitBackgroundAudioOnly()
@@ -8319,6 +8319,7 @@ public final class AetherEngine: ObservableObject {
                 self.isBackgrounded = false
                 if returnedFromBackground { Self.clearPanelRefusalOnForegroundReturn() }
                 self.backgroundActionOwed = false
+                self.noteVideoPresentationToHost()
             }
         }
         lifecycleObservers.append(fgObserver)
@@ -8467,7 +8468,14 @@ public final class AetherEngine: ObservableObject {
     func noteDidEnterBackground() {
         isBackgrounded = true
         backgroundActionOwed = backgroundDecisionMustWait
-        softwareHost?.noteAppInBackground(true)
+        noteVideoPresentationToHost()
+    }
+
+    /// Tells the software host whether a refused video rebuild may be retried now. A backgrounded app with
+    /// picture-in-picture on still shows the picture, and the software host keeps decoding for it, so only
+    /// a background with no picture window counts as "nothing is showing video".
+    private func noteVideoPresentationToHost() {
+        softwareHost?.noteAppInBackground(isBackgrounded && !pictureInPictureActive)
     }
 
     /// Audit LIF-105: the PiP window closed while backgrounded, so nothing keeps the app running and
