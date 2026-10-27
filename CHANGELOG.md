@@ -34,6 +34,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A retained paused session reapplies background policy after a seek or reload (AE#870 follow-up).**
+  Play received during a seek, or remote-HLS autoplay after a reload, could settle directly into
+  playing without the background decision owed by a normal resume. The decision now waits for the
+  operation to settle, then respects disabled background playback or software audio-only mode;
+  a seek or reload that stays paused keeps retention.
+
 - **A failed AV1 Dolby Vision frame copy no longer writes RPU metadata into the decoder's reference picture (AE#907,
   thanks @jonluca).** If the copy that carries the RPU could not be made, the callback still set or cleared the RPU
   keys on VideoToolbox's original buffer and its IOSurface. RPU updates now require an owned output; on a failed
