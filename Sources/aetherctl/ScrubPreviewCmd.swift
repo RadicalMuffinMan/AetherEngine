@@ -48,7 +48,7 @@ private func scrubPreviewRun(url: URL, positions: [Double], warmSeconds: Double,
         let placement = await engine.showScrubPreview(atSeconds: target, in: view)
         let ms = Double((ContinuousClock.now - started).components.attoseconds) / 1e15
             + Double((ContinuousClock.now - started).components.seconds) * 1000
-        if let placement { shown += 1 }
+        if placement != nil { shown += 1 }
         print(String(format: "  t=%7.2f resident=%@ -> %@ in %.0f ms", target, resident ? "yes" : "no ",
                      placement.map { String(format: "shown %.2f..%.2f", $0.validRange.lowerBound,
                                             $0.validRange.upperBound) } ?? "nil", ms))

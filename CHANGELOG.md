@@ -256,6 +256,9 @@ the public-API contract.
   Cancellation and playback yield still schedule idle cleanup of an opened decode context;
   only the latest admitted request can reset that timer.
 
+- **The scrub-preview CLI builds with warnings treated as errors.** The success count checks
+  whether a placement exists without binding an unused copy; diagnostic output is unchanged.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
