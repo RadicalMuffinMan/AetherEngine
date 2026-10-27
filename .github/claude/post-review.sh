@@ -14,7 +14,7 @@ head_sha="$3"
 result_json="$4"
 pr_json="$5"
 
-footer="<sub>Automated review by Claude of ${head_sha:0:7}. It reads the code, it does not build or run it; a maintainer reviews and merges.</sub>"
+footer="<sub>Automated review by Quint (Claude) of ${head_sha:0:7}. It reads the code, it does not build or run it; a maintainer reviews and merges.</sub>"
 
 # Paths may come back absolute or prefixed with the data directory; reduce them to repo paths and
 # keep only files this PR actually changes.
@@ -27,6 +27,26 @@ inline=$(jq --slurpfile pr "$pr_json" '
     ][:15]' "$result_json")
 
 summary=$(jq -r '.structured_output.summary' "$result_json")
+
+case "$(jq -r '.structured_output.status // ""' "$result_json")" in
+  red)    status="**Status:** 🔴 Blocking. Serious defects, not mergeable as is." ;;
+  orange) status="**Status:** 🟠 Needs changes. Real issues to fix before merge." ;;
+  yellow) status="**Status:** 🟡 Minor follow-ups. Only small touch-ups left." ;;
+  green)  status="**Status:** 🟢 Clean. Nothing left to fix, ready for a maintainer." ;;
+  *)      status="" ;;
+esac
+# The status goes first so notification previews show it: right under the heading, or on top
+# when the summary does not open with one.
+if [[ -n "$status" ]]; then
+  first="${summary%%$'\n'*}"
+  if [[ "$first" == "## "* ]]; then
+    rest="${summary#"$first"}"
+    while [[ "$rest" == $'\n'* ]]; do rest="${rest#$'\n'}"; done
+    summary="$first"$'\n\n'"$status${rest:+$'\n\n'$rest}"
+  else
+    summary="$status"$'\n\n'"$summary"
+  fi
+fi
 
 with_inline=$(jq -n --arg sha "$head_sha" --arg body "$summary"$'\n\n'"$footer" --argjson inline "$inline" '{
   commit_id: $sha, event: "COMMENT", body: $body,

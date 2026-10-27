@@ -12,7 +12,7 @@ issue="$2"
 result_json="$3"
 
 allowed='["bug","enhancement","question","documentation","needs-info","host-app","area: audio","area: video","area: hdr-dv","area: subtitles","area: live","area: io","area: api"]'
-footer="<sub>Automated triage by Claude. A maintainer reads every issue and will follow up.</sub>"
+footer="<sub>Automated triage by Quint (Claude). A maintainer reads every issue and will follow up.</sub>"
 
 labels=$(jq -c --argjson allowed "$allowed" '[.structured_output.labels[]? | select(. as $l | $allowed | index($l))] | unique' "$result_json")
 comment=$(jq -r '.structured_output.comment // ""' "$result_json")
