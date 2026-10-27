@@ -259,6 +259,10 @@ the public-API contract.
 - **The scrub-preview CLI builds with warnings treated as errors.** The success count checks
   whether a placement exists without binding an unused copy; diagnostic output is unchanged.
 
+- **The APAC converter input callback is explicitly Sendable.** This is defensive compilation hygiene;
+  no host build or playback failure was reproduced. One-shot input delivery and encoded output remain
+  unchanged.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
