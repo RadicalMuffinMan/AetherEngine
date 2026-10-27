@@ -233,6 +233,12 @@ the public-API contract.
   the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
   and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
 
+- **Hardware deinterlace warm-up starts only when a source needs it.** Engine construction and
+  progressive software playback no longer start or wait for a throwaway Metal/VideoToolbox graph.
+  Interlaced auto-mode loads still share one process-wide warm-up. Same-title custom reloads
+  preserve a decoded progressive verdict; actual title switches reassess reopened metadata.
+  Background teardown carries both interlaced and progressive decisions to a retained-reader reload.
+
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
   certificate classifications stay specific). A transport failure at open (a reset or a timeout from
