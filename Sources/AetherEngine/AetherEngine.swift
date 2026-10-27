@@ -8502,8 +8502,9 @@ public final class AetherEngine: ObservableObject {
 
     /// Tells the software host whether a refused video rebuild may be retried now. A backgrounded app with
     /// picture-in-picture on still shows the picture, and the software host keeps decoding for it, so only
-    /// a background with no picture window counts as "nothing is showing video".
-    private func noteVideoPresentationToHost() {
+    /// a background with no picture window counts as "nothing is showing video". Also called when a load
+    /// installs a new host, which would otherwise start out believing it is on screen.
+    func noteVideoPresentationToHost() {
         softwareHost?.noteAppInBackground(isBackgrounded && !pictureInPictureActive)
     }
 

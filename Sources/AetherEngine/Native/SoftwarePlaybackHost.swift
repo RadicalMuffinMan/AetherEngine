@@ -2141,6 +2141,7 @@ final class SoftwarePlaybackHost {
         videoSessionRetry = policy
     }
     var videoSessionRetryAttemptsForTesting: Int { videoSessionRetry.attempts }
+    var appInBackgroundForTesting: Bool { appInBackground }
     #endif
 
     @discardableResult
