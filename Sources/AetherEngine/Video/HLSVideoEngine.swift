@@ -1865,6 +1865,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
             || (videoStream.pointee.disposition & AV_DISPOSITION_MULTILAYER) != 0 {
             EngineLog.emit("[HLSVideoEngine] stereo: \(stereo.reason)", category: .session)
         }
+        // AE#886: built from stream fields only, so every producer of the session (and every init it
+        // writes) agrees on the time base. A Matroska track with DefaultDuration probes its rate exactly.
+        let frameGrid: CFRFrameGrid? = isLiveSession ? nil : CFRFrameGrid.make(
+            sourceTimeBase: videoTimeBase,
+            frameRate: videoStream.pointee.avg_frame_rate.num > 0
+                ? videoStream.pointee.avg_frame_rate : videoStream.pointee.r_frame_rate,
+            startPts: videoStream.pointee.start_time
+        )
+        if let frameGrid {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#886 frame grid: source TB \(videoTimeBase.num)/\(videoTimeBase.den) "
+                + "is coarser than the frame, muxing on 1/\(frameGrid.outputTimeBase.den) "
+                + "(\(frameGrid.frameTicks) ticks a frame, origin \(frameGrid.originPts))",
+                category: .session
+            )
+        }
         let videoConfig = HLSSegmentProducer.StreamConfig(
             codecpar: UnsafePointer(ownedVideoParams.ptr),
             timeBase: videoTimeBase,
@@ -1876,7 +1892,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             nalFramingOverride: measuredVideoNALFraming,
             convertsAnnexBSamples: framingNormalization.convertsAnnexBSamples,
             nalFramingLatch: NALFramingLatch(confirmed: framingMeasuredLengthPrefixed),
-            stereo: stereo.signal
+            stereo: stereo.signal,
+            frameGrid: frameGrid
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
