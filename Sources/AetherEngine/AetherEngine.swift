@@ -2557,6 +2557,8 @@ public final class AetherEngine: ObservableObject {
     /// Latched at load; reused by audio-track-switch reload to re-derive activeVideoDecoder without re-probing.
     /// Reset to AV_CODEC_ID_NONE in stopInternal.
     var lastDetectedVideoCodec: AVCodecID = AV_CODEC_ID_NONE
+    /// Preserved through same-source reloads; cleared when the session stops.
+    var lastRequiresDeinterlaceWarmup = false
 
     /// In-flight probe demuxer. Registered before the detached open so stopInternal can markClosed() it:
     /// without this, player dismissal/channel zapping left the probe reconnecting through subsequent sessions.
@@ -4021,7 +4023,6 @@ public final class AetherEngine: ObservableObject {
         FFmpegLogBridge.install()
         // Which FFmpeg answers is decided by the host's link, not by the package graph (AE#396).
         FFmpegRuntimeCheck.logOnce()
-        _ = DeinterlaceHardwareWarmup.shared
 
         // The category is declared off-main at the first load, once per process (#114), and the session
         // is never activated here: AVKit owns native playback activation (#24).
@@ -5308,10 +5309,8 @@ public final class AetherEngine: ObservableObject {
         if detectedCodecID == AV_CODEC_ID_H264, detectedFieldOrder == AV_FIELD_UNKNOWN,
            probeOpened,
            let vStream = probe.stream(at: probe.videoStreamIndex),
-           let codecpar = vStream.pointee.codecpar,
-           let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
-            let bytes = Array(UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
-            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(extradata: bytes)
+           let codecpar = vStream.pointee.codecpar {
+            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: codecpar)
             if spsIndicatesInterlaced {
                 EngineLog.emit(
                     "[AetherEngine] fieldOrder=UNKNOWN but SPS frame_mbs_only_flag=0; "
@@ -5453,6 +5452,9 @@ public final class AetherEngine: ObservableObject {
             canHardwareDecode: opensHardwareHEVC,
             elType: elType
         )
+        var requiresDeinterlaceWarmup = VideoRoutingPolicy.requiresDeinterlaceWarmup(
+            codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
+            spsIndicatesInterlaced: spsIndicatesInterlaced)
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
         // progressive pictures, and FFmpeg's parser reports TT for them off SEI pic_struct alone while
@@ -5486,6 +5488,7 @@ public final class AetherEngine: ObservableObject {
             }
             if InterlaceProbe.refutesDeclaredInterlace(verdict) {
                 useSoftwarePath = false
+                requiresDeinterlaceWarmup = false
                 EngineLog.emit(
                     "[AetherEngine] declared interlaced (fieldOrder=\(detectedFieldOrder.rawValue)) but "
                     + "\(verdict); the deinterlacer would never engage, routing native for HW decode (#232)",
@@ -5513,23 +5516,25 @@ public final class AetherEngine: ObservableObject {
            let vStream = probe.stream(at: probe.videoStreamIndex),
            let codecpar = vStream.pointee.codecpar {
             let dvProfile = Self.dvProfile(stream: vStream)
-            let forcesSoftware = {
-                VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-                   codecID: detectedCodecID,
-                   // A Profile 5 record served as its base layer plays as plain HEVC, which is what
-                   // the raw-hvcC probe judges; the exemption is for the dvh1 route it is not on.
-                   // AE#532: a record the RPU corrected is not on that route either, and its base layer
-                   // is standard Main10, so the gate judges it the way it judges any Profile 7 / 8.
-                   dvProfile: presentsDolbyVisionBaseLayer ? nil : (correctedDVProfile ?? dvProfile),
-                   canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
-            }
-            var routesSoftware = forcesSoftware()
+            // A Profile 5 record served as its base layer plays as plain HEVC, which is what
+            // the raw-hvcC probe judges; the exemption is for the dvh1 route it is not on.
+            // AE#532: a record the RPU corrected is not on that route either, and its base layer
+            // is standard Main10, so the gate judges it the way it judges any Profile 7 / 8.
+            let gateDVProfile = presentsDolbyVisionBaseLayer ? nil : (correctedDVProfile ?? dvProfile)
+            // AE#883: called in place rather than through a stored closure. Swift 6.2 infers a stored local
+            // closure main-actor and rejects it capturing `codecpar` ("sending risks causing data races");
+            // a non-escaping argument is not sent.
+            var routesSoftware = VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                codecID: detectedCodecID, dvProfile: gateDVProfile,
+                canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
             // AE#348: with the pre-flight gate beside the load, this probe's throwaway session can open while
             // the panel switches, which the serial order never did. Only a refusal changes the route, so a
             // refusal taken then is asked again once the panel has settled, where the serial order asked it.
             if routesSoftware, !panelRoutingSettled {
                 try await settlePanelRouting(ownsProbe: true)
-                routesSoftware = forcesSoftware()
+                routesSoftware = VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                    codecID: detectedCodecID, dvProfile: gateDVProfile,
+                    canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) })
             }
             if routesSoftware {
                 useSoftwarePath = true
@@ -5692,10 +5697,12 @@ public final class AetherEngine: ObservableObject {
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil,
+                    requiresDeinterlaceWarmup: requiresDeinterlaceWarmup,
                     generation: gen,
                     elType: elType
                 )
                 playbackBackend = .software
+                lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
                 // AE#550: the one thing a viewer on a receiver needs said out loud. This backend's
                 // picture cannot leave the device, so a wireless route carries the sound alone, and
                 // the report that opened this was someone hearing a film they could not see.
@@ -5783,6 +5790,8 @@ public final class AetherEngine: ObservableObject {
                     }
                 )
                 playbackBackend = .native
+                // Preserve source evidence for a later native-to-software recovery.
+                lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: false
                 )
@@ -5932,6 +5941,11 @@ public final class AetherEngine: ObservableObject {
         if state == .paused || state == .loading {
             state = .playing
         }
+        // #882: the software pumps keep their rebuffer hold across a pause, and pause() cleared the level,
+        // so a play into a hold carries no edge. Re-read it, or the phase reads `.playing` until the hold ends.
+        if let softwareHost {
+            isBuffering = state == .playing && softwareHost.isRebuffering
+        }
         // A resume that leaves `state` at `.playing` (the end of an audio interruption) restarts the
         // renderer without a state change; the Atmos output activator follows the renderer, so tell it.
         atmosOutputActivator?.refresh()
@@ -6034,7 +6048,8 @@ public final class AetherEngine: ObservableObject {
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
                 expectedGeneration: loadGeneration,
                 discTitleIDOverride: selection.discTitleID,
-                resumePlaying: loadedOptions.autoplay
+                resumePlaying: loadedOptions.autoplay,
+                restoredDeinterlaceWarmupDecision: selection.requiresDeinterlaceWarmup
             )
             // AE#460 follow-up: a rebuild that died leaves the session in `.error`, and this branch
             // used to return as if it had come back, so `reloadAtCurrentPosition(applying:)`
@@ -8167,6 +8182,7 @@ public final class AetherEngine: ObservableObject {
         activeVideoDecoder = nil
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
+        lastRequiresDeinterlaceWarmup = false
         playlistShiftSeconds = 0
         liveDisplayShiftSeconds = nil
         // AE#105 / AE#270: the display origin belongs to the session that published it. Clearing it here
