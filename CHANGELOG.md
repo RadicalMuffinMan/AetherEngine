@@ -24,6 +24,14 @@ the public-API contract.
   not infer a local picture from an external player's readiness. A stopped or replaced session
   cannot answer with an older asynchronous metrics result.
 
+### Changed
+
+- **Hardware deinterlace warm-up starts only when a source needs it (AE#877, thanks @jonluca).**
+  Engine construction and progressive software playback no longer start or wait for a throwaway Metal/VideoToolbox graph.
+  Interlaced auto-mode loads still share one process-wide warm-up. Same-title custom reloads
+  preserve a decoded progressive verdict; actual title switches reassess reopened metadata.
+  Background teardown carries both interlaced and progressive decisions to a retained-reader reload.
+
 ### Fixed
 
 - **A software playback clock stays stopped when first-frame arming overlaps a pause (AE#867, thanks
@@ -232,12 +240,6 @@ the public-API contract.
 - **The HLS fixture reads its redirect port under the lifecycle lock.** A request worker could read
   the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
   and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
-
-- **Hardware deinterlace warm-up starts only when a source needs it.** Engine construction and
-  progressive software playback no longer start or wait for a throwaway Metal/VideoToolbox graph.
-  Interlaced auto-mode loads still share one process-wide warm-up. Same-title custom reloads
-  preserve a decoded progressive verdict; actual title switches reassess reopened metadata.
-  Background teardown carries both interlaced and progressive decisions to a retained-reader reload.
 
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
