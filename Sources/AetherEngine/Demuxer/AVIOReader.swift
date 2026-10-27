@@ -5086,8 +5086,12 @@ final class DetourBlockCache: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         if blocks[idx] == nil {
             if let i = evictedForCapacity.firstIndex(of: idx) {
+                // The evictions since this one are about how far the working set outruns the cache. A
+                // cycle the ceiling cannot hold misses at every capacity, so growing toward it only
+                // holds more memory for the same fetches.
+                let outrun = evictedForCapacity.count - i
                 evictedForCapacity.remove(at: i)
-                currentCapacity = min(ceilingBlocks, currentCapacity + 1)
+                if currentCapacity + outrun <= ceilingBlocks { currentCapacity += 1 }
             }
             lru.append(idx)
         }
