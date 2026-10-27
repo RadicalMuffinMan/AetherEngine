@@ -233,6 +233,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Explicit software-host pause wins over late decoder, rebuffer and preroll clock starts.** The output
+  latches transport authority under the same lock as every clock write, including before the first frame
+  arms the clock. A paused seek still updates its anchor at zero rate, and explicit play restores normal
+  preroll. A play that arrives before the feeder publishes its armed latch preserves the pending initial
+  clock start. Stopping an already-paused output retires and flushes it without resetting its clock.
+
 - **A native VOD loaded with a start position no longer reports an earlier time once it plays (AE#881, thanks
   @martijnklomp).** AVPlayer finishes the mount seek the moment it is issued, before the item is ready, and that
   completion released the clock hold. The periodic observer then published the keyframe or segment start the

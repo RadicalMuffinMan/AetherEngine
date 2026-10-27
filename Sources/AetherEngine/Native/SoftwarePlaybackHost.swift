@@ -1616,6 +1616,7 @@ final class SoftwarePlaybackHost {
     func play() {
         guard !stopRequested, failure == nil else { return }
         renderer.recoverAfterSuspensionIfNeeded()
+        audioOutput?.setPlaybackEnabled(true)
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
         // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
@@ -1762,10 +1763,9 @@ final class SoftwarePlaybackHost {
     }
 
     func pause() {
-        // Un-anchored clock: only latch the pause; the loops park on isPlaying (#107).
-        if clockArmed {
-            audioOutput?.pause()
-        }
+        // Latch even before arming: stale decoder and rebuffer work cannot restart the clock
+        // after this pause while the host publishes its transport state.
+        audioOutput?.setPlaybackEnabled(false)
         pausedByHost = true
         rate = 0
         if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued),
@@ -2088,7 +2088,7 @@ final class SoftwarePlaybackHost {
             // Keep the last observed clock; the engine must not finalize this request as a landing.
             isPlaying = false
             pausedByHost = true
-            audioOutput?.setRate(0)
+            audioOutput?.setPlaybackEnabled(false)
             currentTime = clockSessionZero > 0
                 ? max(0, sourceClockSeconds - clockSessionZero) : sourceClockSeconds
             packetSource?.close()

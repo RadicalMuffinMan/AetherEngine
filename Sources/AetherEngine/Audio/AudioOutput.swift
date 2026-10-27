@@ -16,6 +16,9 @@ final class AudioOutput: @unchecked Sendable {
     let timeline = RendererTimeline()
 
     private let lock = NSLock()
+    /// Explicit host pause owns every clock write, including stale feeder work that carries no
+    /// command revision. Buffering pauses leave this intent alone. Guarded by `lock`.
+    private var playbackEnabled = true
     @MainActor private var attachedVideoLayer: AVSampleBufferDisplayLayer?
     @MainActor private var videoLayerRemovalTask: Task<Void, Never>?
 
@@ -206,7 +209,27 @@ final class AudioOutput: @unchecked Sendable {
         set { renderer.volume = newValue }
     }
 
-    /// Set playback speed (0.5-2.0). Hosts own rate state (lastRate/pausedByHost); this object is stateless about it.
+    /// Update transport authority without starting an unanchored clock. A disabled output can
+    /// still seek at rate zero; only an explicit play enables positive rates again.
+    func setPlaybackEnabled(_ enabled: Bool) {
+        lock.lock()
+        playbackEnabled = enabled
+        // Enabling owns no clock write. A feeder may already hold the revision for an arm
+        // whose latch play() has not seen yet; that correction still owes the initial start.
+        guard !enabled else { lock.unlock(); return }
+        _clockCommandRevision &+= 1
+        endPreroll()
+        let at = synchronizer.currentTime()
+        let sourceSeconds = timeline.sourceSeconds(forRenderer: at.seconds)
+        if synchronizer.rate != 0 {
+            synchronizer.setRate(0, time: at)
+        }
+        lock.unlock()
+        EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", sourceSeconds)) (host transport disabled)",
+                       category: .swPlayback)
+    }
+
+    /// Set playback speed (0.5-2.0). Hosts retain their preferred speed; explicit pause wins.
     /// A queued correction supplies `ifRevision`; normal transport commands omit it.
     func setRate(_ rate: Float, ifRevision revision: UInt64? = nil) {
         // A host resumes right after it arms the clock; while a preroll waits, that rate is the one
@@ -220,7 +243,7 @@ final class AudioOutput: @unchecked Sendable {
             return
         }
         lock.lock()
-        if let revision, revision != _clockCommandRevision {
+        if (rate != 0 && !playbackEnabled) || (revision != nil && revision != _clockCommandRevision) {
             lock.unlock()
             return
         }
@@ -453,8 +476,13 @@ final class AudioOutput: @unchecked Sendable {
         defer { lock.unlock() }
         _clockCommandRevision &+= 1
         _epoch &+= 1
+        playbackEnabled = false
         endPreroll()
-        synchronizer.setRate(0.0, time: .zero)
+        // Hosts discard the output after stop. An already-paused clock needs no time reset;
+        // its native rate is updated synchronously even while the timebase settles.
+        if synchronizer.rate != 0 {
+            synchronizer.setRate(0.0, time: .zero)
+        }
         renderer.flush()
     }
 
@@ -468,10 +496,11 @@ final class AudioOutput: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let revision, revision != _clockCommandRevision { return }
+        let rate = playbackEnabled ? rate : 0
         _clockCommandRevision &+= 1
         EngineLog.emit("[AudioOutput] seekClock to=\(String(format: "%.3f", time.seconds)) rate=\(rate)", category: .swPlayback)
         endPreroll()
-        switch preroll {
+        switch rate > 0 ? preroll : nil {
         case nil:
             synchronizer.setRate(rate, time: timeline.rendererTime(forSource: time))
         case true?:
@@ -599,7 +628,7 @@ final class AudioOutput: @unchecked Sendable {
         }
         lock.lock()
         defer { lock.unlock() }
-        guard prerollGeneration == wait.gen, let rate = prerollRate else { return }
+        guard playbackEnabled, prerollGeneration == wait.gen, let rate = prerollRate else { return }
         prerollRate = nil
         EngineLog.emit("[AudioOutput] preroll \(ready ? "ready" : "timed out") after "
                        + "\(String(format: "%.0f", waited * 1000)) ms; starting at t=\(String(format: "%.3f", wait.time.seconds)) rate=\(rate)",
@@ -630,6 +659,9 @@ final class AudioOutput: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let revision, revision != _clockCommandRevision { return false }
+        // A stale feeder resume is handled even without a pending preroll. The final clock
+        // write checks again in case an explicit pause lands after this preflight.
+        guard playbackEnabled else { return true }
         guard prerollRate != nil else { return false }
         _clockCommandRevision &+= 1
         prerollRate = rate
