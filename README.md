@@ -583,6 +583,12 @@ A test rig that only captures stdout / stderr (`devicectl device process launch 
 EngineLog.handler = { print($0) }   // every info-level line, verbatim
 ```
 
+A log viewer that files lines by subsystem takes the same lines with their category instead of parsing the `[Prefix]` in the text:
+
+```swift
+EngineLog.structuredHandler = { line, category, level in viewer.append(line, from: category.rawValue) }
+```
+
 The first line of any session names the FFmpeg that answered, because which one does is decided by your executable's link rather than by the package graph:
 
 ```
@@ -651,7 +657,17 @@ Pin to `.upToNextMinor(from: "7.48.0")` for stricter teams that prefer to opt in
 | Swift | 6.4 |
 | Xcode | 27.0 |
 
-The Swift and Xcode rows are the toolchain CI builds and tests with (GitHub's `xcode-27` image); older toolchains are not tested. The source needs at least the 26.2 SDK in any case (`VTRegisterSupplementalVideoDecoderIfAvailable` is iOS / tvOS 26.2 API, and an unguarded C symbol has to exist at compile time). The deployment floor above stays iOS / tvOS 18 and macOS 15, with the newer calls behind `#available`.
+The Swift and Xcode rows are the supported toolchain CI builds and tests with (GitHub's
+`xcode-27` image). Older toolchains are not tested or supported; the deployment floor above
+stays iOS / tvOS 18 and macOS 15, with newer calls behind `#available`.
+
+Supplemental AV1/VP9 registration also has a narrow compile-time guard around
+`VTRegisterSupplementalVideoDecoderIfAvailable`, first declared by the mobile SDKs in Xcode 26.2.
+The guard uses Swift 6.2.3 as a proxy for that SDK in stock Xcode bundles. It omits those calls in
+stock Xcode 26.0/26.1 while leaving hardware queries and software fallback intact; it does not
+establish that the rest of the package builds there or lower the supported toolchain above.
+A separately installed newer Swift toolchain paired with an older SDK is not covered by this
+proxy. The existing macOS registration path is unchanged.
 
 The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that still supports those pins the 6.x line with `.upToNextMajor(from: "6.89.1")`.
 

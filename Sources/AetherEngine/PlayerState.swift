@@ -907,6 +907,20 @@ public struct LoadOptions: Sendable, Equatable {
     /// are overlay-only until the next load. Default empty.
     public var externalSubtitles: [ExternalSubtitleTrack]
 
+    /// The subtitle track to activate at the end of a successful load, named by `TrackInfo.id`: the
+    /// container's stream index for an embedded track, or `externalSubtitleTrackIDBase` plus the
+    /// array index for an entry of `externalSubtitles`. For a host that already knows which track it
+    /// wants (a server's default subtitle index, a saved per-title choice) and so has no language to
+    /// rank by. It wins over `preferredSubtitleLanguages`. An id that names no subtitle track falls
+    /// through to the language preference, so a stale id never fails the load. A later host
+    /// `selectSubtitleTrack` / `clearSubtitle` overrides it, as it does the language preference.
+    /// Stream indices belong to one title, so a disc `selectTitle` drops the id for the reload and the
+    /// language preference decides on the new title; a same-content reload (audio switch, reroute)
+    /// keeps it. A track added later with `addExternalSubtitleTrack` whose id matches activates too,
+    /// while nothing is active and the host has made no choice.
+    /// nil (the default) leaves the choice to `preferredSubtitleLanguages`, else subtitles stay off.
+    public var initialSubtitleTrackID: Int? = nil
+
     /// Forward-buffer window of the loopback HLS session, in segments (one segment ~ 4 s): how far the
     /// producer may race ahead of the playhead AND how many forward segments the on-disk cache keeps
     /// resident (the two are coupled by construction, see `SegmentCache`). Larger values buffer more of
@@ -1071,6 +1085,7 @@ public struct LoadOptions: Sendable, Equatable {
         preferredAudioLanguages: [String] = [],
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
+        initialSubtitleTrackID: Int? = nil,
         forwardBufferSegments: Int? = nil,
         sessionCacheByteBudget: Int? = nil,
         softwarePacketCacheStorage: SoftwarePacketCacheStorage = .automatic,
@@ -1130,6 +1145,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preferredAudioLanguages = preferredAudioLanguages
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles
+        self.initialSubtitleTrackID = initialSubtitleTrackID
         self.forwardBufferSegments = forwardBufferSegments
         self.sessionCacheByteBudget = sessionCacheByteBudget
         self.softwarePacketCacheStorage = softwarePacketCacheStorage
@@ -1572,6 +1588,12 @@ public struct SubtitleCue: Identifiable, Sendable {
         self.endTime = endTime
         self.body = body
         self.placement = placement
+    }
+
+    /// AE#879: decoded bytes a bitmap cue holds; 0 for text cues.
+    var bitmapBytes: Int {
+        guard case .image(let image) = body else { return 0 }
+        return image.cgImage.bytesPerRow * image.cgImage.height
     }
 
     /// Plain text for text and rich-text cues (rich runs concatenated); nil for bitmap cues.

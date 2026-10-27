@@ -739,7 +739,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // the two legitimate reconnects (open + the one seek to the moov). The sequential
     // playback fast path never enters this code, so it carries zero overhead.
     private static let detourBlockSize = 4 * 1024 * 1024
-    private static let detourMaxBlocks = 8                       // ~32 MB LRU ceiling
+    private static let detourMaxBlocks = 8                       // ~32 MB, the resting LRU size
+    /// #909: how far the cache may grow when its working set is larger than `detourMaxBlocks`. A flat
+    /// MP4 that stores each subtitle track in its own byte range makes the demuxer visit one block per
+    /// kept track in turn, and an LRU smaller than that cycle never hits: 14 `mov_text` tracks against
+    /// 8 blocks re-fetched every block on every pass. The cache grows only on a re-fetch of a block it
+    /// evicted, so a file without such a cycle stays at 8; the ceiling covers the 16-track files seen
+    /// so far (#104, #909) with room for samples that straddle a block boundary.
+    private static let detourCeilingBlocks = 24                  // ~96 MB
     /// Audit PERF-108: a detour block nobody has read or filled for this long is a scrub's leftover,
     /// not a parse's working set (a parser revisits its region within seconds).
     private static let detourBlockIdleSecondsDefault: TimeInterval = 30
@@ -1040,7 +1047,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// (see serveFromDetour), so eviction never shadows a re-fetchable tail. Pure copy/eviction
     /// math lives on the cache and is unit-tested without any network.
     private let detourCache = DetourBlockCache(blockSize: AVIOReader.detourBlockSize,
-                                               maxBlocks: AVIOReader.detourMaxBlocks)
+                                               maxBlocks: AVIOReader.detourMaxBlocks,
+                                               ceilingBlocks: AVIOReader.detourCeilingBlocks)
     /// When the detour cache was last swept for idle blocks (audit PERF-108). Demux-thread-only.
     private var lastDetourIdleSweepNs: UInt64 = 0
     /// How long a detour block may sit unread before the sweep releases it. An init parameter for
@@ -3066,7 +3074,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if fetched.count == blockLen, !isFullyClosed {
                 detourCache.insert(blockStart / Int64(Self.detourBlockSize), fetched)
                 #if DEBUG
-                EngineLog.emit("[AVIOReader] detour fill block=\(blockStart / Int64(Self.detourBlockSize)) offset=\(blockStart) size=\(fetched.count) (resident=\(detourCache.residentCount))", category: .demux)
+                EngineLog.emit("[AVIOReader] detour fill block=\(blockStart / Int64(Self.detourBlockSize)) offset=\(blockStart) size=\(fetched.count) (resident=\(detourCache.residentCount) cap=\(detourCache.capacity))", category: .demux)
                 #endif
             }
             block = fetched
@@ -5027,22 +5035,38 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 /// (demux-thread reads + teardown-thread `clear`); never held across the network. Stores only
 /// full-size blocks (the fetch/insert decision is the caller's), so eviction can't shadow a
 /// re-fetchable short-body tail. The copy + eviction math is pure and unit-tested without a network.
+///
+/// #909: the capacity starts at `maxBlocks` and grows by one, up to `ceilingBlocks`, each time a block
+/// it evicted is inserted again, which is the signature of a cyclic working set larger than the cache.
+/// The idle sweep shrinks it back toward what is still resident.
 final class DetourBlockCache: @unchecked Sendable {
     private let lock = NSLock()
     private var blocks: [Int64: Data] = [:]
     private var lru: [Int64] = []
     /// When each resident block was last inserted or served, on `now`'s clock (audit PERF-108).
     private var lastHit: [Int64: TimeInterval] = [:]
+    /// Blocks evicted for capacity, oldest first, at most `ceilingBlocks` of them.
+    private var evictedForCapacity: [Int64] = []
     private let maxBlocks: Int
+    private let ceilingBlocks: Int
+    private var currentCapacity: Int
     private let now: @Sendable () -> TimeInterval
     let blockSize: Int
 
-    /// `now` is injectable so the idle test moves a clock instead of waiting one out.
-    init(blockSize: Int, maxBlocks: Int,
+    /// `now` is injectable so the idle test moves a clock instead of waiting one out. Without a
+    /// `ceilingBlocks` the cache never grows past `maxBlocks`.
+    init(blockSize: Int, maxBlocks: Int, ceilingBlocks: Int? = nil,
          now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.blockSize = blockSize
         self.maxBlocks = maxBlocks
+        self.ceilingBlocks = max(maxBlocks, ceilingBlocks ?? maxBlocks)
+        self.currentCapacity = maxBlocks
         self.now = now
+    }
+
+    var capacity: Int {
+        lock.lock(); defer { lock.unlock() }
+        return currentCapacity
     }
 
     /// Returns the resident block for `idx` and bumps its recency, or nil on a miss.
@@ -5057,16 +5081,28 @@ final class DetourBlockCache: @unchecked Sendable {
         return data
     }
 
-    /// Inserts a (full-size) block, evicting the least-recently-used tail beyond `maxBlocks`.
+    /// Inserts a (full-size) block, evicting the least-recently-used tail beyond the capacity.
     func insert(_ idx: Int64, _ data: Data) {
         lock.lock(); defer { lock.unlock() }
-        if blocks[idx] == nil { lru.append(idx) }
+        if blocks[idx] == nil {
+            if let i = evictedForCapacity.firstIndex(of: idx) {
+                // The evictions since this one are about how far the working set outruns the cache. A
+                // cycle the ceiling cannot hold misses at every capacity, so growing toward it only
+                // holds more memory for the same fetches.
+                let outrun = evictedForCapacity.count - i
+                evictedForCapacity.remove(at: i)
+                if currentCapacity + outrun <= ceilingBlocks { currentCapacity += 1 }
+            }
+            lru.append(idx)
+        }
         blocks[idx] = data
         lastHit[idx] = now()
-        while lru.count > maxBlocks {
+        while lru.count > currentCapacity {
             let evicted = lru.removeFirst()
             blocks.removeValue(forKey: evicted)
             lastHit[evicted] = nil
+            evictedForCapacity.append(evicted)
+            if evictedForCapacity.count > ceilingBlocks { evictedForCapacity.removeFirst() }
         }
     }
 
@@ -5086,6 +5122,7 @@ final class DetourBlockCache: @unchecked Sendable {
             blocks.removeValue(forKey: idx)
             lastHit[idx] = nil
         }
+        currentCapacity = max(maxBlocks, min(currentCapacity, lru.count))
         return idle.count
     }
 
@@ -5094,6 +5131,8 @@ final class DetourBlockCache: @unchecked Sendable {
         blocks.removeAll()
         lru.removeAll()
         lastHit.removeAll()
+        evictedForCapacity.removeAll()
+        currentCapacity = maxBlocks
         lock.unlock()
     }
 
