@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.49.0] - 2026-10-27
+
 ### Added
 
 - **`LoadOptions.initialSubtitleTrackID` names the subtitle track to activate at load.**
@@ -245,6 +249,58 @@ the public-API contract.
   decodes against nothing. An audio renderer that keeps failing is flushed at most three times in ten
   seconds, and one that flushes itself on a route change keeps the behaviour it had.
 
+- **Explicit software-host pause wins over late decoder, rebuffer and preroll clock starts (AE#902, thanks
+  @jonluca).** The output
+  latches transport authority under the same lock as every clock write, including before the first frame
+  arms the clock. A paused seek still updates its anchor at zero rate, and explicit play restores normal
+  preroll. A play that arrives before the feeder publishes its armed latch preserves the pending initial
+  clock start. Stopping an already-paused output retires and flushes it without resetting its clock.
+
+- **A superseded still decode no longer publishes after a newer cache hit (AE#906, thanks @jonluca).** Thumbnail, preview
+  and snapshot requests retire older work before returning a cached image or yielding to playback;
+  a resident approximation cache hit also retires an older refined decode.
+  Cancelling the awaiting Task also cancels its decode; late results return nil and cannot populate
+  the cache or reset a newer request's idle timer. Requests with invalid timestamps and already-cancelled
+  requests leave an active caller's work alone. Replacement is shared across still modes, including
+  cancellation of an in-flight bounded snapshot's caller-supplied token.
+  Cancellation and playback yield still schedule idle cleanup of an opened decode context;
+  only the latest admitted request can reset that timer.
+
+- **The scrub-preview CLI builds with warnings treated as errors.** The success count checks
+  whether a placement exists without binding an unused copy; diagnostic output is unchanged.
+
+- **The APAC converter input callback is explicitly Sendable.** This is defensive compilation hygiene;
+  no host build or playback failure was reproduced. One-shot input delivery and encoded output remain
+  unchanged.
+
+- **A software live session reports its edge rebuffer as `.rebuffering` (AE#882, thanks @jpsts).** When the source paused, the
+  live feeder parked the synchronizer to refill but kept that to itself: `playbackPhase` stayed
+  `.playing` over a standing picture until the reader's own stall timeout promoted the source to
+  `.stalled`, 20 s later. A host app watching the clock reloaded the session after 2 s, and each fresh
+  join landed the lead behind the same frozen burst, so the viewer saw the last four seconds again,
+  three times over, before the feed came back. `SoftwarePlaybackHost.isRebuffering` now follows the
+  pumps' hold (the live feeder's dry ring and the on-demand loop's exhausted audio lead) and the
+  engine folds it into `isBuffering`, as it does the audio host's wait.
+
+- **A software live session catches up after a pause whose backlog arrives at once (AE#882).** A source that
+  resumes by handing over everything it missed left the picture the length of the pause behind the
+  newest media, and nothing on that path ever caught up. The feeder now watches a resume with the
+  join's own rule and, once the backlog has landed, moves the picture up to the join lead behind the
+  newest media through the engine's live rejoin seek; a source that skipped what it missed is left
+  where it resumed.
+
+- **The package builds on Xcode 26.3 (Swift 6.2) again (AE#883, thanks @akhanwav).** Three sites that Swift 6.4
+  accepts and 6.2 rejects broke the build from 7.43.0 on: the undecodable-format gate stored a closure capturing
+  `codecpar` (now called in place), the `stri` box literal typed as `Int`, and the DASH `sidx` payload expression
+  timed out the type checker. Behaviour is unchanged. Checked with `xcodebuild` for tvOS and iOS on Xcode 26.3
+  (Swift 6.2.4) and on Xcode 27.
+
+- **The audio tap demuxes only the audio stream of a segment (AE#910, thanks @tweakapps).** The loopback tap copied
+  init and fragment into one buffer per segment and read every video packet only to drop it. The fragment is now
+  read in place and every other stream is discarded at the demuxer. Measured on a 4K HEVC 40 Mbit/s + E-AC-3 5.1
+  fixture (4 s segments): 0.22 to 0.32 % of a core per playback second before, 0.16 to 0.17 % after. The remote HLS
+  path shares the same decode body.
+
 ## [7.48.0] - 2026-10-26
 
 ### Added
@@ -389,12 +445,6 @@ the public-API contract.
 
 ### Fixed
 
-- **Explicit software-host pause wins over late decoder, rebuffer and preroll clock starts.** The output
-  latches transport authority under the same lock as every clock write, including before the first frame
-  arms the clock. A paused seek still updates its anchor at zero rate, and explicit play restores normal
-  preroll. A play that arrives before the feeder publishes its armed latch preserves the pending initial
-  clock start. Stopping an already-paused output retires and flushes it without resetting its clock.
-
 - **A native VOD loaded with a start position no longer reports an earlier time once it plays (AE#881, thanks
   @martijnklomp).** AVPlayer finishes the mount seek the moment it is issued, before the item is ready, and that
   completion released the clock hold. The periodic observer then published the keyframe or segment start the
@@ -407,23 +457,6 @@ the public-API contract.
   Dolby Atmos badge on every pause and scrub and re-locked on resume. It now keeps playing for 60 s
   and pauses only if the host is still paused then. Leaving APAC, leaving an all-HDMI route (AE#834)
   or tearing the session down still releases it immediately.
-
-- **A superseded still decode no longer publishes after a newer cache hit (AE#906, thanks @jonluca).** Thumbnail, preview
-  and snapshot requests retire older work before returning a cached image or yielding to playback;
-  a resident approximation cache hit also retires an older refined decode.
-  Cancelling the awaiting Task also cancels its decode; late results return nil and cannot populate
-  the cache or reset a newer request's idle timer. Requests with invalid timestamps and already-cancelled
-  requests leave an active caller's work alone. Replacement is shared across still modes, including
-  cancellation of an in-flight bounded snapshot's caller-supplied token.
-  Cancellation and playback yield still schedule idle cleanup of an opened decode context;
-  only the latest admitted request can reset that timer.
-
-- **The scrub-preview CLI builds with warnings treated as errors.** The success count checks
-  whether a placement exists without binding an unused copy; diagnostic output is unchanged.
-
-- **The APAC converter input callback is explicitly Sendable.** This is defensive compilation hygiene;
-  no host build or playback failure was reproduced. One-shot input delivery and encoded output remain
-  unchanged.
 
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
@@ -573,21 +606,6 @@ the public-API contract.
   MacBook Air M1 SDR panel a Dolby Vision P8.1 master with and without `SUPPLEMENTAL-CODECS`, a
   High-tier 3832x1600 PQ master and an audio switch to AC-3 on each were all accepted. The item still
   falls back, later titles are still offered the master, and the log now says so. tvOS is unchanged.
-- **A software live session reports its edge rebuffer as `.rebuffering`.** When the source paused, the
-  live feeder parked the synchronizer to refill but kept that to itself: `playbackPhase` stayed
-  `.playing` over a standing picture until the reader's own stall timeout promoted the source to
-  `.stalled`, 20 s later. A host app watching the clock reloaded the session after 2 s, and each fresh
-  join landed the lead behind the same frozen burst, so the viewer saw the last four seconds again,
-  three times over, before the feed came back. `SoftwarePlaybackHost.isRebuffering` now follows the
-  pumps' hold (the live feeder's dry ring and the on-demand loop's exhausted audio lead) and the
-  engine folds it into `isBuffering`, as it does the audio host's wait.
-- **A software live session catches up after a pause whose backlog arrives at once.** A source that
-  resumes by handing over everything it missed left the picture the length of the pause behind the
-  newest media, and nothing on that path ever caught up. The feeder now watches a resume with the
-  join's own rule and, once the backlog has landed, moves the picture up to the join lead behind the
-  newest media through the engine's live rejoin seek; a source that skipped what it missed is left
-  where it resumed.
-
 - **A seek no longer waits on a segment pump running at the efficiency class.** A VOD pump far
   enough ahead of playback relaxes to `.utility` (AE#286), and a seek's restart stops it and waits
   for it to finish from the loopback server's `.userInitiated` queue. A condition donates no
