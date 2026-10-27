@@ -2184,6 +2184,15 @@ public final class Demuxer: @unchecked Sendable {
         return result
     }
 
+    /// Ticks (stream time base) by which a delivered keyframe may precede its `indexedKeyframeEntries`
+    /// timestamp: a #409 repair that synthesizes the decode ladder moves a late-written IDR back onto
+    /// its sequence. 0 when packets sit exactly on the index.
+    var indexedKeyframeAdvanceTicks: Int64 {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return compositionRepair?.keyframeAdvanceTicks ?? 0
+    }
+
     func readPacket(isCurrent: @Sendable () -> Bool = { true }) throws -> UnsafeMutablePointer<AVPacket>? {
         accessLock.lock()
         defer { accessLock.unlock() }

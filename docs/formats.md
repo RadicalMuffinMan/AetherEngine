@@ -99,6 +99,61 @@ exactly matches the observed reorder head, and a complete, distinct picture-orde
 timestamps pass the slot policy. It assigns existing slots plus that lead rather than fitting a
 frame rate; DTS, audio and the keyframe index remain unchanged. An ambiguous head stays untouched.
 
+Some writers go one step further: after dropping `ctts` they force the decode-order presentation
+times to be monotonic, so each B picture (and on some files each anchor too) decoded after another
+picture is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before
+it. There is then no ladder to read a step from: the reporting file (H.264 High, 720p, GOP 90)
+stepped 3003 on 87% of its samples and 1001, 2252, 9009 or 12012 on the rest, so the probe skipped it
+as non-uniform and QuickTime, the Files app and both engine routes showed the B pictures out of
+order. When nothing above takes such a head, it is repaired with the step taken from the stream's
+average frame rate, provided the sampled span is the time its pictures take at that rate within the
+reorder delay plus two pictures, and every other check above still passes. The step is then
+remeasured on the anchors when the writer left them on the presentation axis (the average rate is
+only an estimate: a 60-picture 29.97 fps clip reports 29.80). The reporting file pushed its P pictures
+as well (each anchor 1001 ticks past the picture before it), so no two anchors agree; the rate is
+then the one the bitstream's VUI timing states, if that is within 1% of the average rate, snapped to
+a standard frame rate (any whole rate up to 240, or an NTSC one such as 23.976 or 29.97) within
+0.01%. Without a VUI rate it is the standard rate nearest the average rate, if that is within 1%. The
+VUI is what tells 24 from 23.976 on a short clip whose pushed tail drags the average, and on all three
+reporting files it named the exact rate (23, 29.97 and 29.0002 fps). Pictures are placed on that
+rate as an exact fraction of a tick, so a 23 fps file (3913.04 ticks at 90 kHz) does not lose a tick
+every 25 pictures. A head with neither is left untouched. DTS is rebuilt from each picture's
+decode slot rather than shifted, since a pushed B picture's DTS can sit after its own presentation
+time. The writer pushes keyframes as well, and only ever later: on both reporting files they sat 0 to
+4 pictures after the end of the GOP before them, which left a gap or put the next GOP in front of the
+last pictures of the previous one. A later IDR therefore continues the sequence before it, unless it
+is later than the reorder delay plus two and a half pictures (a real discontinuity; a third reporting
+file at 29 fps kept its keyframes four pictures late for a hundred seconds) or within half a tick per
+picture (all a rounded step can be off by); an earlier one keeps its own time, which is how a chain
+started on a pushed keyframe after a seek moves back into place. Counting alone follows the stated
+rate, and the writer's clock is not quite that (the third file states 29.0002 fps and writes 29.003):
+the chain drifted 61 ms behind the writer over 19 minutes and overlapped 3 times where an earlier
+keyframe pulled it back. A continued sequence therefore also leans toward the earliest origin the
+pictures before it point to (the writer only ever pushes a picture later, so the earliest is the
+nearest the truth), by at most an eighth of a picture per GOP, which removed both. A seek landing
+holds its first **8 pictures** and takes the earliest origin they point to in the same way. A keyframe
+placed back like this sits before its index entry, by at most the reorder delay plus two and a half
+pictures, while the HLS segment plan is built from the index. The VOD cutter and the restart gate
+therefore reach that far back for the keyframe each boundary names, never as far as the keyframe
+before it: without the reach the keyframe stayed in the previous segment and the next one opened on
+audio, mid-GOP, which `aetherctl segverify` counted on 25 of 40 segments of the 23 fps file and 22 of
+the 29.97 fps one. All 40 are independent now, and so are segments a restart produced. The second
+reporting file also opens
+every GOP on twelve P pictures before its first B, so a head that has not reordered after twelve
+pictures, with `PTS == DTS` throughout, is sampled on to its first regression plus a mini-GOP, up to
+**48 pictures**. The sampled span is checked against the rounded step with a tick per picture to
+spare, which is what the third file's head needed. After a seek onto an open-GOP
+keyframe, which kept its own presentation time, the sequence origin is taken from its display rank
+rather than its decode slot. The shift is what puts the first
+keyframe on the stream's start time, clamped to **16 pictures** because this writer left the keyframe
+four pictures ahead. Measured on a generated twin (`Scripts/make-clamped-ladder-fixture.sh`, 900
+pictures at 29.97 fps), the AVPlayer route stepped backwards 169 times before and 0 after, and the
+software route 44 times before and 0 after. Its `pushed-anchors.mp4`, which pushes the anchors as
+well, was left untouched before ("anchors do not agree on a step", 44 backward steps on the software
+route) and is repaired with 0 after; both now demux to the healthy twin's timestamps, including
+the GOP whose keyframe the clamp pushed. Its `p-run-clamped.mp4` (x264 CLI only) opens every GOP on
+twelve P pictures: 99 of 239 backward steps before, 0 after.
+
 ### Matroska with presentation slots in coding order
 
 Matroska block timestamps are presentation timestamps by specification, and the format has no

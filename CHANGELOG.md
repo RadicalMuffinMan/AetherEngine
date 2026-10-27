@@ -101,6 +101,25 @@ the public-API contract.
   evicted, and the idle sweep shrinks it back. A file without such a cycle stays at 8 blocks, and so does one whose
   cycle the ceiling could not hold either.
 
+- **MP4s whose writer dropped `ctts` and forced the decode ladder monotonic play in order (AE#896, thanks
+  @sunghyun-k).**
+  Such a file reports `PTS == DTS` on every sample and pushes each B picture (on some files each anchor
+  too) 1001 ticks past the picture decoded before it, so the ladder has no single
+  step and the #409 probe left the stream untouched ("decode ladder is not uniform"). Both routes then
+  showed the B pictures in decode order, as QuickTime and the Files app do. The repair now takes the
+  step from the stream's average frame rate, remeasures it on the anchors (or, when the anchors were
+  pushed as well, snaps it to the nearest standard frame rate within 1%) and rebuilds DTS from each
+  picture's decode slot, under the same picture-order checks. A keyframe the writer pushed late
+  continues the GOP before it instead of leaving a gap or overlapping it, and a head that opens on a
+  run of P pictures is sampled on to its first B picture (up to 48 pictures). The rate is the one the
+  bitstream's VUI states when it agrees with the stream (24 is no longer read as 23.976 off a short
+  clip), applied as an exact fraction of a tick, and a continued sequence leans toward where the
+  writer's own pictures say it starts, so a writer clock slightly off its stated rate no longer drifts
+  the picture 61 ms and then overlaps a GOP. Over HLS, a keyframe placed back onto its sequence sits
+  before the index entry the segment plan names, and the cutter and the restart gate now reach for
+  it: before, most segments of such a file opened mid-GOP and could not be decoded on their own.
+  `Scripts/make-clamped-ladder-fixture.sh` generates the twins. See `docs/formats.md`.
+
 - **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told
   to mix, so a stereo track reached the tap as its left channel alone, 2.1 as silence, and 4.0 to 7.1 as the centre
   alone. The tap's converter now mixes every channel but the LFE. The native and remote-HLS paths were unaffected.

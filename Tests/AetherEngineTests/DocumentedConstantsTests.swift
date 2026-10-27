@@ -46,6 +46,21 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("five entries per item", docs)
     }
 
+    func testNominalRateCompositionShiftMatchesDocumentation() throws {
+        XCTAssertEqual(H264CompositionOffsetRepair.maximumNominalShiftPictures, 16)
+        assertDocumented("clamped to **16 pictures**", try documentation())
+    }
+
+    func testCompositionSampleExtensionMatchesDocumentation() throws {
+        XCTAssertEqual(H264CompositionOffsetRepair.extendedSampleTarget, 48)
+        assertDocumented("up to\n**48 pictures**", try documentation())
+    }
+
+    func testLandingEnvelopeHoldMatchesDocumentation() throws {
+        XCTAssertEqual(H264CompositionOffsetRepair.landingEnvelopePictures, 8)
+        assertDocumented("first **8 pictures**", try documentation())
+    }
+
     func testPartialCompositionHoldBoundsMatchDocumentation() throws {
         let docs = try documentation()
         XCTAssertEqual(H264PartialCompositionRepair.maximumReorderDepth, 16)
