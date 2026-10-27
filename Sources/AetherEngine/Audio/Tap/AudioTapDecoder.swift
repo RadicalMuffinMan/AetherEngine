@@ -263,7 +263,7 @@ final class AudioTapDecoder: @unchecked Sendable {
     }
 }
 
-/// Decodes one loopback fMP4 fragment (#95): composes init + segment in memory (the
+/// Decodes one loopback fMP4 fragment (#95): reads init + segment in place (the
 /// scrub-thumbnail precedent, see `DataIOReader`), demuxes, decodes the single audio track.
 /// A fresh demux + codec context per segment keeps it robust across producer restarts and
 /// track switches; the cost is negligible against 4-6 s of audio per segment.
@@ -275,50 +275,29 @@ final class AudioTapSegmentDecoder: @unchecked Sendable {
     }
 
     func decode(initData: Data, segment: Data) -> [AudioTapChunk] {
-        var composed = Data(capacity: initData.count + segment.count)
-        composed.append(initData)
-        composed.append(segment)
-        let demuxer = Demuxer()
-        do {
-            try demuxer.open(reader: DataIOReader(data: composed))
-        } catch {
-            return []
-        }
-        defer { demuxer.close() }
-        let audioIdx = demuxer.audioStreamIndex
-        guard audioIdx >= 0, let stream = demuxer.stream(at: audioIdx) else { return [] }
-        let decoder = AudioTapDecoder(channels: channels)
-        do {
-            try decoder.open(stream: stream)
-        } catch {
-            return []
-        }
-        defer { decoder.close() }
-
-        var chunks: [AudioTapChunk] = []
-        while let packet = (try? demuxer.readPacket()) ?? nil {
-            var p: UnsafeMutablePointer<AVPacket>? = packet
-            defer { trackedPacketFree(&p) }
-            guard packet.pointee.stream_index == audioIdx else { continue }
-            chunks.append(contentsOf: decoder.decode(packet: packet))
-        }
-        chunks.append(contentsOf: decoder.drain())
-        return chunks
+        decode(reader: DataIOReader(parts: [initData, segment]))
     }
 
     /// Decode a self-describing HLS segment (MPEG-TS or fMP4-with-inline-moof) whose container
     /// FFmpeg detects unaided. Used by the remote-HLS tap, where segments carry no separate init
     /// blob (unlike the loopback fMP4 fragments). Same fresh-demux-per-segment discipline.
     func decode(selfContainedSegment segment: Data) -> [AudioTapChunk] {
+        decode(reader: DataIOReader(data: segment))
+    }
+
+    private func decode(reader: DataIOReader) -> [AudioTapChunk] {
         let demuxer = Demuxer()
         do {
-            try demuxer.open(reader: DataIOReader(data: segment))
+            try demuxer.open(reader: reader)
         } catch {
             return []
         }
         defer { demuxer.close() }
         let audioIdx = demuxer.audioStreamIndex
         guard audioIdx >= 0, let stream = demuxer.stream(at: audioIdx) else { return [] }
+        // #910: the video packets of a loopback fragment are most of its bytes, and the tap never
+        // looks at them. Discarded here, the demuxer skips them instead of allocating each one.
+        demuxer.discardAllStreamsExcept([audioIdx])
         let decoder = AudioTapDecoder(channels: channels)
         do {
             try decoder.open(stream: stream)
