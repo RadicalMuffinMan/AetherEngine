@@ -18,6 +18,12 @@ the public-API contract.
   written under and its `Level` (`.info`, since verbose lines still never reach a host). Additive: `handler` is
   unchanged.
 
+- **Hosts can query presentation-backed first-frame evidence with `hasRenderedVideoFrame()` (AE#901, thanks @jonluca).**
+  Native playback reads the current layer after this load's readiness edge; software playback reads
+  the current renderer's non-dropped frame count. Unlike the load-scoped readiness latch, this does
+  not infer a local picture from an external player's readiness. A stopped or replaced session
+  cannot answer with an older asynchronous metrics result.
+
 ### Fixed
 
 - **An audio tap consumer that falls behind is told where it lost audio (AE#864, thanks @qoli).** The tap stream
