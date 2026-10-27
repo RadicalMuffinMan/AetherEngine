@@ -583,6 +583,12 @@ A test rig that only captures stdout / stderr (`devicectl device process launch 
 EngineLog.handler = { print($0) }   // every info-level line, verbatim
 ```
 
+A log viewer that files lines by subsystem takes the same lines with their category instead of parsing the `[Prefix]` in the text:
+
+```swift
+EngineLog.structuredHandler = { line, category, level in viewer.append(line, from: category.rawValue) }
+```
+
 The first line of any session names the FFmpeg that answered, because which one does is decided by your executable's link rather than by the package graph:
 
 ```
