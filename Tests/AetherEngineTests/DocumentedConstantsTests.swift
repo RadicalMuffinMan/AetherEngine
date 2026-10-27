@@ -89,7 +89,7 @@ final class DocumentedConstantsTests: XCTestCase {
                        0.036, accuracy: 1e-9)
 
         assertDocumented("once K = 3 newer base-layer", fel)
-        assertDocumented("is the maximum layer skew, 3;", fel)
+        assertDocumented("(`maxLayerSkewFrames`) is the maximum layer", fel)
         assertDocumented("waiting enhancement frames capped at 10", fel)
         assertDocumented("At most 10 enhancement frames wait", fel)
         assertDocumented("fixed capacity 32", fel)

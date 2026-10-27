@@ -1480,6 +1480,20 @@ final class SoftwarePlaybackHost {
         // (`AudioOutput.videoPrerollSatisfied`, #774, #800). A live stream off the FEL path starts at
         // once, and so does a session playing audio only in the background, which feeds the renderer
         // nothing.
+        #if DualLayerDolbyVision
+        // The dual-layer decoder releases a base frame that lost its enhancement layer by presentation
+        // deadline, which needs this clock.
+        if let dual = videoDecoder as? DualLayerVideoDecoder {
+            // The fields are read one after another, not as one atomic snapshot, so a clock that moves
+            // between them (a start, a rate change) can pair a time with a stale flag. The decoder
+            // samples again at its next arrival or sweep, within one sweep delay, which corrects it.
+            dual.setRenderClock({ [weak audioOutput] in
+                guard let audioOutput else { return nil }
+                return .init(seconds: audioOutput.currentTimeSeconds, running: audioOutput.rate > 0,
+                             prerolling: audioOutput.prerollPending, rate: Double(audioOutput.rate))
+            }, frameRate: AetherEngine.detectFrameRate(stream: vStream))
+        }
+        #endif
         let prerollRenderer = renderer
         let prerollLive = isLive
         self.audioOutput?.videoPrerollSatisfied = { [weak self] clock in
@@ -2000,6 +2014,13 @@ final class SoftwarePlaybackHost {
         inFlightSeekResumeIntent = wasPlaying
         isPlaying = false
 
+        #if DualLayerDolbyVision
+        // The dual-layer decoder's deadline rule reads this clock, and `seekClock` below moves it after
+        // this flush. That is safe only because the demux loop resumes after `noteSeekSettled`, past the
+        // `seekClock` call: until then no post-seek frame reaches the decoder to be judged against the
+        // pre-seek clock. Keep that order if either step moves. (The clock sample is not atomic either,
+        // see where `setRenderClock` is called; a skewed sample corrects itself within one sweep.)
+        #endif
         videoDecoder.flush()
         audioDecoder?.flush()
         // Hold the last frame through the seek (don't blank the display) so the viewer sees the previous
@@ -4315,6 +4336,7 @@ final class SoftwarePlaybackHost {
                 + (d.sourceExhausted ? "eof=y " : "")
                 + "enq=+\(dEnq) disp=+\(dHanded) "
                 + "lost=\(cadence.lostBeforeLayer)(\(dLost >= 0 ? "+" : "")\(dLost)) "
+                + "skip=\(cadence.arrivalSkipped) "
                 + "dpts=\(spacing) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop)) "
                 + "delay=\(delay >= 0 ? String(format: "%.2f", delay) : "-")"
                 + "(\(dDelay >= 0 ? "+" : "")\(String(format: "%.2f", dDelay))) "

@@ -30,6 +30,14 @@ the public-API contract.
   not infer a local picture from an external player's readiness. A stopped or replaced session
   cannot answer with an older asynchronous metrics result.
 
+- **`AETHER_FEL_CHROMA` picks the chroma sampling of the composed Dolby Vision frame (`DualLayerDolbyVision`, experimental).**
+  The composition is defined on the 4:2:0 sites, and 4:2:0 stays the default and the output playback
+  uses. `AETHER_FEL_CHROMA=422` or `444` steps that result up to 4:2:2 or 4:4:4 by co-sited means (a copy
+  on a site, the mean of the sites around a sample between them), for an A/B run on a display. 4:4:4 is
+  experimental: the spec has no 4:4:4 reconstruction, so it only steps the 4:2:0 result up. Neither format
+  is checked on a TV yet, and both take the pool path (in-place composition is 4:2:0 only). Any other value
+  keeps 4:2:0. See `docs/dolby-vision-fel.md`.
+
 ### Changed
 
 - **Hardware deinterlace warm-up starts only when a source needs it (AE#877, thanks @jonluca).**
@@ -37,6 +45,24 @@ the public-API contract.
   Interlaced auto-mode loads still share one process-wide warm-up. Same-title custom reloads
   preserve a decoded progressive verdict; actual title switches reassess reopened metadata.
   Background teardown carries both interlaced and progressive decisions to a retained-reader reload.
+
+- **The `DualLayerDolbyVision` composer writes into the decoded base-layer buffer instead of a separate pool.**
+  When the base-layer buffer is IOSurface-backed, 10-bit biplanar video range, even-sized and the luma
+  curve is not MMR, the chroma pass and then the luma pass overwrite the buffer in place, so the
+  output pool is not allocated (a frame refused for in-place still takes the pool path). A buffer is
+  never composed twice at once, and a command buffer that fails after it started drops the frame
+  instead of showing a mix. Measured on the Mac (4K, 200 s, 7 seeks, two runs each): our process
+  falls by about 300 MB, the decoder service gains about 170 MB, a net fall of about 150 MB. The
+  composition is bit-identical to the pool path on the Mac (unit tests and a real-decoder spot check;
+  not yet checked on a TV). `AETHER_FEL_INPLACE=0` turns it off for an A/B run.
+  See `docs/dolby-vision-fel.md`.
+
+- **The dual-layer route says in the log that an E-AC-3 track is decoded to PCM, and keeps session totals of the deadline releases (`DualLayerDolbyVision`).**
+  An E-AC-3 track played with a Profile 7 dual-layer video is decoded to PCM, which loses the Atmos
+  objects, with nothing in the log to say so; the producer now logs that once per session. The
+  dual-layer decoder also logs `totals:` (composed frames and the deadline, held-wall and backstop
+  releases, session-wide) at info level, at most every 10 s and only when a count moved, so a run's
+  log carries the numbers without a debug build.
 
 ### Fixed
 
@@ -93,6 +119,45 @@ the public-API contract.
   frame in whole ticks (1/24000 with 1001 ticks a frame for 23.976), and every timestamp within one source tick of a
   grid slot is put on that slot. Off-grid timestamps keep their own time, so variable-rate stretches pass through;
   25 and 50 fps already fit 1 ms and are unchanged.
+
+- **A Dolby Vision FEL base frame whose enhancement layer does not arrive is released by its display deadline (`DualLayerDolbyVision`).**
+  A waiting base frame was given up on only after three newer base frames had arrived, so a damaged
+  or missing enhancement-layer stretch held the picture back and showed up as bursts of dropped
+  frames. The decoder now reads the render clock and releases the frame as its base layer once its
+  presentation time is within a margin of `maxFramesInFlight` frame intervals (at least 100 ms),
+  after a short grace (one frame interval, 15 to 50 ms) for an enhancement layer that is only a
+  moment late. The sweep re-arms on every arrival; a paused or prerolling clock holds the frames
+  (bounded at 2 s), and the old count rule stays as a backstop. On an A12 Apple TV with the
+  enhancement layer removed for 60 s of a clip the run dropped 1 frame, against 45 and 71 before (measured on an earlier debug build).
+
+- **A Dolby Vision FEL frame shown as its base layer carries the RPU that keeps its mapping (`DualLayerDolbyVision`).**
+  A frame released by its display deadline, bypassed for a missing enhancement layer or RPU, or left
+  as its base layer by a failed composition went out with the composed-frame RPU, whose curves are
+  set to no-op because the composer is meant to have reshaped the picture. Nothing had, so the
+  display showed an unreshaped frame between composed ones. Those frames now carry the Profile 8.1
+  RPU with the source's mapping and display metadata. libdovi's mode 2 sets the curves to no-op only
+  when the RPU's own `el_type` is FEL, and that comes from the NLQ block, which is absent when
+  `disable_residual_flag` is set, so a composed frame's RPU now also has its mapping removed
+  whatever the `el_type`. The remux route is unchanged. The cost is a second libdovi parse and
+  conversion per RPU on the dual-layer route and one more NAL per side-data entry; when the
+  mapping-keeping form cannot be built the frame carries the composed form, as before. Keeping the
+  mapping on a raw base layer follows the fix for a missing enhancement layer in TheFireKahuna's AetherEngine fork (thanks
+  @TheFireKahuna); only its RPU half is taken here, the frame is still shown as its base layer.
+
+- **The `DualLayerDolbyVision` composer covers the last chroma column of odd sizes, refuses a zero NLQ ceiling and pairs a passed enhancement slot by access unit.**
+  The chroma planes were sized with a floor division in the texture binds, the dispatch and the
+  kernel grid, so the last chroma column and row of an odd luma size was never written; they now
+  round up.
+  A `vdr_in_max` that shifts down to 0 now drops the residual like an out-of-range one, and the
+  prediction is clamped to the VDR range in float before the integer conversion, since an MMR result
+  far outside it overflowed int. When the base layer has only ever stepped forward, an enhancement
+  slot at or below the latest base picture that is not in the base time table pairs by access unit
+  like an unknown slot instead of taking an extrapolated time that belongs to no base frame. The
+  `el_type` probe rewinds its source with the same 5 s bounded seek the
+  interlace probe uses, and a stalled rewind leaves the type unknown, so the route is not taken. The
+  arrival-order path counts the frames its seek threshold discards (`skip=` in the cadence line,
+  separate from `lost=`) and logs the first one once per seek. Without the trait only the counter and
+  its log line exist, and nothing reaches them.
 - **A 24.000 fps source is programmed as 24 Hz, not 23.976 Hz (AE#884, thanks @akhanwav).** `FrameRateSnap` sent
   the whole 23.5 to 24.05 window to 23.976, so Match Frame Rate ran 24p content one frame in 1001 fast and the
   panel repeated a frame about every 42 s. A probe within 0.005 of 24.000 now snaps to 24; a Matroska track with
