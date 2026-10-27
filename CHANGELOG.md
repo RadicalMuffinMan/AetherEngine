@@ -43,6 +43,10 @@ the public-API contract.
   the whole 23.5 to 24.05 window to 23.976, so Match Frame Rate ran 24p content one frame in 1001 fast and the
   panel repeated a frame about every 42 s. A probe within 0.005 of 24.000 now snaps to 24; a Matroska track with
   DefaultDuration probes as an exact 24/1 or 24000/1001, so 23.976 sources and noisier probes keep 23.976.
+- **The internal HLS byte FIFO defensively rejects operations that could look like EOF (AE#875, thanks @jonluca).**
+  Empty writes complete without occupying capacity, and nonpositive read lengths fail without
+  consuming bytes. Current ingest callers already filter both cases, so this hardens the internal
+  contract for future callers rather than changing existing playback.
 
 ## [7.48.0] - 2026-10-26
 
@@ -221,11 +225,6 @@ the public-API contract.
 - **The HLS fixture reads its redirect port under the lifecycle lock.** A request worker could read
   the bound port while `stop()` reset it under the lock. Host-only redirects now take the same lock,
   and the port stays private to the server. Explicit `--redirect-port` targets are unchanged.
-
-- **The internal HLS byte FIFO defensively rejects operations that could look like EOF.**
-  Empty writes complete without occupying capacity, and nonpositive read lengths fail without
-  consuming bytes. Current ingest callers already filter both cases, so this hardens the internal
-  contract for future callers rather than changing existing playback.
 
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
