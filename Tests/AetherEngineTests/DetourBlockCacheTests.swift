@@ -179,6 +179,71 @@ struct DetourBlockCacheTests {
         #expect(cache.residentCount == 0)
         #expect(cache.block(0) == nil)
     }
+
+    /// Walks `cycle` blocks round-robin the way the detour path does (look up, insert on a miss) and
+    /// returns how many lookups missed in each pass.
+    private func missesPerPass(_ cache: DetourBlockCache, cycle: Int, passes: Int) -> [Int] {
+        (0..<passes).map { _ in
+            var misses = 0
+            for i in 0..<cycle where cache.block(Int64(i)) == nil {
+                misses += 1
+                cache.insert(Int64(i), patternBlock(base: i * 16))
+            }
+            return misses
+        }
+    }
+
+    // #909: 14 subtitle tracks, each in its own byte range, against 8 blocks missed on every lookup.
+    @Test("a cyclic working set larger than the resting size grows the cache until every lookup hits")
+    func cyclicWorkingSetGrows() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8, ceilingBlocks: 24)
+        let misses = missesPerPass(cache, cycle: 14, passes: 4)
+        #expect(misses[0] == 14)
+        #expect(misses.last == 0)
+        #expect(cache.capacity == 14)
+        #expect(cache.residentCount == 14)
+    }
+
+    @Test("the same cycle without a ceiling keeps missing every lookup")
+    func cyclicWorkingSetWithoutCeilingThrashes() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8)
+        #expect(missesPerPass(cache, cycle: 14, passes: 4) == [14, 14, 14, 14])
+        #expect(cache.capacity == 8)
+    }
+
+    @Test("growth stops at the ceiling")
+    func growthStopsAtCeiling() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 4, ceilingBlocks: 6)
+        _ = missesPerPass(cache, cycle: 10, passes: 5)
+        #expect(cache.capacity == 6)
+        #expect(cache.residentCount == 6)
+    }
+
+    @Test("a forward scan that never returns to a block does not grow the cache")
+    func forwardScanStaysAtRestingSize() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8, ceilingBlocks: 24)
+        for i in 0..<100 { cache.insert(Int64(i), patternBlock(base: i * 16)) }
+        #expect(cache.capacity == 8)
+        #expect(cache.residentCount == 8)
+    }
+
+    @Test("the idle sweep shrinks a grown cache back, and clear resets it")
+    func idleSweepAndClearShrink() {
+        let clock = ManualClock()
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8, ceilingBlocks: 24, now: { clock.now })
+        _ = missesPerPass(cache, cycle: 14, passes: 3)
+        #expect(cache.capacity == 14)
+
+        clock.advance(60)
+        for i in 0..<3 { _ = cache.block(Int64(i)) }
+        #expect(cache.evictIdle(olderThan: 30) == 11)
+        #expect(cache.capacity == 8, "never below the resting size")
+
+        _ = missesPerPass(cache, cycle: 14, passes: 3)
+        #expect(cache.capacity == 14)
+        cache.clear()
+        #expect(cache.capacity == 8)
+    }
 }
 
 /// Issue #71: under a sustained 429, parse-driven seekReconnect kept resetting unproductiveReconnects
