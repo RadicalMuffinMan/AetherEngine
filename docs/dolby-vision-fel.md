@@ -637,7 +637,8 @@ goes out at the default level (so a host's log carries it without a debug build)
 count of composed frames and of the base frames released by the deadline, the held-wall bound and the
 backstop. It is sent at most every 10 s and only when one of the counts moved since the last one, so a
 device run is judged from it. The software host's `[SWDiag]` line carries `skip=`, the number of frames
-the renderer skipped on arrival because the clock had already passed them, next to `lost=` and `layerDrop=`.
+the arrival-order path discarded below a seek's threshold (the pictures of the landing GOP before the
+target, a decision rather than a loss), next to `lost=` and `layerDrop=`.
 
 The exception is a summary whose second counted a compose failure, which goes out at the default level
 so the failure is visible without that. `os_signpost` intervals around compose and delivery make the

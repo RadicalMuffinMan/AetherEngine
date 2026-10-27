@@ -1518,8 +1518,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private static let deadlineSweepQueue = DispatchQueue(label: "aether.dovi.deadline-sweep", qos: .userInteractive)
     /// Bounds on the wait to the next sweep: never a busy loop, and never so long that a rate change or a
     /// moved clock goes unnoticed.
-    private static let minSweepDelay: TimeInterval = 0.002
-    private static let maxSweepDelay: TimeInterval = 0.25
+    static let minSweepDelay: TimeInterval = 0.002
+    static let maxSweepDelay: TimeInterval = 0.25
 
     /// Seconds until the first waiting frame could be released by time alone, from `now`, clamped to the
     /// sweep bounds; nil when nothing waits. The caller holds `lock`.
@@ -1832,6 +1832,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         totalComposed += summaryComposedFrames
         summaryComposedFrames = 0
         summaryComposeFailures = 0
+        summaryInPlaceDropped = 0
         composeResultLock.unlock()
         totalBypassDeadline += summaryBypassDeadline
         totalBypassHeldWall += summaryBypassHeldWall
@@ -1978,7 +1979,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lastGoodBaseLayerNAL = nil
         borrowedParamsRun = 0
         sideDataRing.removeAll()
-        composeResultLock.lock(); summaryComposedFrames = 0; summaryComposeFailures = 0; composeResultLock.unlock()
+        composeResultLock.lock(); summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; composeResultLock.unlock()
         summaryBypassNoELInAU = 0
         summaryBypassDeadline = 0
         summaryBypassHeldWall = 0
