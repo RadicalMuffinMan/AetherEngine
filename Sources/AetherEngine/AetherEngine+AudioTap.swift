@@ -6,7 +6,8 @@ extension AetherEngine {
 
     /// Install the tap on the currently loaded item and return its buffer stream.
     /// Mono Float32 48 kHz (`AetherEngine.audioTapFormat`), source-PTS timestamps, lossy under
-    /// pressure, never stalls playback. One tap per engine: installing again finishes the
+    /// pressure, never stalls playback. A consumer that falls more than the stream's queue behind
+    /// loses buffers, and the first one it receives after such a gap carries `discontinuity`. One tap per engine: installing again finishes the
     /// previous stream. `load()` and `stop()` finish it too (opt-in is per load). With no
     /// active playback session (or a video-only source) the returned stream finishes
     /// immediately.
