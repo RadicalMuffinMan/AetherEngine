@@ -35,7 +35,18 @@ case "$(jq -r '.structured_output.status // ""' "$result_json")" in
   green)  status="**Status:** 🟢 Clean. Nothing left to fix, ready for a maintainer." ;;
   *)      status="" ;;
 esac
-summary="$summary${status:+$'\n\n'$status}"
+# The status goes first so notification previews show it: right under the heading, or on top
+# when the summary does not open with one.
+if [[ -n "$status" ]]; then
+  first="${summary%%$'\n'*}"
+  if [[ "$first" == "## "* ]]; then
+    rest="${summary#"$first"}"
+    while [[ "$rest" == $'\n'* ]]; do rest="${rest#$'\n'}"; done
+    summary="$first"$'\n\n'"$status${rest:+$'\n\n'$rest}"
+  else
+    summary="$status"$'\n\n'"$summary"
+  fi
+fi
 
 with_inline=$(jq -n --arg sha "$head_sha" --arg body "$summary"$'\n\n'"$footer" --argjson inline "$inline" '{
   commit_id: $sha, event: "COMMENT", body: $body,

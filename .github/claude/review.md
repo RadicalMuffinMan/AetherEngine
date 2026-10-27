@@ -141,7 +141,7 @@ You return JSON with three fields; the workflow turns it into one GitHub review.
    With no findings, say so in one line; do not invent any. The workflow adds the footer that marks
    the review as automated.
 3. **`status`**: the verdict for the PR as it stands now, one of four values. The workflow renders it
-   as a fixed coloured status line at the end of the review, so do not repeat it in the summary.
+   as a fixed coloured status line right under the summary heading, so do not repeat it in the summary.
    It follows the most severe finding that is still open, including unresolved ones from an earlier
    review, not only what is new in this push:
    - `red`: at least one **Blocking** finding, or the direction is wrong.
