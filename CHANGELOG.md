@@ -39,6 +39,12 @@ the public-API contract.
   keys on VideoToolbox's original buffer and its IOSurface. RPU updates now require an owned output; on a failed
   copy the original frame is delivered unchanged. Follow-up to AE#876.
 
+- **Anamorphic snapshots fit their requested bounds, and HDR stills keep the displayed aspect (AE#905,
+  thanks @jonluca).**
+  Snapshot sizing now applies the source pixel aspect before enforcing both `maxSize` limits,
+  including fractional bounds. HDR tone mapping uses the same display dimensions as SDR and
+  Dolby Vision stills, instead of returning the coded aspect or upscaling a small source.
+
 - **A VP9 key frame retired by a seek no longer resizes the hardware session (AE#904, thanks @jonluca).** A parked
   key frame from the pre-seek feed could rebuild the VideoToolbox session at its old size before the epoch check
   rejected it, discarding the reference pictures the current feed needed; the next inter frame produced no image.
