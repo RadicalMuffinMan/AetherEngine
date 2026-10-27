@@ -641,9 +641,14 @@ extension AetherEngine {
             }
             // Retention prune, once per batch instead of once per event: it depends only on the
             // playhead, which the batch does not move.
-            if isSubtitleActive(for: channel),
-               Self.pruneCues(&cues, before: playhead - subtitleCueRetentionSeconds) {
-                didMutate = true
+            if isSubtitleActive(for: channel) {
+                if Self.pruneCues(&cues, before: playhead - subtitleCueRetentionSeconds) {
+                    didMutate = true
+                }
+                if Self.pruneCues(&cues, toBitmapBytes: Self.subtitleCueBitmapByteBudget,
+                                  endedBefore: playhead - Self.subtitleCueBitmapFloorSeconds) {
+                    didMutate = true
+                }
             }
             if didMutate { publishRetainedSubtitleCues(cues, for: channel) }
             // #357: state what the tick did before the resolution line states how far it reached.
@@ -1373,6 +1378,29 @@ extension AetherEngine {
         let before = cues.count
         cues.removeAll { $0.endTime < cutoff }
         return cues.count != before
+    }
+
+    /// AE#879: bound the decoded bitmap history behind the playhead by bytes. A dense PGS track
+    /// retains thousands of full-RGBA images inside the 300 s window (reported: 2,207 cues, 290 MB),
+    /// most of them already behind the viewer. Cues that ended before `cutoff` are dropped oldest end
+    /// first until the bitmap total fits `budget`; cues past it (the offset floor and everything
+    /// ahead) are never touched, so the total can stay above budget. A backward seek re-decodes its
+    /// window from the packet store (`.resetAndDecode`), which is what brings an evicted cue back.
+    nonisolated static func pruneCues(_ cues: inout [SubtitleCue], toBitmapBytes budget: Int,
+                                      endedBefore cutoff: Double) -> Bool {
+        var total = cues.reduce(0) { $0 + $1.bitmapBytes }
+        guard total > budget else { return false }
+        let evictable = cues.indices
+            .filter { cues[$0].endTime < cutoff && cues[$0].bitmapBytes > 0 }
+            .sorted { cues[$0].endTime < cues[$1].endTime }
+        var drop = Set<Int>()
+        for index in evictable where total > budget {
+            total -= cues[index].bitmapBytes
+            drop.insert(index)
+        }
+        guard !drop.isEmpty else { return false }
+        cues = cues.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
+        return true
     }
 
 

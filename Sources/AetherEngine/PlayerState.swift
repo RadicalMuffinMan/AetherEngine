@@ -1590,6 +1590,12 @@ public struct SubtitleCue: Identifiable, Sendable {
         self.placement = placement
     }
 
+    /// AE#879: decoded bytes a bitmap cue holds; 0 for text cues.
+    var bitmapBytes: Int {
+        guard case .image(let image) = body else { return 0 }
+        return image.cgImage.bytesPerRow * image.cgImage.height
+    }
+
     /// Plain text for text and rich-text cues (rich runs concatenated); nil for bitmap cues.
     public var text: String? {
         switch body {

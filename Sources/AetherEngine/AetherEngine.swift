@@ -67,6 +67,7 @@ public final class AetherEngine: ObservableObject {
             ) {
                 // AE#870: a retained paused session skipped the background policy, so a resume in the
                 // background (lock screen, Control Center, AVKit) owes the playing-session decision.
+                // A seek or reload can resume while in flight, so it owes the settled decision too.
                 backgroundActionOwed = true
             }
             settleOwedBackgroundAction()
@@ -1334,11 +1335,15 @@ public final class AetherEngine: ObservableObject {
 
     /// AE#870: `retainsVideoPipelineWhenBackgrounded` answers only for a paused session. One that
     /// resumes while still backgrounded gets the playing-session policy (teardown with background
-    /// playback off, software audio-only), whichever transport owner started it.
+    /// playback off, software audio-only), whichever transport owner started it. A seek or reload can
+    /// carry a later play request, and remote-HLS autoplay has no paused readiness waypoint. Owe the
+    /// decision when leaving the retained pause; `backgroundDecisionMustWait` defers it until the
+    /// operation settles into its final transport state.
     nonisolated static func backgroundPolicyIsOwedOnResume(
         isBackgrounded: Bool, retainsPausedPipeline: Bool, from: PlaybackState, to: PlaybackState
     ) -> Bool {
-        isBackgrounded && retainsPausedPipeline && from == .paused && to == .playing
+        isBackgrounded && retainsPausedPipeline && from == .paused
+            && (to == .playing || to == .seeking || to == .loading)
     }
 
     /// #127: how to execute a BackgroundAction. A PAUSED teardown on platforms with quick app switches
@@ -2560,6 +2565,8 @@ public final class AetherEngine: ObservableObject {
     /// Latched at load; reused by audio-track-switch reload to re-derive activeVideoDecoder without re-probing.
     /// Reset to AV_CODEC_ID_NONE in stopInternal.
     var lastDetectedVideoCodec: AVCodecID = AV_CODEC_ID_NONE
+    /// Preserved through same-source reloads; cleared when the session stops.
+    var lastRequiresDeinterlaceWarmup = false
 
     /// In-flight probe demuxer. Registered before the detached open so stopInternal can markClosed() it:
     /// without this, player dismissal/channel zapping left the probe reconnecting through subsequent sessions.
@@ -3918,11 +3925,17 @@ public final class AetherEngine: ObservableObject {
     /// unobservable; see `SubtitleDeliveryStatement.EventBudget`.
     var subtitleCueDiagnosticBudget = SubtitleDeliveryStatement.EventBudget()
 
-    /// Trailing retention window for subtitleCues (seconds). Bounds bitmap-cue (PGS/DVB/DVD) memory:
-    /// each cue retains a decoded RGBA CGImage; a 2-hr Blu-ray PGS track emits ~1500-2000 cues.
-    /// 300 s covers normal pause durations and backward-scrub reach that doesn't trigger a restart;
-    /// evicted cues are re-emitted after a producer restart (fresh EmbeddedSubtitleDecoder, empty dedupe set).
+    /// Trailing retention window for subtitleCues (seconds). Evicted cues come back when a backward
+    /// seek re-decodes its window from the packet store. Bitmap cues are bounded by bytes as well,
+    /// see `subtitleCueBitmapByteBudget`.
     let subtitleCueRetentionSeconds: Double = 300
+
+    /// AE#879: ceiling on the decoded RGBA bytes of retained bitmap cues (PGS/DVB/DVD), enforced only
+    /// on cues that ended more than `subtitleCueBitmapFloorSeconds` behind the playhead.
+    nonisolated static let subtitleCueBitmapByteBudget = 64 * 1024 * 1024
+    /// AE#879: history the byte budget never evicts, so a host-side subtitle offset still finds its
+    /// cue without a seek. Well past any delay a host offers (Sodalite: +/-10 s per title).
+    nonisolated static let subtitleCueBitmapFloorSeconds: Double = 60
 
     /// #357: shortest window that can only be FFmpeg's open-ended placeholder, not an authored
     /// duration. A PGS composition carries no end of its own, so the decoder stamps it with
@@ -4024,7 +4037,6 @@ public final class AetherEngine: ObservableObject {
         FFmpegLogBridge.install()
         // Which FFmpeg answers is decided by the host's link, not by the package graph (AE#396).
         FFmpegRuntimeCheck.logOnce()
-        _ = DeinterlaceHardwareWarmup.shared
 
         // The category is declared off-main at the first load, once per process (#114), and the session
         // is never activated here: AVKit owns native playback activation (#24).
@@ -5311,10 +5323,8 @@ public final class AetherEngine: ObservableObject {
         if detectedCodecID == AV_CODEC_ID_H264, detectedFieldOrder == AV_FIELD_UNKNOWN,
            probeOpened,
            let vStream = probe.stream(at: probe.videoStreamIndex),
-           let codecpar = vStream.pointee.codecpar,
-           let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
-            let bytes = Array(UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
-            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(extradata: bytes)
+           let codecpar = vStream.pointee.codecpar {
+            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: codecpar)
             if spsIndicatesInterlaced {
                 EngineLog.emit(
                     "[AetherEngine] fieldOrder=UNKNOWN but SPS frame_mbs_only_flag=0; "
@@ -5416,7 +5426,16 @@ public final class AetherEngine: ObservableObject {
             let vIdx = probe.videoStreamIndex
             elType = await BlockingWork.detached(priority: .userInitiated) { [probe] in
                 let result = DolbyVisionRecordAudit.probeEnhancementLayerType(demuxer: probe, streamIndex: vIdx)
-                probe.seek(to: 0)
+                // The session reuses this demuxer, so a type read from a position that cannot be
+                // restored is worth nothing: a seek that stalls leaves the type unknown, and the
+                // route is not taken.
+                guard probe.seekBounded(to: 0, timeout: Self.probeRewindSeekTimeout) else {
+                    EngineLog.emit(
+                        "[AetherEngine] el_type probe could not rewind the source within "
+                        + "\(Int(Self.probeRewindSeekTimeout)) s; enhancement layer type unknown",
+                        category: .engine)
+                    return nil
+                }
                 return result
             }.value
             if loadGeneration != gen {
@@ -5456,6 +5475,9 @@ public final class AetherEngine: ObservableObject {
             canHardwareDecode: opensHardwareHEVC,
             elType: elType
         )
+        var requiresDeinterlaceWarmup = VideoRoutingPolicy.requiresDeinterlaceWarmup(
+            codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
+            spsIndicatesInterlaced: spsIndicatesInterlaced)
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
         // progressive pictures, and FFmpeg's parser reports TT for them off SEI pic_struct alone while
@@ -5489,6 +5511,7 @@ public final class AetherEngine: ObservableObject {
             }
             if InterlaceProbe.refutesDeclaredInterlace(verdict) {
                 useSoftwarePath = false
+                requiresDeinterlaceWarmup = false
                 EngineLog.emit(
                     "[AetherEngine] declared interlaced (fieldOrder=\(detectedFieldOrder.rawValue)) but "
                     + "\(verdict); the deinterlacer would never engage, routing native for HW decode (#232)",
@@ -5697,10 +5720,12 @@ public final class AetherEngine: ObservableObject {
                     isLive: options.isLive,
                     dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil,
+                    requiresDeinterlaceWarmup: requiresDeinterlaceWarmup,
                     generation: gen,
                     elType: elType
                 )
                 playbackBackend = .software
+                lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
                 // AE#550: the one thing a viewer on a receiver needs said out loud. This backend's
                 // picture cannot leave the device, so a wireless route carries the sound alone, and
                 // the report that opened this was someone hearing a film they could not see.
@@ -5788,6 +5813,8 @@ public final class AetherEngine: ObservableObject {
                     }
                 )
                 playbackBackend = .native
+                // Preserve source evidence for a later native-to-software recovery.
+                lastRequiresDeinterlaceWarmup = requiresDeinterlaceWarmup
                 activeVideoDecoder = Self.videoDecoderLabel(
                     codecID: detectedCodecID, isSoftware: false
                 )
@@ -6044,7 +6071,8 @@ public final class AetherEngine: ObservableObject {
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
                 expectedGeneration: loadGeneration,
                 discTitleIDOverride: selection.discTitleID,
-                resumePlaying: loadedOptions.autoplay
+                resumePlaying: loadedOptions.autoplay,
+                restoredDeinterlaceWarmupDecision: selection.requiresDeinterlaceWarmup
             )
             // AE#460 follow-up: a rebuild that died leaves the session in `.error`, and this branch
             // used to return as if it had come back, so `reloadAtCurrentPosition(applying:)`
@@ -8184,6 +8212,7 @@ public final class AetherEngine: ObservableObject {
         activeVideoDecoder = nil
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
+        lastRequiresDeinterlaceWarmup = false
         playlistShiftSeconds = 0
         liveDisplayShiftSeconds = nil
         // AE#105 / AE#270: the display origin belongs to the session that published it. Clearing it here

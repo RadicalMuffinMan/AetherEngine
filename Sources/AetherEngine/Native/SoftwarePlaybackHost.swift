@@ -1490,6 +1490,20 @@ final class SoftwarePlaybackHost {
         // (`AudioOutput.videoPrerollSatisfied`, #774, #800). A live stream off the FEL path starts at
         // once, and so does a session playing audio only in the background, which feeds the renderer
         // nothing.
+        #if DualLayerDolbyVision
+        // The dual-layer decoder releases a base frame that lost its enhancement layer by presentation
+        // deadline, which needs this clock.
+        if let dual = videoDecoder as? DualLayerVideoDecoder {
+            // The fields are read one after another, not as one atomic snapshot, so a clock that moves
+            // between them (a start, a rate change) can pair a time with a stale flag. The decoder
+            // samples again at its next arrival or sweep, within one sweep delay, which corrects it.
+            dual.setRenderClock({ [weak audioOutput] in
+                guard let audioOutput else { return nil }
+                return .init(seconds: audioOutput.currentTimeSeconds, running: audioOutput.rate > 0,
+                             prerolling: audioOutput.prerollPending, rate: Double(audioOutput.rate))
+            }, frameRate: AetherEngine.detectFrameRate(stream: vStream))
+        }
+        #endif
         let prerollRenderer = renderer
         let prerollLive = isLive
         self.audioOutput?.videoPrerollSatisfied = { [weak self] clock in
@@ -1626,6 +1640,7 @@ final class SoftwarePlaybackHost {
     func play() {
         guard !stopRequested, failure == nil else { return }
         renderer.recoverAfterSuspensionIfNeeded()
+        audioOutput?.setPlaybackEnabled(true)
         // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
         // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
         // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
@@ -1713,7 +1728,45 @@ final class SoftwarePlaybackHost {
     }
 
     var clockRateForTesting: Float? { audioOutput?.rate }
+
+    func installClockOutputForTesting(_ output: AudioOutput, armed: Bool = false) {
+        audioOutput = output
+        clockArmed = armed
+    }
+
+    func finishClockOutputForTesting() {
+        didReachEnd = true
+        isPlaying = false
+    }
     #endif
+
+    /// The latch is synchronous for the feeder; transport reconciliation shares play/pause's actor.
+    func makeClockArmCallback(audioOutput aOut: AudioOutput?) -> @Sendable () -> Void {
+        { [weak self] in
+            guard let self, let aOut else { return }
+            let generation = self.seekGeneration
+            let revision = aOut.clockCommandRevision
+            self.clockArmed = true
+            // A transport change before arming still needs correction, but the feeder must not
+            // restart the clock between pause() stopping it and publishing isPlaying=false.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.audioOutput === aOut,
+                      self.admitsRead(generation: generation) else { return }
+                // EOF may drain its queued audio tail, but an explicit pre-arm pause still wins.
+                guard self.pausedByHost || (!self.didParkClockAtEnd && !self.didReachEnd) else { return }
+                if !self.isPlaying || self.pausedBeforeFirstFrame {
+                    // A pending preroll can own a future start even while the clock reads zero.
+                    aOut.setRate(0, ifRevision: revision)
+                } else if let rate = PausedFirstFrame.rateCorrectionAtArm(
+                    transportPlaying: true, pausedBeforeFirstFrame: false,
+                    synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) {
+                    // A later rebuffer pause, seek or rate command owns the output now. The
+                    // comparison and correction are atomic with those commands inside AudioOutput.
+                    aOut.setRate(rate, ifRevision: revision)
+                }
+            }
+        }
+    }
 
     /// AE#549: re-anchor a master clock that stopped without a pause of ours, where it stands.
     ///
@@ -1734,10 +1787,9 @@ final class SoftwarePlaybackHost {
     }
 
     func pause() {
-        // Un-anchored clock: only latch the pause; the loops park on isPlaying (#107).
-        if clockArmed {
-            audioOutput?.pause()
-        }
+        // Latch even before arming: stale decoder and rebuffer work cannot restart the clock
+        // after this pause while the host publishes its transport state.
+        audioOutput?.setPlaybackEnabled(false)
         pausedByHost = true
         rate = 0
         if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued),
@@ -2230,6 +2282,13 @@ final class SoftwarePlaybackHost {
         inFlightSeekResumeIntent = wasPlaying
         isPlaying = false
 
+        #if DualLayerDolbyVision
+        // The dual-layer decoder's deadline rule reads this clock, and `seekClock` below moves it after
+        // this flush. That is safe only because the demux loop resumes after `noteSeekSettled`, past the
+        // `seekClock` call: until then no post-seek frame reaches the decoder to be judged against the
+        // pre-seek clock. Keep that order if either step moves. (The clock sample is not atomic either,
+        // see where `setRenderClock` is called; a skewed sample corrects itself within one sweep.)
+        #endif
         videoDecoder.flush()
         audioDecoder?.flush()
         // Hold the last frame through the seek (don't blank the display) so the viewer sees the previous
@@ -2319,7 +2378,7 @@ final class SoftwarePlaybackHost {
             // Keep the last observed clock; the engine must not finalize this request as a landing.
             isPlaying = false
             pausedByHost = true
-            audioOutput?.setRate(0)
+            audioOutput?.setPlaybackEnabled(false)
             currentTime = clockSessionZero > 0
                 ? max(0, sourceClockSeconds - clockSessionZero) : sourceClockSeconds
             packetSource?.close()
@@ -2744,16 +2803,7 @@ final class SoftwarePlaybackHost {
         let getClockArmed: @Sendable () -> Bool = { [weak self] in
             self?.clockArmed ?? true
         }
-        let setClockArmed: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            self.clockArmed = true
-            // Sodalite#104 round 4: a pause() or play() between this arm reading its rate and the line
-            // above found no clock to act on.
-            guard let aOut, let rate = PausedFirstFrame.rateCorrectionAtArm(
-                transportPlaying: self.isPlaying, pausedBeforeFirstFrame: self.pausedBeforeFirstFrame,
-                synchronizerRate: aOut.synchronizer.rate, lastRate: self.lastRate) else { return }
-            if rate == 0 { aOut.pause() } else { aOut.setRate(rate) }
-        }
+        let setClockArmed = makeClockArmCallback(audioOutput: aOut)
         let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in
             self?.seekGeneration ?? 0
         }
@@ -4624,6 +4674,7 @@ final class SoftwarePlaybackHost {
                 + (d.sourceExhausted ? "eof=y " : "")
                 + "enq=+\(dEnq) disp=+\(dHanded) "
                 + "lost=\(cadence.lostBeforeLayer)(\(dLost >= 0 ? "+" : "")\(dLost)) "
+                + "skip=\(cadence.arrivalSkipped) "
                 + "dpts=\(spacing) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop)) "
                 + "delay=\(delay >= 0 ? String(format: "%.2f", delay) : "-")"
                 + "(\(dDelay >= 0 ? "+" : "")\(String(format: "%.2f", dDelay))) "

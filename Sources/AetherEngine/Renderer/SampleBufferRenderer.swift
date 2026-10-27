@@ -150,6 +150,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// (HEVC allows at most 16 pictures of it), so it is a timestamp discontinuity: the highest PTS
     /// restarts from this packet and the learned lead is left alone, instead of absorbing the jump
     /// into the lead and switching the look-ahead cap off for the rest of the session.
+    /// The gate is armed only on the dual-layer route (VOD, seekable); a forward jump holds the packet
+    /// until the clock reaches it, when the layer would present it anyway.
     ///
     /// The learned lead is also capped at `maxLearnedLead`: a backward step inside the 16-picture
     /// window that is still a glitch (a 12-frame one, say) would otherwise raise the lead for the whole
@@ -345,6 +347,20 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.lock()
         defer { reorderLock.unlock() }
         return _outOfOrderFramesDropped
+    }
+
+    /// Frames the arrival-order path discarded for sitting below the seek threshold: the pictures of the
+    /// GOP the seek landed in that precede the target. A decision rather than a loss, so it stays out of
+    /// `lostBeforeLayer`, but counted so a seek that discards more than its GOP is visible.
+    /// Guarded by `reorderLock`.
+    private var _arrivalSkippedFramesDropped = 0
+    /// Whether this seek's first skipped frame has been logged. Re-armed whenever the threshold changes
+    /// or is cleared, so the line fires once per seek rather than once per renderer. Guarded by `reorderLock`.
+    private var arrivalSkipLogged = false
+    var arrivalSkippedFramesDropped: Int {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _arrivalSkippedFramesDropped
     }
 
     /// #298: frames refused at the enqueue gate for carrying an unschedulable PTS. Guarded by `reorderLock`.
@@ -583,6 +599,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
         /// timestamps plus failed sample-buffer builds. A gap between the decoder's count and
         /// `handedOver` that this does not account for is a post-seek skip.
         let lostBeforeLayer: Int
+        /// Cumulative frames the arrival-order path discarded below the seek threshold. A decision
+        /// rather than a loss, so it is not part of `lostBeforeLayer`.
+        let arrivalSkipped: Int
         /// Shortest and longest gap between consecutive handed-over timestamps over the interval,
         /// nil when fewer than two frames were handed over. Source axis, seconds.
         let minDeltaSeconds: Double?
@@ -600,6 +619,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         _maxHandedDeltaSeconds = -.infinity
         return Cadence(handedOver: enqueueCount,
                        lostBeforeLayer: _untimedFramesDropped + _sampleBuildFailures + _outOfOrderFramesDropped,
+                       arrivalSkipped: _arrivalSkippedFramesDropped,
                        minDeltaSeconds: minD, maxDeltaSeconds: maxD)
     }
 
@@ -718,6 +738,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // the lowest one to come, so the floor starts here rather than at that frame.
         if arrivalFloor != nil, let time, time.isNumeric {
             arrivalFloor?.reset(start: CMTimeGetSeconds(time))
+            // A seek sets the same threshold again after the landing; only a new target is a new seek.
+            if arrivalSkipBelow != CMTimeGetSeconds(time) { arrivalSkipLogged = false }
             arrivalSkipBelow = CMTimeGetSeconds(time)
         }
     }
@@ -751,7 +773,21 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
         if let threshold = skipUntilPTS {
             if CMTimeCompare(pts, threshold) < 0 {
+                // On the arrival-order path this is the seek's own discard: the count and the once-per-seek
+                // line cover it as they cover the frames `handOverOnArrival` refuses below the threshold.
+                var logFirst = false
+                if arrivalFloor != nil {
+                    _arrivalSkippedFramesDropped += 1
+                    logFirst = !arrivalSkipLogged
+                    arrivalSkipLogged = true
+                }
                 reorderLock.unlock()
+                if logFirst {
+                    EngineLog.emit(
+                        "[Renderer] frame at \(String(format: "%.3f", CMTimeGetSeconds(pts)))s is below the seek threshold "
+                        + "\(String(format: "%.3f", CMTimeGetSeconds(threshold)))s; skipping until the first frame at or past it",
+                        category: .swPlayback)
+                }
                 return
             }
             skipUntilPTS = nil
@@ -809,7 +845,16 @@ final class SampleBufferRenderer: @unchecked Sendable {
     private func handOverOnArrival(pixelBuffer: CVPixelBuffer, pts: CMTime, ptsSeconds: Double,
                                    hdr10PlusData: Data?) {
         if let below = arrivalSkipBelow, ptsSeconds < below {
+            _arrivalSkippedFramesDropped += 1
+            let logFirst = !arrivalSkipLogged
+            arrivalSkipLogged = true
             reorderLock.unlock()
+            if logFirst {
+                EngineLog.emit(
+                    "[Renderer] frame at \(String(format: "%.3f", ptsSeconds))s is below the seek threshold "
+                    + "\(String(format: "%.3f", below))s; skipping until the first frame at or past it",
+                    category: .swPlayback)
+            }
             return
         }
         // #303: the newest timestamp admitted, as on the reorder path.
@@ -882,6 +927,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // The renderer's own flush below also drops the expectation it was given.
         arrivalFloor?.reset()
         arrivalSkipBelow = nil
+        arrivalSkipLogged = false
         // #303: nothing is held any more, so the frontier is not a frontier. Left standing, a
         // backward seek would keep reporting the pre-seek timestamp and read as a cushion of
         // however far the seek travelled.
