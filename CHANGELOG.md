@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`EngineLog.structuredHandler` hands a host each line with its category and level (AE#897, thanks
+  @mschirrmeister).** A log viewer that files lines by subsystem had only the text and guessed the category from the
+  `[Prefix]` convention. The new handler gets the same redacted lines as `handler`, plus the `Category` the line was
+  written under and its `Level` (`.info`, since verbose lines still never reach a host). Additive: `handler` is
+  unchanged.
+
 ### Fixed
 
 - **An audio tap consumer that falls behind is told where it lost audio (AE#864, thanks @qoli).** The tap stream
