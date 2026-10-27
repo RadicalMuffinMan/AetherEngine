@@ -3922,11 +3922,17 @@ public final class AetherEngine: ObservableObject {
     /// unobservable; see `SubtitleDeliveryStatement.EventBudget`.
     var subtitleCueDiagnosticBudget = SubtitleDeliveryStatement.EventBudget()
 
-    /// Trailing retention window for subtitleCues (seconds). Bounds bitmap-cue (PGS/DVB/DVD) memory:
-    /// each cue retains a decoded RGBA CGImage; a 2-hr Blu-ray PGS track emits ~1500-2000 cues.
-    /// 300 s covers normal pause durations and backward-scrub reach that doesn't trigger a restart;
-    /// evicted cues are re-emitted after a producer restart (fresh EmbeddedSubtitleDecoder, empty dedupe set).
+    /// Trailing retention window for subtitleCues (seconds). Evicted cues come back when a backward
+    /// seek re-decodes its window from the packet store. Bitmap cues are bounded by bytes as well,
+    /// see `subtitleCueBitmapByteBudget`.
     let subtitleCueRetentionSeconds: Double = 300
+
+    /// AE#879: ceiling on the decoded RGBA bytes of retained bitmap cues (PGS/DVB/DVD), enforced only
+    /// on cues that ended more than `subtitleCueBitmapFloorSeconds` behind the playhead.
+    nonisolated static let subtitleCueBitmapByteBudget = 64 * 1024 * 1024
+    /// AE#879: history the byte budget never evicts, so a host-side subtitle offset still finds its
+    /// cue without a seek. Well past any delay a host offers (Sodalite: +/-10 s per title).
+    nonisolated static let subtitleCueBitmapFloorSeconds: Double = 60
 
     /// #357: shortest window that can only be FFmpeg's open-ended placeholder, not an authored
     /// duration. A PGS composition carries no end of its own, so the decoder stamps it with
