@@ -159,12 +159,16 @@ final class AudioTapPCMConverter: @unchecked Sendable {
         // Streaming tap: no SRC priming, else each buffer's leading filter fill is withheld
         // and per-call output runs short (latency the tap consumers cannot use anyway).
         converter?.primeMethod = .none
+        // Without this the converter does not mix at all, it maps by channel label: a stereo
+        // track reached the tap as its left channel alone, 2.1 as silence, and 4.0 up to 7.1 as
+        // the centre alone, score and effects gone (measured per channel, #908).
+        converter?.downmix = true
         return converter
     }
 
     /// Whether this converter actually carries signal from `format` to the mono tap format.
-    /// Some layouts have no mixdown matrix (measured: 4ch Quadraphonic and every
-    /// DiscreteInOrder layout) and convert to digital silence WITHOUT reporting an error, which
+    /// Some layouts have no mixdown matrix (measured with `downmix` on: every DiscreteInOrder
+    /// layout) and convert to digital silence WITHOUT reporting an error, which
     /// is indistinguishable from a muted source at the consumer. Rather than hard-coding which
     /// layouts Apple currently mixes (a table that would go stale silently), run one buffer of
     /// full-scale samples through the converter and look at what comes out.

@@ -12,7 +12,8 @@ final class AudioTapPCMConverterTests: XCTestCase {
     /// description; pass nil for the defensive case of a description that carries none.
     private func makeSample(seconds: Double, pts: Double, sampleRate: Double = 44_100,
                             channels: UInt32 = 2,
-                            layoutTag: AudioChannelLayoutTag? = nil) throws -> CMSampleBuffer {
+                            layoutTag: AudioChannelLayoutTag? = nil,
+                            values: [Float]? = nil) throws -> CMSampleBuffer {
         let frames = Int(seconds * sampleRate)
         var asbd = AudioStreamBasicDescription(
             mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
@@ -34,7 +35,8 @@ final class AudioTapPCMConverterTests: XCTestCase {
                                            magicCookieSize: 0, magicCookie: nil, extensions: nil,
                                            formatDescriptionOut: &fmt)
         }
-        let data = [Float](repeating: 0.25, count: frames * Int(channels))
+        let frame = values ?? [Float](repeating: 0.25, count: Int(channels))
+        let data = (0..<frames).flatMap { _ in frame }
         var block: CMBlockBuffer?
         let byteCount = data.count * 4
         CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: byteCount,
@@ -100,6 +102,24 @@ final class AudioTapPCMConverterTests: XCTestCase {
             // A downmix that yields buffers of silence is as useless to the tap consumers as
             // no buffers at all, so assert the signal survived the layout mapping.
             XCTAssertGreaterThan(peak(out), 0.05, "\(channels)ch downmix is silent")
+        }
+    }
+
+    /// A downmix has to hear every channel but the LFE. Equal values on every channel cannot
+    /// tell a mix from a pick, which is how a converter that mapped stereo to its left channel and
+    /// 5.1 to its centre passed the test above (#908); so drive one channel at a time.
+    func testDownmixHearsEveryChannelButTheLFE() throws {
+        for channels: UInt32 in 2...8 {
+            let tag = audioChannelLayoutTag(for: Int32(channels))
+            let lfe: Int? = channels == 3 ? 2 : (channels >= 6 ? 3 : nil)
+            for ch in 0..<Int(channels) where ch != lfe {
+                var values = [Float](repeating: 0, count: Int(channels))
+                values[ch] = 0.5
+                let out = AudioTapPCMConverter().convert(
+                    try makeSample(seconds: 0.5, pts: 4.0, sampleRate: 48_000, channels: channels,
+                                   layoutTag: tag, values: values))
+                XCTAssertGreaterThan(peak(out), 0.05, "\(channels)ch: channel \(ch) missing from the downmix")
+            }
         }
     }
 

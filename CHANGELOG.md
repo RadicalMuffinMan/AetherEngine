@@ -34,6 +34,10 @@ the public-API contract.
 
 ### Fixed
 
+- **The software path's audio tap was never a downmix (AE#908).** AVAudioConverter maps by channel label unless told
+  to mix, so a stereo track reached the tap as its left channel alone, 2.1 as silence, and 4.0 to 7.1 as the centre
+  alone. The tap's converter now mixes every channel but the LFE. The native and remote-HLS paths were unaffected.
+
 - **A retained paused session reapplies background policy after a seek or reload (AE#870 follow-up).**
   Play received during a seek, or remote-HLS autoplay after a reload, could settle directly into
   playing without the background decision owed by a normal resume. The decision now waits for the
