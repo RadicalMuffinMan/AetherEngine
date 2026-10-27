@@ -388,7 +388,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.47.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.48.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -583,6 +583,12 @@ A test rig that only captures stdout / stderr (`devicectl device process launch 
 EngineLog.handler = { print($0) }   // every info-level line, verbatim
 ```
 
+A log viewer that files lines by subsystem takes the same lines with their category instead of parsing the `[Prefix]` in the text:
+
+```swift
+EngineLog.structuredHandler = { line, category, level in viewer.append(line, from: category.rawValue) }
+```
+
 The first line of any session names the FFmpeg that answered, because which one does is decided by your executable's link rather than by the package graph:
 
 ```
@@ -635,10 +641,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.47.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.48.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.47.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.48.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
@@ -683,7 +689,7 @@ These components may be subject to third-party patent licensing. Integrators who
 To enable them, list the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.47.0",
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.48.0",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
 ```
 
