@@ -43,6 +43,25 @@ struct RepairedKeyframeSegmentReachTests {
         #expect(cutter.index(pts: 716_087, isKeyframe: true) == 2)
     }
 
+    @Test("the reach is read off the plan after its short segments are folded")
+    func reachFollowsCollapsedPlan() {
+        // 90 kHz. Keyframes at 8.0 s and 8.11 s make a 0.11 s segment, which folds into the one before.
+        let starts: [Int64] = [0, 360_000, 720_000, 730_000, 1_080_000]
+        let plan = zip(starts, starts.dropFirst() + [1_440_000]).map { start, end in
+            HLSVideoEngine.Segment(startPts: start, endPts: end, startSeconds: Double(start) / 90_000,
+                                   durationSeconds: Double(end - start) / 90_000)
+        }
+        let final = HLSVideoEngine.finalizedPlan(plan, minDurationSeconds: 1, keyframeAdvance: 17_608,
+                                                 keyframes: starts)
+        // The fold keeps the later keyframe as the boundary, so its reach stops short of the one at 8.0 s.
+        #expect(final.plan.map(\.startPts) == [0, 360_000, 730_000, 1_080_000])
+        #expect(final.reach == [17_608, 17_608, 9_999, 17_608])
+        // Read off the unfolded plan instead, 730 000 took 720 000's reach (so the keyframe before it
+        // could open its segment) and 1 080 000 took 730 000's (so its own keyframe could miss it).
+        let unfolded = HLSVideoEngine.keyframeReachTicks(advance: 17_608, keyframes: starts, boundaries: starts)
+        #expect(Array(unfolded[2...3]) == [17_608, 9_999])
+    }
+
     @Test("no repair, no reach")
     func noAdvanceNoReach() {
         #expect(HLSVideoEngine.keyframeReachTicks(advance: 0, keyframes: [0, 1000], boundaries: [0, 1000]).isEmpty)

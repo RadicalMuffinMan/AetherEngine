@@ -90,6 +90,19 @@ extension HLSVideoEngine {
         }
     }
 
+    /// `collapseShortSegments`, then the reach for each boundary of the plan it leaves. The order is
+    /// the point: a pair of keyframes a few pictures apart is what makes a segment that gets folded,
+    /// and reaches read off the unfolded plan sat one boundary off from that fold on (three folds on
+    /// the 23 fps reporting asset). Off by one, a boundary takes the reach of the one before, which
+    /// can let the earlier keyframe of the pair open it, and hands its own to the next boundary,
+    /// whose keyframe can then miss it.
+    static func finalizedPlan(_ plan: [Segment], minDurationSeconds: Double, keyframeAdvance: Int64,
+                              keyframes: [Int64]) -> (plan: [Segment], reach: [Int64]) {
+        let collapsed = collapseShortSegments(plan, minDurationSeconds: minDurationSeconds)
+        return (collapsed, keyframeReachTicks(advance: keyframeAdvance, keyframes: keyframes,
+                                              boundaries: collapsed.map(\.startPts)))
+    }
+
     /// An index failing any witness is routed to the uniform-stride fallback.
     static func keyframeIndexIsTrustworthy(
         keyframes: [Int64],

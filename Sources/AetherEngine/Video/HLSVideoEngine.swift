@@ -863,7 +863,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// How far before its boundary the keyframe each `segmentPlan` entry names may arrive
     /// (`VODSegmentCutter.reachTicks`). Empty unless a #409 repair moves keyframes off the index.
+    /// Set with the final plan by `finalizedPlan`, never off the plan before it is collapsed.
     var planKeyframeReachTicks: [Int64] = []
+    /// `Demuxer.indexedKeyframeAdvanceTicks` of a keyframe-aligned plan, held until the plan is final.
+    var planKeyframeAdvanceTicks: Int64 = 0
 
     /// Guards subsystem refs + `sessionEpoch`. Never held across waits or network I/O so
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
@@ -1460,6 +1463,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let durationSeconds = dem.duration
         var plan: [Segment]
         var keyframeBytePositions: [Int64: Int64] = [:]
+        planKeyframeAdvanceTicks = 0
         if isLiveSession {
             sourceBitrate = dem.bitRate
             self.firstKeyframePts = 0
@@ -1563,9 +1567,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // stamping. Read from the demuxer that produced them, never from the URL or the
                 // host's metadata: on a remux session the delivered container is the one indexed.
                 planBoundaryAxis = PlanBoundaryAxis.forContainer(formatName: dem.containerFormatName)
-                planKeyframeReachTicks = Self.keyframeReachTicks(
-                    advance: dem.indexedKeyframeAdvanceTicks, keyframes: keyframes,
-                    boundaries: plan.map(\.startPts))
+                planKeyframeAdvanceTicks = dem.indexedKeyframeAdvanceTicks
                 let firstKeyframePts = keyframes.sorted().first ?? 0
                 self.firstKeyframePts = firstKeyframePts
                 let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
@@ -1907,7 +1909,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Fold degenerate sub-frame segments (keyframe clusters make buildKeyframeSegmentPlan emit
         // ~40 ms segments the producer cannot cut, wedging the near-EOF resume; the plan and producer
         // share these boundaries, so the merge fixes both at once).
-        plan = Self.collapseShortSegments(plan, minDurationSeconds: Self.minSegmentDurationSeconds)
+        (plan, planKeyframeReachTicks) = Self.finalizedPlan(
+            plan, minDurationSeconds: Self.minSegmentDurationSeconds,
+            keyframeAdvance: planKeyframeAdvanceTicks, keyframes: Array(keyframeBytePositions.keys))
         self.segmentPlan = plan
         if !keyframeBytePositions.isEmpty {
             sourcePeakBitrate = Self.peakSegmentBitrate(plan: plan, keyframeBytePositions: keyframeBytePositions)
