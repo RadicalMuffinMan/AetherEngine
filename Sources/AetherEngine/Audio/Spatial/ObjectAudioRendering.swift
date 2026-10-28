@@ -31,7 +31,8 @@ import Foundation
 public enum ObjectAudioRendering: Equatable, Sendable {
     case off
     /// Render into `layout` and deliver the bed in the form the output route carries: linear PCM,
-    /// unless an AirPlay port is in the route, then APAC. Decided at load (`SpatialBedFormat.forCurrentRoute`).
+    /// unless the route plays over AirPlay, then APAC. Decided at load
+    /// (`SpatialBedFormat.forCurrentRoute`).
     case render(SpatialSpeakerLayout)
     /// Render into `layout`, which should match the speakers the receiver actually drives, and
     /// always deliver it as APAC.
