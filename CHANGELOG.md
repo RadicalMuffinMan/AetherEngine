@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.50.0] - 2026-10-28
+
 ### Added
 
 - **TrueHD Atmos and DTS:X can be delivered as a lossless PCM bed (`ObjectAudioRendering.render` / `.lpcm`).**
@@ -19,8 +23,8 @@ the public-API contract.
   software host as PCM sample buffers. `.render(layout)` chooses per route at load (PCM, or APAC when an AirPlay port
   is in the route, or on macOS an AirPlay default output device), `.lpcm(layout)` and `.apac(layout)`
   force one. Measured on an Apple TV 4K into a Sonos, on an iPhone with AirPods and on a MacBook Air (speakers and
-  AirPods), 7.1.4 and 9.1.6, every channel on its own speaker. `.apac` is
-  unchanged. aetherctl takes `--bed-format apac|lpcm`. See `docs/formats.md`.
+  AirPods), 7.1.4 and 9.1.6, every channel on its own speaker. `.apac` is unchanged. aetherctl takes
+  `--bed-format apac|lpcm`. See `docs/formats.md`.
 
 ## [7.49.0] - 2026-10-27
 
