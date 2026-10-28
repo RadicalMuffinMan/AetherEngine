@@ -588,8 +588,9 @@ public struct LoadOptions: Sendable, Equatable {
     public var audioBridgeMode: AudioBridgeMode
 
     /// TrueHD Atmos and DTS:X delivery (#731). `.off` (default) keeps `audioBridgeMode`'s 7.1 channel
-    /// decode; `.apac(layout)` renders the objects and heights into `layout` and delivers Apple
-    /// Positional Audio, which reaches an Atmos receiver as Dolby MAT with its heights. See
+    /// decode; `.render(layout)` renders the objects and heights into `layout` and delivers the bed as
+    /// 24-bit PCM, or as Apple Positional Audio on an AirPlay route, which reaches an Atmos receiver as
+    /// Dolby MAT with its heights; `.apac(layout)` / `.lpcm(layout)` force one form. See
     /// `ObjectAudioRendering`. Needs the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by
     /// default): without a codec's trait this is a no-op for that codec, which keeps `audioBridgeMode`
     /// (`AetherEngine.OptionalComponent`).

@@ -96,7 +96,7 @@ On Apple platforms the real choice is between AVPlayer, with deep OS integration
 | **Container & codec breadth** | Wide, FFmpeg demux | Wide, FFmpeg demux | Narrow, Apple's set | Wide | Wide |
 | **Hardware decode** | VideoToolbox, dav1d SW fallback | VideoToolbox, FFmpeg SW fallback | VideoToolbox | VideoToolbox plus software | VideoToolbox plus software |
 | **Dolby Vision** | P5, P7 as 8.1 (or opt-in FEL dual-layer), P8.1, P8.4, AV1 P10.x, real display switch | P5, P8 via AVPlayer; their matrix lists P5 HDR display without overheating as paid LGPL | P5 and P8.1 only | Tone-maps, no DV display | Tone-maps, no DV display |
-| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial); TrueHD Atmos and DTS:X rendered to APAC, heights kept (optional components) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
+| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial); TrueHD Atmos and DTS:X rendered into a speaker bed, delivered as lossless PCM (APAC on AirPlay), heights kept (optional components) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
 | **HDR on tvOS** | Native Match Content switch | Native Match Content on AVPlayer path, else Metal tone-map | Native Match Content | Software tone-mapping | Software tone-mapping |
 | **Rendering & UI** | OS-native, you ship SwiftUI | Own Metal renderer, bundled controls | OS-native, you ship UI | Own renderer, bundled controls | Own renderer, bundled OSC |
 | **Apple TV / App Store** | Yes, LGPL plus store exception | Free build GPL, paid LGPL tier for AV1 hardware decode and the full decoder set | Yes | Yes, LGPL | Not practical, GPL, no tvOS |

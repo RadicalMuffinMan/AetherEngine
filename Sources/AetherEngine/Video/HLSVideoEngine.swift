@@ -592,13 +592,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// off the HDMI route has to know that, or it reads the carrier as a downmix.
     public internal(set) var audioIsAtmosStreamCopy = false
 
-    /// The audio is TrueHD Atmos or DTS:X rendered to APAC (`objectAudioRendering`), which on tvOS needs
-    /// `AtmosOutputActivator` beside the player to reach the receiver as Atmos.
-    var audioIsAPAC = false
+    /// The audio is TrueHD Atmos or DTS:X rendered into a speaker bed (`objectAudioRendering`), as APAC or
+    /// PCM, which on tvOS some sinks only show as Atmos with `AtmosOutputActivator` beside the player.
+    var audioIsRenderedBed = false
 
-    /// The APAC track is TrueHD Atmos, not DTS:X: only then does `AtmosOutputActivator` bring the
+    /// The rendered bed is TrueHD Atmos, not DTS:X: only then does `AtmosOutputActivator` bring the
     /// receiver to Dolby Atmos, which a DTS programme is not.
-    var audioAPACIsFromDolbyAtmos = false
+    var audioBedIsFromDolbyAtmos = false
 
     /// The DTS:X decoder confirmed the playing track as DTS:X (#744), whatever FFmpeg's profile label said. The
     /// engine folds it into the published track's `isDTSX`.
@@ -2281,7 +2281,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // true on a source whose stream-copy was rejected and bridged to FLAC; objects do not survive
         // that, hence the `.streamCopy` conjunct. Without it a downgraded session would advertise
         // `CHANNELS="16/JOC"` over a FLAC bed, which is worse than saying nothing.
-        // #731: the APAC bed is muxed behind a 2-channel ALAC stand-in, so its bridge states the count.
+        // #731: the APAC bed is muxed behind a 2-channel ALAC stand-in, so its bridge states the count
+        // (the PCM bed's codecpar carries its own, the bridge states it all the same).
         let servedAudioChannels: Int? = savedAudioConfig.map {
             $0.bridge?.servedChannelCount ?? Int($0.codecpar.pointee.ch_layout.nb_channels)
         }

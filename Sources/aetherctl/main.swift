@@ -67,7 +67,7 @@ func printUsage() {
 
     Usage:
       aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-atmos] <url>
-      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
+      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--fel] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--fast-zap] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
@@ -78,7 +78,7 @@ func printUsage() {
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
-             [--max-concurrent-requests N] [--atmos-bed 7.1.4]
+             [--max-concurrent-requests N] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]]
                      [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext] <url>
                      (full load+play session smoke test; --fel opts into the Profile 7
                       FEL dual-layer route (off by default, as in the engine, and only in
@@ -313,8 +313,9 @@ func printUsage() {
 // MARK: - Object audio
 
 /// `--atmos-bed 7.1.4`: TrueHD Atmos or DTS:X rendered into that bed and delivered as APAC
-/// (`LoadOptions.objectAudioRendering`, #731). Without it the channel bridge plays them.
-private func objectAudioRendering(_ flag: String?) -> ObjectAudioRendering {
+/// (`LoadOptions.objectAudioRendering`, #731), or with `--bed-format lpcm` as 24-bit PCM. Without it
+/// the channel bridge plays them.
+private func objectAudioRendering(_ flag: String?, format: String? = nil) -> ObjectAudioRendering {
     guard let flag else { return .off }
     guard let layout = SpatialSpeakerLayout(rawValue: flag) else {
         print("ERROR: --atmos-bed expects one of \(SpatialSpeakerLayout.allCases.map(\.rawValue)), got '\(flag)'")
@@ -323,7 +324,13 @@ private func objectAudioRendering(_ flag: String?) -> ObjectAudioRendering {
     #if !(TrueHDObjectAudio || DTSXObjectAudio)
     print("[aetherctl] note: --atmos-bed renders nothing without the TrueHDObjectAudio / DTSXObjectAudio traits")
     #endif
-    return .apac(layout)
+    switch format {
+    case nil, "apac": return .apac(layout)
+    case "lpcm": return .lpcm(layout)
+    default:
+        print("ERROR: --bed-format expects apac or lpcm, got '\(format!)'")
+        exit(64)
+    }
 }
 
 // MARK: - URL parsing
@@ -848,7 +855,8 @@ if first == "play" {
     // with a throttled origin to see the startup difference; on a fast source nothing changes.
     let progressiveSegments = takeFlag("--progressive-segments", from: &rest)
     // #731: TrueHD Atmos or DTS:X rendered into a bed as APAC; the 1 Hz line then reports its objects.
-    let playObjectAudio = objectAudioRendering(takeStringFlag("--atmos-bed", from: &rest))
+    let playObjectAudio = objectAudioRendering(
+        takeStringFlag("--atmos-bed", from: &rest), format: takeStringFlag("--bed-format", from: &rest))
     let declaredDuration = takeDoubleFlag("--declared-duration", from: &rest)
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
@@ -1168,7 +1176,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     // being judged by ear.
     let serveAudioDelayMs = takeIntFlag("--audio-delay", from: &rest) ?? 0
     // #731: TrueHD Atmos or DTS:X rendered into a speaker bed and served as APAC (LoadOptions.objectAudioRendering).
-    let serveObjectAudioRendering = objectAudioRendering(takeStringFlag("--atmos-bed", from: &rest))
+    let serveObjectAudioRendering = objectAudioRendering(
+        takeStringFlag("--atmos-bed", from: &rest), format: takeStringFlag("--bed-format", from: &rest))
     rejectStrayFlags(rest, subcommand: first)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")

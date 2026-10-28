@@ -91,9 +91,11 @@ extension SoftwarePlaybackHost {
                                category: .swPlayback)
                 return try pcm()
             }
-        case .apac(let layout):
+        case .apac(let layout), .pcmBed(let layout):
             guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return try pcm() }
-            let producer = await makeAPACProducer(demuxer: dem, stream: stream, streamIndex: streamIndex, layout: layout)
+            let format: SpatialBedFormat = route == .pcmBed(layout) ? .lpcm : .apac
+            let producer = await makeAPACProducer(
+                demuxer: dem, stream: stream, streamIndex: streamIndex, layout: layout, format: format)
             if let settled = try Self.settleAPACProducer(producer, stopped: stopRequested || Task.isCancelled) {
                 return (settled, route)
             }
@@ -165,7 +167,7 @@ extension SoftwarePlaybackHost {
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     private func makeAPACProducer(
         demuxer dem: Demuxer, stream: UnsafeMutablePointer<AVStream>, streamIndex: Int32,
-        layout: SpatialSpeakerLayout
+        layout: SpatialSpeakerLayout, format: SpatialBedFormat
     ) async -> (any SoftwareAudioProducing)? {
         // `nil` after a stop() is as good as any other nil: the caller checks the stop before it
         // touches the stream again. Nothing here reads `stream` once the verdict has been awaited
@@ -204,12 +206,14 @@ extension SoftwarePlaybackHost {
                 return nil
                 #endif
             }
-            let bridge = try SpatialAudioBridge(srcTimeBase: stream.pointee.time_base, layout: layout, decoder: decoder)
+            let bridge = try SpatialAudioBridge(
+                srcTimeBase: stream.pointee.time_base, layout: layout, decoder: decoder, format: format)
             bridge.onDecoderProducedNothing = { stats in
                 EngineLog.emit("[SWHost] ERROR: \(source.name) object decoder produced nothing: \(stats.summary)",
                                category: .swPlayback)
             }
-            EngineLog.emit("[SWHost] audio: \(source.name) rendered into \(layout.rawValue) as APAC for the renderer",
+            EngineLog.emit("[SWHost] audio: \(source.name) rendered into \(layout.rawValue) as "
+                           + "\(format == .lpcm ? "PCM" : "APAC") for the renderer",
                            category: .swPlayback)
             return SoftwareAPACProducer(bridge: bridge, stream: stream)
         } catch {
@@ -223,7 +227,7 @@ extension SoftwarePlaybackHost {
     @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
     private func makeAPACProducer(
         demuxer dem: Demuxer, stream: UnsafeMutablePointer<AVStream>, streamIndex: Int32,
-        layout: SpatialSpeakerLayout
+        layout: SpatialSpeakerLayout, format: SpatialBedFormat
     ) async -> (any SoftwareAudioProducing)? {
         EngineLog.emit("[SWHost] audio: built without an object-audio trait; PCM decode", category: .swPlayback)
         return nil
