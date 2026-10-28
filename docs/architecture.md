@@ -463,12 +463,13 @@ Sources/AetherEngine/
 │   ├── AudioOutput.swift                    SW path: AVSampleBufferAudioRenderer + Synchronizer (master clock)
 │   ├── AudioPlaybackHost.swift              Audio-only path: FFmpeg demux + decode into AVSampleBufferAudioRenderer for codecs off the whitelist
 │   ├── AudioTailPadding.swift               Native path: silence in the delivered codec from where a title's audio ends to where its video does, written into the final segment at end of file, because AVPlayer ends an item when its audio runs out (AE#847)
-│   ├── SoftwareAtmosRoute.swift             SW path: the pure choice of how a track's audio reaches the renderer (PCM decode, compressed E-AC-3 JOC, or TrueHD Atmos / DTS:X as APAC) from codec, stream shape, live and `objectAudioRendering`
+│   ├── SoftwareAtmosRoute.swift             SW path: the pure choice of how a track's audio reaches the renderer (PCM decode, compressed E-AC-3 JOC, or TrueHD Atmos / DTS:X rendered into a bed as APAC or PCM) from codec, stream shape, live and `objectAudioRendering`
 │   ├── SoftwareAudioProducing.swift         SW path: what the host asks of whatever turns an audio packet into renderer input; implemented by `AudioDecoder`, `SoftwareEAC3Passthrough` and `SoftwareAPACProducer`
 │   ├── SoftwareEAC3Passthrough.swift        SW path: E-AC-3 JOC packets enqueued compressed to the audio renderer, with the `dec3` format description built from the stream, so the system's Atmos decoder gets the objects
 │   ├── AtmosDecoderPrimer.swift             Registers the system's Atmos decoders in the process once (creates an AVPlayer), which the renderer needs before it decodes compressed E-AC-3 as Atmos
 │   ├── Spatial/
-│   │   └── SoftwareAPACProducer.swift       SW path: TrueHD Atmos / DTS:X rendered into a speaker bed through `SpatialAudioBridge` and encoded as APAC, the packets handed to the audio renderer as sample buffers
+│   │   ├── SpatialBedOutput.swift           `SpatialBedFormat` (PCM or APAC, and the route rule `.render` uses), the bed buffers and packets, and `PCMBedPacker`, the 24-bit PCM sink beside `APACEncodePipeline`
+│   │   └── SoftwareAPACProducer.swift       SW path: TrueHD Atmos / DTS:X rendered into a speaker bed through `SpatialAudioBridge` as APAC or PCM, the packets handed to the audio renderer as sample buffers
 │   └── Tap/
 │       ├── AudioTapController.swift         Lifecycle owner for one tap: owns the AsyncStream continuation + (native path) the LoopbackAudioReader; one per engine, re-install replaces it (#95)
 │       ├── AudioTapDecoder.swift            FFmpeg decode of tap packets into mono Float32 48 kHz AVAudioPCMBuffers (lazy resampler, own lock discipline)

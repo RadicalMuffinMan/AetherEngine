@@ -1018,7 +1018,7 @@ final class SoftwarePlaybackHost {
         switch route {
         case .pcm: return .decoded
         case .compressedEAC3JOC: return .streamCopy
-        case .apac: return .bridged
+        case .apac, .pcmBed: return .bridged
         }
     }
 

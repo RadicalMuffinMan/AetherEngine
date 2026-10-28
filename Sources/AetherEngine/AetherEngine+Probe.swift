@@ -906,6 +906,8 @@ extension AetherEngine {
         case .compressedEAC3JOC: return "\(codec) Atmos → renderer (compressed)"
         case .apac(let layout):
             return codec.hasPrefix("DTS") ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
+        case .pcmBed(let layout):
+            return codec.hasPrefix("DTS") ? "DTS:X → PCM \(layout.rawValue)" : "\(codec) Atmos → PCM \(layout.rawValue)"
         }
     }
 
