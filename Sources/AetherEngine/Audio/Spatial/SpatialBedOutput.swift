@@ -1,8 +1,10 @@
 import Foundation
 import CoreMedia
 import AudioToolbox
-#if os(iOS) || os(tvOS)
+#if os(iOS) || os(tvOS) || os(visionOS)
 import AVFoundation
+#elseif os(macOS)
+import CoreAudio
 #endif
 import AetherLibavcodec
 import AetherLibavutil
@@ -14,24 +16,47 @@ import AetherLibavutil
 /// `Atmos_9_1_6` layouts reached the receiver as Dolby Atmos with every channel on its own speaker,
 /// over HLS fMP4 (`ipcm`) through AVPlayer and through a sample-buffer renderer with
 /// `AtmosOutputActivator` beside it. On an iPhone with AirPods and spatial audio the same streams
-/// played with every channel in place. Over AirPlay to that Sonos neither PCM nor APAC arrived as
-/// more than stereo; APAC to a HomePod pair has played as Atmos (#834), PCM there is unmeasured.
+/// played with every channel in place, and on a MacBook Air (macOS 27) both through its own speakers
+/// and AirPods. Over AirPlay to that Sonos neither PCM nor APAC arrived as more than stereo; APAC to a
+/// HomePod pair has played as Atmos (#834), PCM there is unmeasured.
 enum SpatialBedFormat: String, Sendable, Equatable {
     /// Apple Positional Audio, lossy, a few Mbit/s.
     case apac
     /// 24-bit linear PCM, the rendered bed bit for bit: 1.15 Mbit/s per channel.
     case lpcm
 
-    /// The form `ObjectAudioRendering.render` takes: PCM unless an AirPlay port is in the current
-    /// route. macOS and visionOS keep APAC, where PCM has not been measured.
+    /// The form `ObjectAudioRendering.render` takes: PCM unless the current route plays over AirPlay
+    /// (an AirPlay port in the session's route, or on macOS an AirPlay default output device).
+    /// visionOS follows iOS without a measurement of its own: same session, same AirPods.
     static func forCurrentRoute() -> SpatialBedFormat {
-        #if os(iOS) || os(tvOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         let ports = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType)
         return forRoute(portTypes: ports.map(\.rawValue))
+        #elseif os(macOS)
+        return defaultOutputIsAirPlay() ? .apac : .lpcm
         #else
         return .apac
         #endif
     }
+
+    #if os(macOS)
+    /// Whether the system's default output device is an AirPlay device, by its CoreAudio transport type.
+    /// Unknown counts as not AirPlay: a device the HAL cannot describe is local.
+    static func defaultOutputIsAirPlay() -> Bool {
+        var device = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != kAudioObjectUnknown else { return false }
+        var transport = UInt32(0)
+        size = UInt32(MemoryLayout<UInt32>.size)
+        address.mSelector = kAudioDevicePropertyTransportType
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr else { return false }
+        return transport == kAudioDeviceTransportTypeAirPlay
+    }
+    #endif
 
     /// Pure half of `forCurrentRoute`, for the tests.
     static func forRoute(portTypes: [String]) -> SpatialBedFormat {
