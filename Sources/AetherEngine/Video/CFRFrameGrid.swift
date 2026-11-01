@@ -85,23 +85,34 @@ struct CFRFrameGrid {
     }
 
     /// A video packet on the output axis: `pts` and `dts` are item-axis (source minus `shift`), in
-    /// the source time base. Nil when the PTS is off the grid, in which case the caller rescales
-    /// the packet as it always did. The DTS takes its slot when it has one and never passes the PTS;
-    /// a duration within one source tick of a frame becomes exactly one frame.
-    func place(pts: Int64, dts: Int64, duration: Int64, shift: Int64) -> (pts: Int64, dts: Int64, duration: Int64)? {
+    /// the source time base. A PTS off the grid keeps its own time (`onGrid` false). The DTS takes its
+    /// slot when it has one and never passes the PTS, for every packet, on or off the grid.
+    ///
+    /// The duration is measured on that same DTS mapping, `outputDts(dts + duration) - outputDts(dts)`,
+    /// because movenc opens each fragment against `last dts + last duration` (`check_pkt`). The
+    /// producer telescopes `duration` to the next packet's DTS, so the end of one packet is exactly the
+    /// start of the next. Replacing a near-frame duration with one frame broke that wherever a DTS sat
+    /// off the grid: on a 24 fps Matroska title a 41 ms step (984 ticks) from a DTS 1.33 ms off its slot
+    /// was written as 1000, the next fragment's first DTS landed 16 ticks before that end, and movenc
+    /// clamped its DTS and dropped its PTS (`pts has no value`), so the keyframe opening the segment was
+    /// shown at its decode time, a visible hitch every few seconds.
+    func place(pts: Int64, dts: Int64, duration: Int64, shift: Int64) -> (pts: Int64, dts: Int64, duration: Int64, onGrid: Bool) {
         let unshift = shift == Int64.min ? 0 : shift
-        guard pts != Int64.min, let gridPts = snap(pts &+ unshift) else { return nil }
         let shiftOut = rescale(unshift)
-        let outPts = gridPts &- shiftOut
-        var outDts = dts
-        if dts != Int64.min {
-            outDts = (snap(dts &+ unshift).map { $0 &- shiftOut } ?? rescale(dts))
-            outDts = min(outDts, outPts)
+        let gridPts = pts == Int64.min ? nil : snap(pts &+ unshift)
+        let outPts = gridPts.map { $0 &- shiftOut } ?? (pts == Int64.min ? pts : rescale(pts))
+        func outputDts(_ value: Int64) -> Int64 {
+            snap(value &+ unshift).map { $0 &- shiftOut } ?? rescale(value)
         }
-        let durationOut = rescale(duration)
-        let oneTick = rescale(1)
-        let outDuration = duration > 0 && abs(durationOut - frameTicks) <= oneTick ? frameTicks : durationOut
-        return (outPts, outDts, outDuration)
+        guard dts != Int64.min else {
+            let durationOut = rescale(duration)
+            let outDuration = duration > 0 && abs(durationOut - frameTicks) <= rescale(1) ? frameTicks : durationOut
+            return (outPts, dts, outDuration, gridPts != nil)
+        }
+        var outDts = outputDts(dts)
+        if outPts != Int64.min { outDts = min(outDts, outPts) }
+        let outDuration = duration > 0 ? max(0, outputDts(dts &+ duration) &- outDts) : rescale(duration)
+        return (outPts, outDts, outDuration, gridPts != nil)
     }
 
     private static func roundedQuotient(_ n: Int64, _ d: Int64) -> Int64 {
