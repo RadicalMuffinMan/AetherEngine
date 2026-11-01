@@ -5007,7 +5007,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             packet.pointee.pts = gridded.pts
             packet.pointee.dts = gridded.dts
             packet.pointee.duration = gridded.duration
-            griddedVideoPackets += 1
+            if gridded.onGrid { griddedVideoPackets += 1 } else { offGridVideoPackets += 1 }
         } else if frameGrid != nil {
             offGridVideoPackets += 1
         }

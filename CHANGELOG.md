@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **24 fps Matroska no longer hitches at segment starts on the native route (AE#886 follow-up).**
+  If a sample's DTS sat off the grid, the frame grid still wrote its duration as exactly one frame.
+  The end of one fragment then missed the first DTS of the next by up to one source tick.
+  movenc clamped that DTS and dropped the keyframe's PTS (`Packet duration: -16 ... out of range`).
+  The keyframe that opens the segment was shown at its decode time.
+  On an Apple TV at 24 Hz, this was a visible hitch every few seconds.
+  Durations now use the same DTS mapping as the timestamps, so each fragment ends where the next one starts.
 
 ## [7.50.0] - 2026-10-28
 

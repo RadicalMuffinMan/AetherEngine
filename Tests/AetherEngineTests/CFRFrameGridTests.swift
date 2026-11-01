@@ -83,24 +83,59 @@ struct CFRFrameGridTests {
     @Test("A packet keeps reorder order, its DTS never passes its PTS, and the shift moves both")
     func placePacket() throws {
         let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
-        let b = try #require(grid.place(pts: 125, dts: 83, duration: 42, shift: 0))
+        let b = grid.place(pts: 125, dts: 83, duration: 42, shift: 0)
         #expect(b.pts == 3003 && b.dts == 2002 && b.duration == 1001)
         // DTS repaired off the grid (lastValidDts + 1) stays where the rescale puts it.
-        let head = try #require(grid.place(pts: 42, dts: 2, duration: 41, shift: 0))
+        let head = grid.place(pts: 42, dts: 2, duration: 41, shift: 0)
         #expect(head.pts == 1001 && head.dts == 48)
         // A DTS that rounds onto the PTS slot or past it is held at the PTS.
-        let flat = try #require(grid.place(pts: 42, dts: 43, duration: 42, shift: 0))
+        let flat = grid.place(pts: 42, dts: 43, duration: 42, shift: 0)
         #expect(flat.dts <= flat.pts)
         // Item axis = source - shift; the grid is decided on the source axis.
-        let shifted = try #require(grid.place(pts: 125 - 1400, dts: 83 - 1400, duration: 42, shift: 1400))
+        let shifted = grid.place(pts: 125 - 1400, dts: 83 - 1400, duration: 42, shift: 1400)
         #expect(shifted.pts == 3003 - 1400 * 24 && shifted.dts == 2002 - 1400 * 24)
-        #expect(grid.place(pts: 20, dts: 20, duration: 42, shift: 0) == nil)
+        let off = grid.place(pts: 20, dts: 20, duration: 42, shift: 0)
+        #expect(!off.onGrid && off.pts == 20 * 24 && off.dts == 20 * 24)
     }
 
-    @Test("A duration that is not one frame is rescaled, not replaced")
-    func durationKeptWhenNotAFrame() throws {
+    @Test("A duration spans to the next DTS on the same mapping")
+    func durationFollowsTheDtsMapping() throws {
         let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24000, den: 1001), startPts: 0))
-        #expect(grid.place(pts: 42, dts: 42, duration: 84, shift: 0)?.duration == Int64(84 * 24))
-        #expect(grid.place(pts: 42, dts: 42, duration: 0, shift: 0)?.duration == 0)
+        #expect(grid.place(pts: 42, dts: 42, duration: 84, shift: 0).duration == 2002)
+        #expect(grid.place(pts: 42, dts: 42, duration: 0, shift: 0).duration == 0)
+    }
+
+    /// Device log 2026-10-29, Apple TV at 24 Hz, 24.000 fps H.264 Matroska: movenc logged
+    /// `Packet duration: -16 / dts: 27710016` and `pts has no value` at most segment starts.
+    @Test("Telescoped durations end exactly where the next packet starts (#886 seam)")
+    func fragmentSeamStaysContiguous() throws {
+        let grid = try #require(CFRFrameGrid.make(sourceTimeBase: ms, frameRate: AVRational(num: 24, den: 1), startPts: 0))
+        // Decode order from that log: a DTS 1.33 ms off its slot, then a keyframe whose PTS is off the grid.
+        let packets: [(pts: Int64, dts: Int64)] = [
+            (1_154_625, 1_154_500), (1_154_708, 1_154_543), (1_154_668, 1_154_584), (1_154_750, 1_154_626),
+        ]
+        var placed: [(pts: Int64, dts: Int64, duration: Int64, onGrid: Bool)] = []
+        for (i, packet) in packets.enumerated() {
+            let duration = i + 1 < packets.count ? packets[i + 1].dts - packet.dts : 42
+            placed.append(grid.place(pts: packet.pts, dts: packet.dts, duration: duration, shift: 0))
+        }
+        for i in 0..<(placed.count - 1) {
+            #expect(placed[i].dts + placed[i].duration == placed[i + 1].dts,
+                    "packet \(i) ends at \(placed[i].dts + placed[i].duration), packet \(i + 1) starts at \(placed[i + 1].dts)")
+        }
+        #expect(!placed[2].onGrid)
+
+        // Every millisecond offset a 24 fps title can carry, on and off the grid, in B-frame decode order.
+        for jitter: Int64 in 0...2 {
+            var last: (dts: Int64, duration: Int64)?
+            for n: Int64 in 0..<480 {
+                let pts = matroskaPts(n + 2, rate: 24) + (n % 3 == 1 ? jitter : 0)
+                let dts = matroskaPts(n, rate: 24) + (n % 5 == 2 ? jitter : 0)
+                let next = matroskaPts(n + 1, rate: 24) + ((n + 1) % 5 == 2 ? jitter : 0)
+                let out = grid.place(pts: pts, dts: dts, duration: next - dts, shift: 0)
+                if let last { #expect(last.dts + last.duration == out.dts, "jitter \(jitter) frame \(n)") }
+                last = (out.dts, out.duration)
+            }
+        }
     }
 }
