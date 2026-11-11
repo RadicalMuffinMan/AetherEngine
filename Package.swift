@@ -103,6 +103,8 @@ let package = Package(
                 .copy("Resources/silent-atmos.mp4"),
                 .copy("Resources/PrivacyInfo.xcprivacy"),
             ],
+            // Xcode builds a package without its traits, so the curve fold is defined here.
+            swiftSettings: [.define("DolbyVisionFelCurves")],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AVKit"),
